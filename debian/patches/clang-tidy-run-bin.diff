@@ -1,0 +1,19 @@
+Index: llvm-toolchain-snapshot_17~++20230523093327+96a003b9bf79/clang-tools-extra/clang-tidy/tool/run-clang-tidy.py
+===================================================================
+--- llvm-toolchain-snapshot_17~++20230523093327+96a003b9bf79.orig/clang-tools-extra/clang-tidy/tool/run-clang-tidy.py
++++ llvm-toolchain-snapshot_17~++20230523093327+96a003b9bf79/clang-tools-extra/clang-tidy/tool/run-clang-tidy.py
+@@ -256,10 +256,13 @@ def main():
+         help="allow alpha checkers from " "clang-analyzer.",
+     )
+     parser.add_argument(
+-        "-clang-tidy-binary", metavar="PATH", help="path to clang-tidy binary"
++        "-clang-tidy-binary", metavar="PATH",
++        default='clang-tidy-17',
++        help="path to clang-tidy binary"
+     )
+     parser.add_argument(
+         "-clang-apply-replacements-binary",
++        default='clang-apply-replacements-17',
+         metavar="PATH",
+         help="path to clang-apply-replacements binary",
+     )

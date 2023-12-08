@@ -1,0 +1,21 @@
+Test-Command: bash -v ./debian/qualify-clang.sh
+Depends: @, cmake, make, g++, file, dpkg-dev
+# Comment the dbgsym package because of bug #917528
+# dbgsym packages not being available in testing
+# clang-17-dbgsym, libclang1-17-dbgsym
+Restrictions: allow-stderr
+Architecture: amd64 arm64 i386
+
+Tests: integration-test-suite-test
+Depends: @, cmake, make, g++, libstdc++-13-dev
+Restrictions: allow-stderr
+Architecture: amd64 arm64
+
+Tests: cmake-test
+Depends: gcc, build-essential, cmake, llvm-17-dev
+
+Test-Command: python3 -c "import lldb; print(lldb.__file__); print(lldb)"
+Depends: python3-lldb-17
+
+Test-Command: python3 -c "import clang; print(clang.__file__); print(clang)"
+Depends: python3-clang-17
