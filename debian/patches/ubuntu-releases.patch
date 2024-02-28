@@ -1,0 +1,38 @@
+Description: Update the list of Ubuntu release names
+Forwarded: no
+Author: Graham Inggs <ginggs@debian.org>
+Last-Update: 2023-04-29
+
+Index: llvm-toolchain-17-17.0.3/clang/include/clang/Driver/Distro.h
+===================================================================
+--- llvm-toolchain-17-17.0.3.orig/clang/include/clang/Driver/Distro.h
++++ llvm-toolchain-17-17.0.3/clang/include/clang/Driver/Distro.h
+@@ -78,6 +78,7 @@
+     UbuntuKinetic,
+     UbuntuLunar,
+     UbuntuMantic,
++    UbuntuNoble,
+     UnknownDistro
+   };
+ 
+@@ -129,7 +130,7 @@
+   }
+ 
+   bool IsUbuntu() const {
+-    return DistroVal >= UbuntuHardy && DistroVal <= UbuntuMantic;
++    return DistroVal >= UbuntuHardy && DistroVal <= UbuntuNoble;
+   }
+ 
+   bool IsAlpineLinux() const { return DistroVal == AlpineLinux; }
+Index: llvm-toolchain-17-17.0.3/clang/lib/Driver/Distro.cpp
+===================================================================
+--- llvm-toolchain-17-17.0.3.orig/clang/lib/Driver/Distro.cpp
++++ llvm-toolchain-17-17.0.3/clang/lib/Driver/Distro.cpp
+@@ -94,6 +94,7 @@
+                     .Case("kinetic", Distro::UbuntuKinetic)
+                     .Case("lunar", Distro::UbuntuLunar)
+                     .Case("mantic", Distro::UbuntuMantic)
++                    .Case("noble", Distro::UbuntuNoble)
+                     .Default(Distro::UnknownDistro);
+   return Version;
+ }

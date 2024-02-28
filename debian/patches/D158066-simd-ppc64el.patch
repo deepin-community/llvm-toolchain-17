@@ -1,0 +1,355 @@
+Description: Fix SIMD compatibility headers on ppc64el
+Origin/Author: https://reviews.llvm.org/D158066
+Bug-Debian: https://bugs.debian.org/1049362
+
+diff --git a/clang/include/clang/Basic/BuiltinsPPC.def b/clang/include/clang/Basic/BuiltinsPPC.def
+--- a/clang/include/clang/Basic/BuiltinsPPC.def
++++ b/clang/include/clang/Basic/BuiltinsPPC.def
+@@ -151,8 +151,10 @@
+ TARGET_BUILTIN(__builtin_ppc_extract_sig, "ULLid", "", "power9-vector")
+ BUILTIN(__builtin_ppc_mtfsb0, "vUIi", "")
+ BUILTIN(__builtin_ppc_mtfsb1, "vUIi", "")
++BUILTIN(__builtin_ppc_mffs, "d", "")
+ BUILTIN(__builtin_ppc_mtfsf, "vUIiUi", "")
+ BUILTIN(__builtin_ppc_mtfsfi, "vUIiUIi", "")
++BUILTIN(__builtin_ppc_set_fpscr_rn, "di", "")
+ TARGET_BUILTIN(__builtin_ppc_insert_exp, "ddULLi", "", "power9-vector")
+ BUILTIN(__builtin_ppc_fmsub, "dddd", "")
+ BUILTIN(__builtin_ppc_fmsubs, "ffff", "")
+diff --git a/clang/lib/Basic/Targets/PPC.cpp b/clang/lib/Basic/Targets/PPC.cpp
+--- a/clang/lib/Basic/Targets/PPC.cpp
++++ b/clang/lib/Basic/Targets/PPC.cpp
+@@ -262,6 +262,10 @@
+   Builder.defineMacro("__builtin_minfe", "__builtin_ppc_minfe");
+   Builder.defineMacro("__builtin_minfl", "__builtin_ppc_minfl");
+   Builder.defineMacro("__builtin_minfs", "__builtin_ppc_minfs");
++  Builder.defineMacro("__builtin_mffs", "__builtin_ppc_mffs");
++  Builder.defineMacro("__builtin_mffsl", "__builtin_ppc_mffsl");
++  Builder.defineMacro("__builtin_mtfsf", "__builtin_ppc_mtfsf");
++  Builder.defineMacro("__builtin_set_fpscr_rn", "__builtin_ppc_set_fpscr_rn");
+ }
+ 
+ /// PPCTargetInfo::getTargetDefines - Return a set of the PowerPC-specific
+diff --git a/clang/lib/CodeGen/CGBuiltin.cpp b/clang/lib/CodeGen/CGBuiltin.cpp
+--- a/clang/lib/CodeGen/CGBuiltin.cpp
++++ b/clang/lib/CodeGen/CGBuiltin.cpp
+@@ -17062,6 +17062,11 @@
+     Value *Op1 = EmitScalarExpr(E->getArg(1));
+     return Builder.CreateFDiv(Op0, Op1, "swdiv");
+   }
++  case PPC::BI__builtin_ppc_set_fpscr_rn:
++    return Builder.CreateCall(CGM.getIntrinsic(Intrinsic::ppc_setrnd),
++                              {EmitScalarExpr(E->getArg(0))});
++  case PPC::BI__builtin_ppc_mffs:
++    return Builder.CreateCall(CGM.getIntrinsic(Intrinsic::ppc_readflm));
+   }
+ }
+ 
+diff --git a/clang/lib/Headers/ppc_wrappers/smmintrin.h b/clang/lib/Headers/ppc_wrappers/smmintrin.h
+--- a/clang/lib/Headers/ppc_wrappers/smmintrin.h
++++ b/clang/lib/Headers/ppc_wrappers/smmintrin.h
+@@ -14,7 +14,7 @@
+ 
+ #ifndef NO_WARN_X86_INTRINSICS
+ /* This header is distributed to simplify porting x86_64 code that
+-   makes explicit use of Intel intrinsics to powerp64/powerpc64le.
++   makes explicit use of Intel intrinsics to powerpc64/powerpc64le.
+ 
+    It is the user's responsibility to determine if the results are
+    acceptable and make additional changes as necessary.
+@@ -68,10 +68,10 @@
+     __asm__("mffsce %0" : "=f"(__fpscr_save.__fr));
+     __enables_save.__fpscr = __fpscr_save.__fpscr & 0xf8;
+ #else
+-    __fpscr_save.__fr = __builtin_mffs();
++    __fpscr_save.__fr = __builtin_ppc_mffs();
+     __enables_save.__fpscr = __fpscr_save.__fpscr & 0xf8;
+     __fpscr_save.__fpscr &= ~0xf8;
+-    __builtin_mtfsf(0b00000011, __fpscr_save.__fr);
++    __builtin_ppc_mtfsf(0b00000011, __fpscr_save.__fr);
+ #endif
+     /* Insert an artificial "read/write" reference to the variable
+        read below, to ensure the compiler does not schedule
+@@ -83,10 +83,15 @@
+ 
+   switch (__rounding) {
+   case _MM_FROUND_TO_NEAREST_INT:
+-    __fpscr_save.__fr = __builtin_mffsl();
++#ifdef _ARCH_PWR9
++    __fpscr_save.__fr = __builtin_ppc_mffsl();
++#else
++    __fpscr_save.__fr = __builtin_ppc_mffs();
++    __fpscr_save.__fpscr &= 0x70007f0ffL;
++#endif
+     __attribute__((fallthrough));
+   case _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC:
+-    __builtin_set_fpscr_rn(0b00);
++    __builtin_ppc_set_fpscr_rn(0b00);
+     /* Insert an artificial "read/write" reference to the variable
+        read below, to ensure the compiler does not schedule
+        a read/use of the variable before the FPSCR is modified, above.
+@@ -102,7 +107,7 @@
+        This can be removed if and when GCC PR102783 is fixed.
+      */
+     __asm__("" : : "wa"(__r));
+-    __builtin_set_fpscr_rn(__fpscr_save.__fpscr);
++    __builtin_ppc_set_fpscr_rn(__fpscr_save.__fpscr);
+     break;
+   case _MM_FROUND_TO_NEG_INF:
+   case _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC:
+@@ -128,9 +133,14 @@
+      */
+     __asm__("" : : "wa"(__r));
+     /* Restore enabled exceptions.  */
+-    __fpscr_save.__fr = __builtin_mffsl();
++#ifdef _ARCH_PWR9
++    __fpscr_save.__fr = __builtin_ppc_mffsl();
++#else
++    __fpscr_save.__fr = __builtin_ppc_mffs();
++    __fpscr_save.__fpscr &= 0x70007f0ffL;
++#endif
+     __fpscr_save.__fpscr |= __enables_save.__fpscr;
+-    __builtin_mtfsf(0b00000011, __fpscr_save.__fr);
++    __builtin_ppc_mtfsf(0b00000011, __fpscr_save.__fr);
+   }
+   return (__m128d)__r;
+ }
+@@ -159,10 +169,10 @@
+     __asm__("mffsce %0" : "=f"(__fpscr_save.__fr));
+     __enables_save.__fpscr = __fpscr_save.__fpscr & 0xf8;
+ #else
+-    __fpscr_save.__fr = __builtin_mffs();
++    __fpscr_save.__fr = __builtin_ppc_mffs();
+     __enables_save.__fpscr = __fpscr_save.__fpscr & 0xf8;
+     __fpscr_save.__fpscr &= ~0xf8;
+-    __builtin_mtfsf(0b00000011, __fpscr_save.__fr);
++    __builtin_ppc_mtfsf(0b00000011, __fpscr_save.__fr);
+ #endif
+     /* Insert an artificial "read/write" reference to the variable
+        read below, to ensure the compiler does not schedule
+@@ -174,10 +184,15 @@
+ 
+   switch (__rounding) {
+   case _MM_FROUND_TO_NEAREST_INT:
+-    __fpscr_save.__fr = __builtin_mffsl();
++#ifdef _ARCH_PWR9
++    __fpscr_save.__fr = __builtin_ppc_mffsl();
++#else
++    __fpscr_save.__fr = __builtin_ppc_mffs();
++    __fpscr_save.__fpscr &= 0x70007f0ffL;
++#endif
+     __attribute__((fallthrough));
+   case _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC:
+-    __builtin_set_fpscr_rn(0b00);
++    __builtin_ppc_set_fpscr_rn(0b00);
+     /* Insert an artificial "read/write" reference to the variable
+        read below, to ensure the compiler does not schedule
+        a read/use of the variable before the FPSCR is modified, above.
+@@ -193,7 +208,7 @@
+        This can be removed if and when GCC PR102783 is fixed.
+      */
+     __asm__("" : : "wa"(__r));
+-    __builtin_set_fpscr_rn(__fpscr_save.__fpscr);
++    __builtin_ppc_set_fpscr_rn(__fpscr_save.__fpscr);
+     break;
+   case _MM_FROUND_TO_NEG_INF:
+   case _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC:
+@@ -219,9 +234,14 @@
+      */
+     __asm__("" : : "wa"(__r));
+     /* Restore enabled exceptions.  */
+-    __fpscr_save.__fr = __builtin_mffsl();
++#ifdef _ARCH_PWR9
++    __fpscr_save.__fr = __builtin_ppc_mffsl();
++#else
++    __fpscr_save.__fr = __builtin_ppc_mffs();
++    __fpscr_save.__fpscr &= 0x70007f0ffL;
++#endif
+     __fpscr_save.__fpscr |= __enables_save.__fpscr;
+-    __builtin_mtfsf(0b00000011, __fpscr_save.__fr);
++    __builtin_ppc_mtfsf(0b00000011, __fpscr_save.__fr);
+   }
+   return (__m128)__r;
+ }
+diff --git a/clang/test/CodeGen/PowerPC/builtins-ppc.c b/clang/test/CodeGen/PowerPC/builtins-ppc.c
+--- a/clang/test/CodeGen/PowerPC/builtins-ppc.c
++++ b/clang/test/CodeGen/PowerPC/builtins-ppc.c
+@@ -1,5 +1,8 @@
+ // REQUIRES: powerpc-registered-target
+-// RUN: %clang_cc1 -triple powerpc-unknown-unknown -emit-llvm %s -o - | FileCheck %s
++// RUN: %clang_cc1 -triple powerpc-unknown-unknown -emit-llvm %s -o - \
++// RUN:   | FileCheck %s
++// RUN: %clang_cc1 -triple powerpc-unknown-unknown -emit-llvm %s -o - \
++// RUN:   -target-cpu pwr9 | FileCheck %s --check-prefixes=P9,CHECK
+ 
+ void test_eh_return_data_regno()
+ {
+@@ -26,6 +29,9 @@
+ 
+   // CHECK: call double @llvm.ppc.setrnd(i32 %2)
+   res = __builtin_setrnd(x);
++
++  // CHECK: call double @llvm.ppc.setrnd(i32 %4)
++  res = __builtin_ppc_set_fpscr_rn(x);
+ }
+ 
+ void test_builtin_ppc_flm() {
+@@ -33,7 +39,10 @@
+   // CHECK: call double @llvm.ppc.readflm()
+   res = __builtin_readflm();
+ 
+-  // CHECK: call double @llvm.ppc.setflm(double %1)
++  // CHECK: call double @llvm.ppc.readflm()
++  res = __builtin_ppc_mffs();
++
++  // CHECK: call double @llvm.ppc.setflm(double %2)
+   res = __builtin_setflm(res);
+ }
+ 
+diff --git a/clang/test/CodeGen/PowerPC/ppc-emmintrin.c b/clang/test/CodeGen/PowerPC/ppc-emmintrin.c
+--- a/clang/test/CodeGen/PowerPC/ppc-emmintrin.c
++++ b/clang/test/CodeGen/PowerPC/ppc-emmintrin.c
+@@ -8,6 +8,11 @@
+ // RUN: %clang -S -emit-llvm -target powerpc64le-unknown-linux-gnu -mcpu=pwr10 -ffreestanding -DNO_WARN_X86_INTRINSICS %s \
+ // RUN:   -ffp-contract=off -fno-discard-value-names -mllvm -disable-llvm-optzns -o - | llvm-cxxfilt -n | FileCheck %s --check-prefixes=CHECK-P10
+ 
++// RUN: %clang -x c++ -S -emit-llvm -target powerpc64le-unknown-linux-gnu -mcpu=pwr8 -ffreestanding -DNO_WARN_X86_INTRINSICS %s \
++// RUN:   -ffp-contract=off -fno-discard-value-names -mllvm -disable-llvm-optzns -fsyntax-only
++// RUN: %clang -x c++ -S -emit-llvm -target powerpc64le-unknown-linux-gnu -mcpu=pwr10 -ffreestanding -DNO_WARN_X86_INTRINSICS %s \
++// RUN:   -ffp-contract=off -fno-discard-value-names -mllvm -disable-llvm-optzns -fsyntax-only
++
+ // RUN: %clang -S -emit-llvm -target powerpc64-ibm-aix -mcpu=pwr8 -ffreestanding -DNO_WARN_X86_INTRINSICS %s \
+ // RUN:   -ffp-contract=off -fno-discard-value-names -mllvm -disable-llvm-optzns -o - | llvm-cxxfilt -n | FileCheck %s --check-prefixes=CHECK,CHECK-BE
+ // RUN: %clang -S -emit-llvm -target powerpc64-ibm-aix -mcpu=pwr10 -ffreestanding -DNO_WARN_X86_INTRINSICS %s \
+diff --git a/clang/test/CodeGen/PowerPC/ppc-mmintrin.c b/clang/test/CodeGen/PowerPC/ppc-mmintrin.c
+--- a/clang/test/CodeGen/PowerPC/ppc-mmintrin.c
++++ b/clang/test/CodeGen/PowerPC/ppc-mmintrin.c
+@@ -9,6 +9,11 @@
+ // RUN: %clang -S -emit-llvm -target powerpc64le-unknown-linux-gnu -mcpu=pwr9 -DNO_WARN_X86_INTRINSICS %s \
+ // RUN:   -fno-discard-value-names -mllvm -disable-llvm-optzns -o - | llvm-cxxfilt -n| FileCheck %s --check-prefixes=CHECK-P9,CHECK,CHECK-LE
+ 
++// RUN: %clang -x c++ -S -emit-llvm -target powerpc64le-unknown-linux-gnu -mcpu=pwr8 -DNO_WARN_X86_INTRINSICS %s \
++// RUN:   -fno-discard-value-names -mllvm -disable-llvm-optzns -fsyntax-only
++// RUN: %clang -x c++ -S -emit-llvm -target powerpc64le-unknown-linux-gnu -mcpu=pwr9 -DNO_WARN_X86_INTRINSICS %s \
++// RUN:   -fno-discard-value-names -mllvm -disable-llvm-optzns -fsyntax-only
++
+ // RUN: %clang -S -emit-llvm -target powerpc64-unknown-freebsd13.0 -mcpu=pwr8 -DNO_WARN_X86_INTRINSICS %s \
+ // RUN:   -fno-discard-value-names -mllvm -disable-llvm-optzns -o - | llvm-cxxfilt -n | FileCheck %s --check-prefixes=CHECK-P8,CHECK,CHECK-BE
+ // RUN: %clang -S -emit-llvm -target powerpc64le-unknown-freebsd13.0 -mcpu=pwr8 -DNO_WARN_X86_INTRINSICS %s \
+diff --git a/clang/test/CodeGen/PowerPC/ppc-pmmintrin.c b/clang/test/CodeGen/PowerPC/ppc-pmmintrin.c
+--- a/clang/test/CodeGen/PowerPC/ppc-pmmintrin.c
++++ b/clang/test/CodeGen/PowerPC/ppc-pmmintrin.c
+@@ -13,6 +13,9 @@
+ // RUN: %clang -S -emit-llvm -target powerpc64-ibm-aix -mcpu=pwr8 -DNO_MM_MALLOC -ffreestanding -DNO_WARN_X86_INTRINSICS %s \
+ // RUN:   -fno-discard-value-names -mllvm -disable-llvm-optzns -o - | llvm-cxxfilt -n | FileCheck %s
+ 
++// RUN: %clang -x c++ -S -emit-llvm -target powerpc64le-gnu-linux -mcpu=pwr8 -DNO_MM_MALLOC -ffreestanding -DNO_WARN_X86_INTRINSICS %s \
++// RUN:   -fno-discard-value-names -mllvm -disable-llvm-optzns -fsyntax-only
++
+ #include <pmmintrin.h>
+ 
+ __m128d resd, md1, md2;
+diff --git a/clang/test/CodeGen/PowerPC/ppc-smmintrin.c b/clang/test/CodeGen/PowerPC/ppc-smmintrin.c
+--- a/clang/test/CodeGen/PowerPC/ppc-smmintrin.c
++++ b/clang/test/CodeGen/PowerPC/ppc-smmintrin.c
+@@ -15,6 +15,11 @@
+ // RUN: %clang -S -emit-llvm -target powerpc64-unknown-linux-gnu -mcpu=pwr10 -ffreestanding -DNO_WARN_X86_INTRINSICS %s \
+ // RUN:   -fno-discard-value-names -mllvm -disable-llvm-optzns -o - | llvm-cxxfilt -n | FileCheck %s --check-prefix=P10
+ 
++// RUN: %clang -x c++ -S -emit-llvm -target powerpc64le-unknown-linux-gnu -mcpu=pwr8 -ffreestanding -DNO_WARN_X86_INTRINSICS %s \
++// RUN:   -fno-discard-value-names -mllvm -disable-llvm-optzns -fsyntax-only
++// RUN: %clang -x c++ -S -emit-llvm -target powerpc64le-unknown-linux-gnu -mcpu=pwr10 -ffreestanding -DNO_WARN_X86_INTRINSICS %s \
++// RUN:   -fno-discard-value-names -mllvm -disable-llvm-optzns -fsyntax-only
++
+ // RUN: %clang -S -emit-llvm -target powerpc64le-unknown-freebsd13.0 -mcpu=pwr8 -ffreestanding -DNO_WARN_X86_INTRINSICS %s \
+ // RUN:   -fno-discard-value-names -mllvm -disable-llvm-optzns -o - | llvm-cxxfilt -n | FileCheck %s
+ // RUN: %clang -S -emit-llvm -target powerpc64-unknown-freebsd13.0 -mcpu=pwr8 -ffreestanding -DNO_WARN_X86_INTRINSICS %s \
+@@ -239,44 +244,48 @@
+ // CHECK-LABEL: @test_round
+ 
+ // CHECK-LABEL: define available_externally <4 x float> @_mm_round_ps(<4 x float> noundef %{{[0-9a-zA-Z_.]+}}, i32 noundef signext %{{[0-9a-zA-Z_.]+}})
+-// CHECK: call signext i32 @__builtin_mffs()
+-// CHECK: call signext i32 @__builtin_mtfsf(i32 noundef signext 3, double noundef %{{[0-9a-zA-Z_.]+}})
++// CHECK: call double @llvm.ppc.readflm()
++// CHECK: call void @llvm.ppc.mtfsf(i32 3, double %{{[0-9a-zA-Z_.]+}})
+ // CHECK: %{{[0-9a-zA-Z_.]+}} = call <4 x float> asm "", "=^wa,0"
+-// CHECK: call signext i32 @__builtin_mffsl()
+-// CHECK: call signext i32 @__builtin_set_fpscr_rn(i32 noundef signext 0)
++// CHECK: call double @llvm.ppc.readflm()
++// P10: call double @llvm.ppc.mffsl()
++// CHECK: call double @llvm.ppc.setrnd(i32 0)
+ // CHECK: %{{[0-9a-zA-Z_.]+}} = call <4 x float> asm "", "=^wa,0"
+ // CHECK: call <4 x float> @vec_rint(float vector[4])
+ // CHECK: call void asm sideeffect "", "^wa"
+-// CHECK: call signext i32 @__builtin_set_fpscr_rn(i64 noundef %{{[0-9a-zA-Z_.]+}})
++// CHECK: call double @llvm.ppc.setrnd(i32 %{{[0-9a-zA-Z_.]+}})
+ // CHECK: call <4 x float> @vec_floor(float vector[4])
+ // CHECK: call <4 x float> @vec_ceil(float vector[4])
+ // CHECK: call <4 x float> @vec_trunc(float vector[4])
+ // CHECK: call <4 x float> @vec_rint(float vector[4])
+ // CHECK: call void asm sideeffect "", "^wa"
+-// CHECK: call signext i32 @__builtin_mffsl()
+-// CHECK: call signext i32 @__builtin_mtfsf(i32 noundef signext 3, double noundef %{{[0-9a-zA-Z_.]+}})
++// CHECK: call double @llvm.ppc.readflm()
++// P10: call double @llvm.ppc.mffsl()
++// CHECK: call void @llvm.ppc.mtfsf(i32 3, double %{{[0-9a-zA-Z_.]+}})
+ 
+ // CHECK-LABEL: define available_externally <4 x float> @_mm_round_ss(<4 x float> noundef %{{[0-9a-zA-Z_.]+}}, <4 x float> noundef %{{[0-9a-zA-Z_.]+}}, i32 noundef signext %{{[0-9a-zA-Z_.]+}})
+ // CHECK: call <4 x float> @_mm_round_ps(<4 x float> noundef %{{[0-9a-zA-Z_.]+}}, i32 noundef signext %{{[0-9a-zA-Z_.]+}})
+ // CHECK: extractelement <4 x float> %{{[0-9a-zA-Z_.]+}}, i32 0
+ 
+ // CHECK-LABEL: define available_externally <2 x double> @_mm_round_pd(<2 x double> noundef %{{[0-9a-zA-Z_.]+}}, i32 noundef signext %{{[0-9a-zA-Z_.]+}})
+-// CHECK: call signext i32 @__builtin_mffs()
+-// CHECK: call signext i32 @__builtin_mtfsf(i32 noundef signext 3, double noundef %{{[0-9a-zA-Z_.]+}})
++// CHECK: call double @llvm.ppc.readflm()
++// CHECK: call void @llvm.ppc.mtfsf(i32 3, double %{{[0-9a-zA-Z_.]+}})
+ // CHECK: %{{[0-9a-zA-Z_.]+}} = call <2 x double> asm "", "=^wa,0"
+-// CHECK: call signext i32 @__builtin_mffsl()
+-// CHECK: call signext i32 @__builtin_set_fpscr_rn(i32 noundef signext 0)
++// CHECK: call double @llvm.ppc.readflm()
++// P10: call double @llvm.ppc.mffsl()
++// CHECK: call double @llvm.ppc.setrnd(i32 0)
+ // CHECK: %{{[0-9a-zA-Z_.]+}} = call <2 x double> asm "", "=^wa,0"
+ // CHECK: call <2 x double> @vec_rint(double vector[2])
+ // CHECK: call void asm sideeffect "", "^wa"
+-// CHECK: call signext i32 @__builtin_set_fpscr_rn(i64 noundef %{{[0-9a-zA-Z_.]+}})
++// CHECK: call double @llvm.ppc.setrnd(i32 %{{[0-9a-zA-Z_.]+}})
+ // CHECK: call <2 x double> @vec_floor(double vector[2])
+ // CHECK: call <2 x double> @vec_ceil(double vector[2])
+ // CHECK: call <2 x double> @vec_trunc(double vector[2])
+ // CHECK: call <2 x double> @vec_rint(double vector[2])
+ // CHECK: call void asm sideeffect "", "^wa"
+-// CHECK: call signext i32 @__builtin_mffsl()
+-// CHECK: call signext i32 @__builtin_mtfsf(i32 noundef signext 3, double noundef %{{[0-9a-zA-Z_.]+}})
++// CHECK: call double @llvm.ppc.readflm()
++// P10: call double @llvm.ppc.mffsl()
++// CHECK: call void @llvm.ppc.mtfsf(i32 3, double %{{[0-9a-zA-Z_.]+}})
+ 
+ // CHECK-LABEL: define available_externally <2 x double> @_mm_round_sd(<2 x double> noundef %{{[0-9a-zA-Z_.]+}}, <2 x double> noundef %{{[0-9a-zA-Z_.]+}}, i32 noundef signext %{{[0-9a-zA-Z_.]+}})
+ // CHECK: call <2 x double> @_mm_round_pd(<2 x double> noundef %{{[0-9a-zA-Z_.]+}}, i32 noundef signext %{{[0-9a-zA-Z_.]+}})
+diff --git a/clang/test/CodeGen/PowerPC/ppc-tmmintrin.c b/clang/test/CodeGen/PowerPC/ppc-tmmintrin.c
+--- a/clang/test/CodeGen/PowerPC/ppc-tmmintrin.c
++++ b/clang/test/CodeGen/PowerPC/ppc-tmmintrin.c
+@@ -13,6 +13,9 @@
+ // RUN: %clang -S -emit-llvm -target powerpc64-ibm-aix -mcpu=pwr8 -ffreestanding -DNO_WARN_X86_INTRINSICS %s \
+ // RUN:   -fno-discard-value-names -mllvm -disable-llvm-optzns -o - | llvm-cxxfilt -n | FileCheck %s --check-prefixes=CHECK,CHECK-BE
+ 
++// RUN: %clang -x c++ -S -emit-llvm -target powerpc64le-gnu-linux -mcpu=pwr8 -ffreestanding -DNO_WARN_X86_INTRINSICS %s \
++// RUN:   -fno-discard-value-names -mllvm -disable-llvm-optzns -fsyntax-only
++
+ #include <tmmintrin.h>
+ 
+ __m64 res, m1, m2;
+diff --git a/clang/test/CodeGen/PowerPC/ppc-x86gprintrin.c b/clang/test/CodeGen/PowerPC/ppc-x86gprintrin.c
+--- a/clang/test/CodeGen/PowerPC/ppc-x86gprintrin.c
++++ b/clang/test/CodeGen/PowerPC/ppc-x86gprintrin.c
+@@ -12,6 +12,9 @@
+ // RUN: %clang -S -emit-llvm -target powerpc64-ibm-aix -mcpu=pwr7 -ffreestanding -DNO_WARN_X86_INTRINSICS %s \
+ // RUN:   -fno-discard-value-names -mllvm -disable-llvm-optzns -o - | llvm-cxxfilt -n | FileCheck %s
+ 
++// RUN: %clang -x c++ -S -emit-llvm -target powerpc64le-unknown-linux-gnu -mcpu=pwr7 -ffreestanding -DNO_WARN_X86_INTRINSICS %s \
++// RUN:   -fno-discard-value-names -mllvm -disable-llvm-optzns -fsyntax-only
++
+ #include <x86gprintrin.h>
+ 
+ unsigned short us;

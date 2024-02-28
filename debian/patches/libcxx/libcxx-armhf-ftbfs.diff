@@ -1,0 +1,17 @@
+Index: llvm-toolchain-snapshot_17~++20230222041723+465ee9bfb26d/libcxx/include/__atomic/aliases.h
+===================================================================
+--- llvm-toolchain-snapshot_17~++20230222041723+465ee9bfb26d.orig/libcxx/include/__atomic/aliases.h
++++ llvm-toolchain-snapshot_17~++20230222041723+465ee9bfb26d/libcxx/include/__atomic/aliases.h
+@@ -107,9 +107,12 @@ using __libcpp_unsigned_lock_free = __co
+ #endif
+ 
+ #if !defined(_LIBCPP_NO_LOCK_FREE_TYPES)
++#ifndef NO_LOCK_FREE
+ using atomic_signed_lock_free   = atomic<__libcpp_signed_lock_free>;
+ using atomic_unsigned_lock_free = atomic<__libcpp_unsigned_lock_free>;
+ #endif
++#endif
++#undef NO_LOCK_FREE
+ 
+ _LIBCPP_END_NAMESPACE_STD
+ 

@@ -1,0 +1,14 @@
+--- a/llvm/lib/TargetParser/ARMTargetParser.cpp
++++ b/llvm/lib/TargetParser/ARMTargetParser.cpp
+@@ -590,9 +590,9 @@ StringRef ARM::getARMCPUForArch(const ll
+     case llvm::Triple::EABIHF:
+     case llvm::Triple::GNUEABIHF:
+     case llvm::Triple::MuslEABIHF:
+-      return "cortex-a7";
++      return "cortex-a8";
+     default:
+-      return "arm7tdmi";
++      return "arm926ej-s";
+     }
+   }
+ 
