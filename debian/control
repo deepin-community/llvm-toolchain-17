@@ -18,20 +18,20 @@ Build-Depends: debhelper (>= 10.0), cmake, ninja-build,
     g++-multilib [amd64 i386 kfreebsd-amd64 mips64 mips64el mipsel powerpc ppc64 s390 s390x sparc sparc64 x32],
     libjs-mathjax, python3-recommonmark,
     doxygen,
-    ocaml-base [amd64 arm64 armhf ppc64el riscv64 s390x] | ocaml-nox [amd64 arm64 armhf ppc64el riscv64 s390x],
-    ocaml-findlib [amd64 arm64 armhf ppc64el riscv64 s390x],
-    libctypes-ocaml-dev [amd64 arm64 armhf ppc64el riscv64 s390x],
-    dh-exec, dh-ocaml [amd64 arm64 armhf ppc64el riscv64 s390x],
+    ocaml-base [amd64 arm64 armhf ppc64el riscv64 s390x loong64] | ocaml-nox [amd64 arm64 armhf ppc64el riscv64 s390x loong64],
+    ocaml-findlib [amd64 arm64 armhf ppc64el riscv64 s390x loong64],
+    libctypes-ocaml-dev [amd64 arm64 armhf ppc64el riscv64 s390x loong64],
+    dh-exec, dh-ocaml [amd64 arm64 armhf ppc64el riscv64 s390x loong64],
     libpfm4-dev [linux-any], python3-setuptools, libz3-dev,
 #    llvm-spirv-17 [amd64 arm64 armel armhf i386 mips64el ppc64 ppc64el riscv64 s390x] <!stage1> | hello [!i386],
-    llvm-spirv-17 [amd64 arm64 armhf i386 ppc64 ppc64el riscv64 s390x] <!stage1> | hello,
+    llvm-spirv-17 [amd64 arm64 armhf i386 ppc64 ppc64el riscv64 s390x loong64] <!stage1> | hello,
     spirv-tools [linux-any] | hello [!i386],
     wasi-libc | hello,
     libcurl4-openssl-dev | libcurl-dev,
-    libgrpc++-dev [amd64 arm64 armel armhf mips64el mipsel ppc64 ppc64el powerpc riscv64 s390x],
-    protobuf-compiler-grpc [amd64 arm64 armel armhf mips64el mipsel ppc64 ppc64el powerpc riscv64 s390x],
-    libprotobuf-dev [amd64 arm64 armel armhf mips64el mipsel ppc64 ppc64el powerpc riscv64 s390x],
-    protobuf-compiler [amd64 arm64 armel armhf mips64el mipsel ppc64 ppc64el powerpc riscv64 s390x]
+    libgrpc++-dev [amd64 arm64 armel armhf mips64el mipsel ppc64 ppc64el powerpc riscv64 s390x loong64],
+    protobuf-compiler-grpc [amd64 arm64 armel armhf mips64el mipsel ppc64 ppc64el powerpc riscv64 s390x loong64],
+    libprotobuf-dev [amd64 arm64 armel armhf mips64el mipsel ppc64 ppc64el powerpc riscv64 s390x loong64],
+    protobuf-compiler [amd64 arm64 armel armhf mips64el mipsel ppc64 ppc64el powerpc riscv64 s390x loong64]
 # "| hello" is for older buster/bionic distros without spirv support
 Build-Conflicts: oprofile
 Standards-Version: 4.6.2
@@ -453,7 +453,7 @@ Description: Modular compiler and toolchain technologies, tools
 
 Package: libllvm-17-ocaml-dev
 Section: ocaml
-Architecture: amd64 arm64 armhf ppc64el s390x riscv64
+Architecture: amd64 arm64 armhf ppc64el s390x riscv64 loong64
 Suggests: llvm-17-doc
 Depends: ${shlibs:Depends}, ${misc:Depends}, ${ocaml:Depends}, llvm-17-dev (= ${binary:Version})
 Replaces: libllvm-x.y-ocaml-dev
@@ -617,7 +617,7 @@ Description: Next generation, high-performance debugger, header files
 
 Package: libomp-17-dev
 Section: libdevel
-Architecture: amd64 arm64 armhf i386 loong64 mips64el ppc64el ppc64 riscv64
+Architecture: amd64 arm64 armhf i386 loong64 mips64el ppc64el ppc64 riscv64 loong64
 Depends: libomp5-17 (= ${binary:Version}), ${shlibs:Depends}, ${misc:Depends}
 Suggests: libomp-17-doc
 Breaks: libiomp-dev (<< 3.7-1), libomp-dev (<< 44)
@@ -631,7 +631,7 @@ Description: LLVM OpenMP runtime - dev package
 
 Package: libomp5-17
 Multi-Arch: same
-Architecture: amd64 arm64 armhf i386 loong64 mips64el ppc64el ppc64 riscv64
+Architecture: amd64 arm64 armhf i386 loong64 mips64el ppc64el ppc64 riscv64 loong64
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Breaks: libomp5 (<< 44)
 Provides: libomp-x.y
@@ -688,7 +688,7 @@ Architecture: any
 Multi-Arch: same
 Depends: libc++1-17 (= ${binary:Version}), ${misc:Depends},
  libc++abi-17-dev (= ${binary:Version}),
- libunwind-17-dev [amd64 arm64 armhf i386 loong64 ppc64el ppc64 riscv64]
+ libunwind-17-dev [amd64 arm64 armhf i386 loong64 ppc64el ppc64 riscv64 loong64]
 Breaks: libc++-dev (<< 44), libc++abi-17-dev (<< 1:17.0.6-2)
 Provides: libc++-x.y-dev
 Conflicts: libc++-x.y-dev
@@ -828,7 +828,7 @@ Description: OpenCL C language implementation - development files
 
 Package: libunwind-17
 Section: libs
-Architecture: amd64 arm64 armhf i386 loong64 ppc64el ppc64 riscv64
+Architecture: amd64 arm64 armhf i386 loong64 ppc64el ppc64 riscv64 loong64
 Multi-Arch: same
 Depends: ${shlibs:Depends},
  ${misc:Depends}
@@ -845,7 +845,7 @@ Description: production-quality unwinder
 
 Package: libunwind-17-dev
 Section: libdevel
-Architecture: amd64 arm64 armhf i386 loong64 ppc64el ppc64 riscv64
+Architecture: amd64 arm64 armhf i386 loong64 ppc64el ppc64 riscv64 loong64
 Multi-Arch: same
 Depends:
  ${misc:Depends},
@@ -933,7 +933,7 @@ Description: Post-link optimizer
 Package: flang-17
 # no 32bit support
 # https://github.com/llvm/llvm-project/issues/59845
-Architecture: amd64 arm64 mips64el ppc64el kfreebsd-amd64 ppc64 sparc64 riscv64
+Architecture: amd64 arm64 mips64el ppc64el kfreebsd-amd64 ppc64 sparc64 riscv64 loong64
 Depends: ${shlibs:Depends}, ${misc:Depends}, ${dep:devlibs}, libflang-17-dev (= ${binary:Version}),
 Provides: fortran-compiler, gfortran-mod-15
 Description: Fortran compiler
@@ -944,7 +944,7 @@ Description: Fortran compiler
  of examples, some functionalities are still missing.
 
 Package: libflang-17-dev
-Architecture: amd64 arm64 mips64el ppc64el kfreebsd-amd64 ppc64 sparc64 riscv64
+Architecture: amd64 arm64 mips64el ppc64el kfreebsd-amd64 ppc64 sparc64 riscv64 loong64
 Section: libdevel
 Depends: ${shlibs:Depends}, ${misc:Depends}, ${dep:devlibs},
 Description: Flang library - Development package
