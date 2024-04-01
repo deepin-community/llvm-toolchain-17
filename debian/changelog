@@ -1,3 +1,19 @@
+llvm-toolchain-17 (1:17.0.6-5deepin1) UNRELEASED; urgency=medium
+
+  [ chenli ]
+  * Enable flang on loong64
+
+  [ Matthias Klose ]
+  * Make libclang-common-17-dev architecture dependent.
+  * Add a stage1 profile to disable curl, grpc and spirv.
+  * Build with --as-needed.
+
+  [ Sylvestre Ledru ]
+  * Disable Loongson SIMD Extension (LSX) and Loongson
+    Advanced SIMD Extension (LASX) on 17 (Closes: #1068169)
+
+ -- Tianyu Chen <sweetyfish@deepin.org>  Mon, 01 Apr 2024 18:30:42 +0800
+
 llvm-toolchain-17 (1:17.0.6-5) unstable; urgency=medium
 
   [ Faidon Liambotis ]

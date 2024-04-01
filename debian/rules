@@ -84,7 +84,7 @@ include /usr/share/dpkg/buildflags.mk
 # collect additional flags for all stages all builds
 CFLAGS_EXTRA = -Wno-unused-command-line-argument
 CXXFLAGS_EXTRA = -Wno-unused-command-line-argument
-LDFLAGS_EXTRA = -Wl,--build-id
+LDFLAGS_EXTRA = -Wl,--build-id,--as-needed
 
 # collect all flags for stage 1 toolchain build only
 STAGE_1_CFLAGS = $(CFLAGS) $(CFLAGS_EXTRA) $(CPPFLAGS)
@@ -157,12 +157,14 @@ STAGE_2_CMAKE_EXTRA += -DCLANG_SYSTEMZ_DEFAULT_ARCH=$(ZARCH)
 # clangd remote index support requires GRPC & protobuf.
 # Enable if minimum tested versions are available.
 CLANGD_GRPC_INSTALLED=no
+ifeq (,$(filter stage1, $(DEB_BUILD_PROFILES)))
 ifeq ($(shell v=$$(dpkg-query -W -f '$${Version}' libgrpc++-dev 2>/dev/null); if [ -z "$$v" ]; then echo 1; else dpkg --compare-versions $$v gt 1.30.0; echo $$?; fi),0)
 ifeq ($(shell dpkg --compare-versions $(shell dpkg-query -W -f '$${Version}' protobuf-compiler-grpc) gt 1.30.0; echo $$?),0)
 ifeq ($(shell dpkg --compare-versions $(shell dpkg-query -W -f '$${Version}' libprotobuf-dev) gt 3.12.0; echo $$?),0)
 ifeq ($(shell dpkg --compare-versions $(shell dpkg-query -W -f '$${Version}' protobuf-compiler) gt 3.12.0; echo $$?),0)
 CLANGD_GRPC_INSTALLED=yes
 STAGE_2_CMAKE_EXTRA += -DCLANGD_ENABLE_REMOTE=ON
+endif
 endif
 endif
 endif
@@ -263,6 +265,9 @@ else
 	control_vars = '-Vdep:devlibs=libstdc++6-$(GCC_VERSION)-dev'
 endif
 
+ifneq (,$(filter stage1, $(DEB_BUILD_PROFILES)))
+	LLVM_SPIRV_INSTALLED = no
+else
 LLVM_SPIRV_VERSION := $(LLVM_VERSION)
 LLVM_SPIRV := $(shell bash -c "command -v llvm-spirv-$(LLVM_SPIRV_VERSION)" 2>/dev/null)
 ifndef LLVM_SPIRV
@@ -283,6 +288,7 @@ else
 	else
 		LLVM_SPIRV_INSTALLED = yes
 	endif
+endif
 endif
 
 LIBCLC_TARGETS_TO_BUILD=amdgcn--;amdgcn--amdhsa;amdgcn-mesa-mesa3d;r600--;nvptx--;nvptx64--;nvptx--nvidiacl;nvptx64--nvidiacl
@@ -738,7 +744,7 @@ endif
 	-DLLVM_INCLUDE_GO_TESTS=OFF \
 	-DLLVM_USE_RELATIVE_PATHS_IN_FILES=ON \
 	-DLLVM_TEMPORARILY_ALLOW_OLD_TOOLCHAIN=ON \
-	-DLLVM_ENABLE_CURL=ON \
+	-DLLVM_ENABLE_CURL=$(if $(filter stage1, $(DEB_BUILD_PROFILES)),OFF,ON) \
 	-DLLVM_USE_RELATIVE_PATHS_IN_DEBUG_INFO=ON \
 	-DCLANG_PLUGIN_SUPPORT=OFF \
 	-DCLANG_BUILD_EXAMPLES=OFF \
@@ -791,7 +797,7 @@ endif
 	-DBOOTSTRAP_LLVM_POLLY_LINK_INTO_TOOLS=ON \
 	-DBOOTSTRAP_LLVM_EXPERIMENTAL_TARGETS_TO_BUILD="M68k;Xtensa" \
 	-DBOOTSTRAP_LLVM_LINK_LLVM_DYLIB=ON \
-	-DBOOTSTRAP_LLVM_ENABLE_CURL=ON \
+	-DBOOTSTRAP_LLVM_ENABLE_CURL=$(if $(filter stage1, $(DEB_BUILD_PROFILES)),OFF,ON) \
 	-DBOOTSTRAP_CLANG_LINK_CLANG_DYLIB=ON \
 	-DBOOTSTRAP_LIBCLANG_LIBRARY_VERSION=$(SONAME_EXT) \
 	-DBOOTSTRAP_LIBCXX_INSTALL_EXPERIMENTAL_LIBRARY=ON \
