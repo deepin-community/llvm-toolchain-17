@@ -1,4 +1,4 @@
-llvm-toolchain-17 (1:17.0.6-5deepin1) UNRELEASED; urgency=medium
+llvm-toolchain-17 (1:17.0.6-5deepin1) unstable; urgency=medium
 
   [ chenli ]
   * Enable flang on loong64
