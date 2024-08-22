@@ -1,0 +1,135 @@
+From 3b777f98a3997f338919af7ff1ef8a6fd07f76a0 Mon Sep 17 00:00:00 2001
+From: Fangrui Song <i@maskray.me>
+Date: Wed, 16 Aug 2023 23:11:59 -0700
+Subject: [PATCH 14/14] [Mips][MC] AttemptToFoldSymbolOffsetDifference: revert
+ isMicroMips special case
+
+D52985/D57677 added a .gcc_except_table workaround, but the new behavior
+doesn't match GNU assembler.
+```
+void foo();
+int bar() {
+  foo();
+  try { throw 1; }
+  catch (int) { return 1; }
+  return 0;
+}
+
+clang --target=mipsel-linux-gnu -mmicromips -S a.cc
+mipsel-linux-gnu-gcc -mmicromips -c a.s -o gnu.o
+
+.uleb128 ($cst_end0)-($cst_begin0)     // bit 0 is not forced to 1
+.uleb128 ($func_begin0)-($func_begin0) // bit 0 is not forced to 1
+```
+
+I have inspected `.gcc_except_table` output by `mipsel-linux-gnu-gcc -mmicromips -c a.cc`.
+The `.uleb128` values are not forced to set the least significant bit.
+
+In addition, D57677's adjustment (even->odd) to CodeGen/Mips/micromips-b-range.ll is wrong.
+PC-relative `.long func - .` values will differ from GNU assembler as well.
+
+The original intention of D52985 seems unclear to me. I think whatever
+goal it wants to achieve should be moved to an upper layer.
+
+This isMicroMips special case has caused problems to fix MCAssembler::relaxLEB to use evaluateAsAbsolute instead of evaluateKnownAbsolute,
+which is needed to proper support R_RISCV_SET_ULEB128/R_RISCV_SUB_ULEB128.
+
+Differential Revision: https://reviews.llvm.org/D157655
+
+(cherry picked from commit 4c89277095ee7cda3d20e0f5f18b384212069778)
+Change-Id: Iedd73e0c61856c30fde442309fc16d4327829f1a
+---
+ llvm/lib/MC/MCExpr.cpp                               | 5 -----
+ llvm/test/CodeGen/Mips/micromips-b-range.ll          | 8 ++++----
+ llvm/test/CodeGen/Mips/micromips-gcc-except-table.ll | 2 +-
+ llvm/test/DebugInfo/Mips/eh_frame.ll                 | 4 ++--
+ 4 files changed, 7 insertions(+), 12 deletions(-)
+
+diff --git a/llvm/lib/MC/MCExpr.cpp b/llvm/lib/MC/MCExpr.cpp
+index 79808a58d81c..c9ff1865cf91 100644
+--- a/llvm/lib/MC/MCExpr.cpp
++++ b/llvm/lib/MC/MCExpr.cpp
+@@ -611,11 +611,6 @@ static void AttemptToFoldSymbolOffsetDifference(
+     if (Asm->isThumbFunc(&SA))
+       Addend |= 1;
+ 
+-    // If symbol is labeled as micromips, we set low-bit to ensure
+-    // correct offset in .gcc_except_table
+-    if (Asm->getBackend().isMicroMips(&SA))
+-      Addend |= 1;
+-
+     // Clear the symbol expr pointers to indicate we have folded these
+     // operands.
+     A = B = nullptr;
+diff --git a/llvm/test/CodeGen/Mips/micromips-b-range.ll b/llvm/test/CodeGen/Mips/micromips-b-range.ll
+index 064afff3da0e..81d1c04208cc 100644
+--- a/llvm/test/CodeGen/Mips/micromips-b-range.ll
++++ b/llvm/test/CodeGen/Mips/micromips-b-range.ll
+@@ -13,7 +13,7 @@
+ ; CHECK-NEXT:    1e:	fb fd 00 00 	sw	$ra, 0($sp)
+ ; CHECK-NEXT:    22:	41 a1 00 01 	lui	$1, 1
+ ; CHECK-NEXT:    26:	40 60 00 02 	bal	0x2e <foo+0x2e>
+-; CHECK-NEXT:    2a:	30 21 04 69 	addiu	$1, $1, 1129
++; CHECK-NEXT:    2a:	30 21 04 68 	addiu	$1, $1, 1128
+ ; CHECK-NEXT:    2e:	00 3f 09 50 	addu	$1, $ra, $1
+ ; CHECK-NEXT:    32:	ff fd 00 00 	lw	$ra, 0($sp)
+ ; CHECK-NEXT:    36:	00 01 0f 3c 	jr	$1
+@@ -27,7 +27,7 @@
+ ; CHECK-NEXT:    56:	fb fd 00 00 	sw	$ra, 0($sp)
+ ; CHECK-NEXT:    5a:	41 a1 00 01 	lui	$1, 1
+ ; CHECK-NEXT:    5e:	40 60 00 02 	bal	0x66 <foo+0x66>
+-; CHECK-NEXT:    62:	30 21 04 5d 	addiu	$1, $1, 1117
++; CHECK-NEXT:    62:	30 21 04 5c 	addiu	$1, $1, 1116
+ ; CHECK-NEXT:    66:	00 3f 09 50 	addu	$1, $ra, $1
+ ; CHECK-NEXT:    6a:	ff fd 00 00 	lw	$ra, 0($sp)
+ ; CHECK-NEXT:    6e:	00 01 0f 3c 	jr	$1
+@@ -39,7 +39,7 @@
+ ; CHECK-NEXT:    86:	fb fd 00 00 	sw	$ra, 0($sp)
+ ; CHECK-NEXT:    8a:	41 a1 00 01 	lui	$1, 1
+ ; CHECK-NEXT:    8e:	40 60 00 02 	bal	0x96 <foo+0x96>
+-; CHECK-NEXT:    92:	30 21 04 2d 	addiu	$1, $1, 1069
++; CHECK-NEXT:    92:	30 21 04 2c 	addiu	$1, $1, 1068
+ ; CHECK-NEXT:    96:	00 3f 09 50 	addu	$1, $ra, $1
+ ; CHECK-NEXT:    9a:	ff fd 00 00 	lw	$ra, 0($sp)
+ ; CHECK-NEXT:    9e:	00 01 0f 3c 	jr	$1
+@@ -51,7 +51,7 @@
+ ; CHECK-NEXT: 10476:	fb fd 00 00 	sw	$ra, 0($sp)
+ ; CHECK-NEXT: 1047a:	41 a1 00 01 	lui	$1, 1
+ ; CHECK-NEXT: 1047e:	40 60 00 02 	bal	0x10486 <foo+0x10486>
+-; CHECK-NEXT: 10482:	30 21 04 01 	addiu	$1, $1, 1025
++; CHECK-NEXT: 10482:	30 21 04 00 	addiu	$1, $1, 1024
+ ; CHECK-NEXT: 10486:	00 3f 09 50 	addu	$1, $ra, $1
+ ; CHECK-NEXT: 1048a:	ff fd 00 00 	lw	$ra, 0($sp)
+ ; CHECK-NEXT: 1048e:	00 01 0f 3c 	jr	$1
+diff --git a/llvm/test/CodeGen/Mips/micromips-gcc-except-table.ll b/llvm/test/CodeGen/Mips/micromips-gcc-except-table.ll
+index 2b63aff01574..20d64fc216b7 100644
+--- a/llvm/test/CodeGen/Mips/micromips-gcc-except-table.ll
++++ b/llvm/test/CodeGen/Mips/micromips-gcc-except-table.ll
+@@ -1,7 +1,7 @@
+ ; RUN: llc -mtriple=mips-linux-gnu -mcpu=mips32r2 -mattr=+micromips -O3 -filetype=obj < %s | llvm-objdump -s -j .gcc_except_table - | FileCheck %s
+ 
+ ; CHECK: Contents of section .gcc_except_table:
+-; CHECK-NEXT: 0000 ff9b1501 0c011100 00110e1f 011f1800
++; CHECK-NEXT: 0000 ff9b1501 0c001000 00100e1e 011e1800
+ ; CHECK-NEXT: 0010 00010000 00000000
+ 
+ @_ZTIi = external constant ptr
+diff --git a/llvm/test/DebugInfo/Mips/eh_frame.ll b/llvm/test/DebugInfo/Mips/eh_frame.ll
+index 506e5b87892b..60d4dc76777e 100644
+--- a/llvm/test/DebugInfo/Mips/eh_frame.ll
++++ b/llvm/test/DebugInfo/Mips/eh_frame.ll
+@@ -26,9 +26,9 @@
+ ; CHECK-READELF-PIC-NEXT: R_MIPS_PC32
+ ; CHECK-READELF-NEXT: .gcc_except_table
+ 
+-; EXCEPT-TABLE-STATIC: 0000 ff9b1501 0c011500 00150e23 01231e00  ...........#.#..
++; EXCEPT-TABLE-STATIC: 0000 ff9b1501 0c001400 00140e22 01221e00 ..........."."..
+ ; EXCEPT-TABLE-STATIC: 0010 00010000 00000000
+-; EXCEPT-TABLE-PIC:    0000 ff9b1501 0c012d00 002d133f 013f2a00 ......-..-.?.?*.
++; EXCEPT-TABLE-PIC:    0000 ff9b1501 0c002c00 002c123e 013e2a00 ......,..,.>.>*.
+ ; EXCEPT-TABLE-PIC:    0010 00010000 00000000                    ........
+ 
+ @_ZTIi = external constant ptr
+-- 
+2.20.1
+

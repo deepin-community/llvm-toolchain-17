@@ -1,0 +1,362 @@
+From 87f6adc2acf635a0a4c294217fb54c55eee3a06c Mon Sep 17 00:00:00 2001
+From: Jinyang He <hejinyang@loongson.cn>
+Date: Wed, 24 Jan 2024 09:17:49 +0800
+Subject: [PATCH 08/14] [LoongArch] Insert nops and emit align reloc when
+ handle alignment directive (#72962)
+
+Refer to RISCV, we will fix up the alignment if linker relaxation
+changes code size and breaks alignment. Insert enough Nops and emit
+R_LARCH_ALIGN relocation type so that linker could satisfy the alignment
+by removing Nops.
+It does so only in sections with the SHF_EXECINSTR flag.
+
+In LoongArch psABI v2.30, R_LARCH_ALIGN requires symbol index. The
+lowest 8 bits of addend represent alignment and the other bits of addend
+represent the maximum number of bytes to emit.
+
+(cherry picked from commit c51ab483e6c2d991a01179584705b83fbea1940d)
+Change-Id: Iba30702c9dda378acfae0b1f1134926fa838a368
+---
+ llvm/lib/MC/MCExpr.cpp                        |  2 +-
+ .../MCTargetDesc/LoongArchAsmBackend.cpp      | 67 ++++++++++++++++
+ .../MCTargetDesc/LoongArchAsmBackend.h        | 15 ++++
+ .../MCTargetDesc/LoongArchFixupKinds.h        |  4 +-
+ .../Relocations/align-non-executable.s        | 27 +++++++
+ .../MC/LoongArch/Relocations/relax-addsub.s   | 15 +++-
+ .../MC/LoongArch/Relocations/relax-align.s    | 79 +++++++++++++++++++
+ 7 files changed, 205 insertions(+), 4 deletions(-)
+ create mode 100644 llvm/test/MC/LoongArch/Relocations/align-non-executable.s
+ create mode 100644 llvm/test/MC/LoongArch/Relocations/relax-align.s
+
+diff --git a/llvm/lib/MC/MCExpr.cpp b/llvm/lib/MC/MCExpr.cpp
+index a561fed11179..79808a58d81c 100644
+--- a/llvm/lib/MC/MCExpr.cpp
++++ b/llvm/lib/MC/MCExpr.cpp
+@@ -711,7 +711,7 @@ static void AttemptToFoldSymbolOffsetDifference(
+       if (DF) {
+         Displacement += DF->getContents().size();
+       } else if (auto *AF = dyn_cast<MCAlignFragment>(FI);
+-                 AF && Layout &&
++                 AF && Layout && AF->hasEmitNops() &&
+                  !Asm->getBackend().shouldInsertExtraNopBytesForCodeAlign(
+                      *AF, Count)) {
+         Displacement += Asm->computeFragmentSize(*Layout, *AF);
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.cpp b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.cpp
+index 8d82327b2e2b..8c482356402f 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.cpp
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.cpp
+@@ -17,10 +17,13 @@
+ #include "llvm/MC/MCAssembler.h"
+ #include "llvm/MC/MCContext.h"
+ #include "llvm/MC/MCELFObjectWriter.h"
++#include "llvm/MC/MCExpr.h"
++#include "llvm/MC/MCSection.h"
+ #include "llvm/MC/MCValue.h"
+ #include "llvm/Support/Endian.h"
+ #include "llvm/Support/EndianStream.h"
+ #include "llvm/Support/LEB128.h"
++#include "llvm/Support/MathExtras.h"
+ 
+ #define DEBUG_TYPE "loongarch-asmbackend"
+ 
+@@ -177,6 +180,70 @@ void LoongArchAsmBackend::applyFixup(const MCAssembler &Asm,
+   }
+ }
+ 
++// Linker relaxation may change code size. We have to insert Nops
++// for .align directive when linker relaxation enabled. So then Linker
++// could satisfy alignment by removing Nops.
++// The function returns the total Nops Size we need to insert.
++bool LoongArchAsmBackend::shouldInsertExtraNopBytesForCodeAlign(
++    const MCAlignFragment &AF, unsigned &Size) {
++  // Calculate Nops Size only when linker relaxation enabled.
++  if (!AF.getSubtargetInfo()->hasFeature(LoongArch::FeatureRelax))
++    return false;
++
++  // Ignore alignment if MaxBytesToEmit is less than the minimum Nop size.
++  const unsigned MinNopLen = 4;
++  if (AF.getMaxBytesToEmit() < MinNopLen)
++    return false;
++  Size = AF.getAlignment().value() - MinNopLen;
++  return AF.getAlignment() > MinNopLen;
++}
++
++// We need to insert R_LARCH_ALIGN relocation type to indicate the
++// position of Nops and the total bytes of the Nops have been inserted
++// when linker relaxation enabled.
++// The function inserts fixup_loongarch_align fixup which eventually will
++// transfer to R_LARCH_ALIGN relocation type.
++// The improved R_LARCH_ALIGN requires symbol index. The lowest 8 bits of
++// addend represent alignment and the other bits of addend represent the
++// maximum number of bytes to emit. The maximum number of bytes is zero
++// means ignore the emit limit.
++bool LoongArchAsmBackend::shouldInsertFixupForCodeAlign(
++    MCAssembler &Asm, const MCAsmLayout &Layout, MCAlignFragment &AF) {
++  // Insert the fixup only when linker relaxation enabled.
++  if (!AF.getSubtargetInfo()->hasFeature(LoongArch::FeatureRelax))
++    return false;
++
++  // Calculate total Nops we need to insert. If there are none to insert
++  // then simply return.
++  unsigned Count;
++  if (!shouldInsertExtraNopBytesForCodeAlign(AF, Count))
++    return false;
++
++  MCSection *Sec = AF.getParent();
++  MCContext &Ctx = Asm.getContext();
++  const MCExpr *Dummy = MCConstantExpr::create(0, Ctx);
++  // Create fixup_loongarch_align fixup.
++  MCFixup Fixup =
++      MCFixup::create(0, Dummy, MCFixupKind(LoongArch::fixup_loongarch_align));
++  const MCSymbolRefExpr *MCSym = getSecToAlignSym()[Sec];
++  if (MCSym == nullptr) {
++    // Create a symbol and make the value of symbol is zero.
++    MCSymbol *Sym = Ctx.createNamedTempSymbol("la-relax-align");
++    Sym->setFragment(&*Sec->getBeginSymbol()->getFragment());
++    Asm.registerSymbol(*Sym);
++    MCSym = MCSymbolRefExpr::create(Sym, Ctx);
++    getSecToAlignSym()[Sec] = MCSym;
++  }
++
++  uint64_t FixedValue = 0;
++  unsigned Lo = Log2_64(Count) + 1;
++  unsigned Hi = AF.getMaxBytesToEmit() >= Count ? 0 : AF.getMaxBytesToEmit();
++  MCValue Value = MCValue::get(MCSym, nullptr, Hi << 8 | Lo);
++  Asm.getWriter().recordRelocation(Asm, Layout, &AF, Fixup, Value, FixedValue);
++
++  return true;
++}
++
+ bool LoongArchAsmBackend::shouldForceRelocation(const MCAssembler &Asm,
+                                                 const MCFixup &Fixup,
+                                                 const MCValue &Target) {
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.h b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.h
+index 657f5ca5e731..71bbd003888a 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.h
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.h
+@@ -17,7 +17,9 @@
+ #include "MCTargetDesc/LoongArchFixupKinds.h"
+ #include "MCTargetDesc/LoongArchMCTargetDesc.h"
+ #include "llvm/MC/MCAsmBackend.h"
++#include "llvm/MC/MCExpr.h"
+ #include "llvm/MC/MCFixupKindInfo.h"
++#include "llvm/MC/MCSection.h"
+ #include "llvm/MC/MCSubtargetInfo.h"
+ 
+ namespace llvm {
+@@ -27,6 +29,7 @@ class LoongArchAsmBackend : public MCAsmBackend {
+   uint8_t OSABI;
+   bool Is64Bit;
+   const MCTargetOptions &TargetOptions;
++  DenseMap<MCSection *, const MCSymbolRefExpr *> SecToAlignSym;
+ 
+ public:
+   LoongArchAsmBackend(const MCSubtargetInfo &STI, uint8_t OSABI, bool Is64Bit,
+@@ -45,6 +48,15 @@ public:
+                   uint64_t Value, bool IsResolved,
+                   const MCSubtargetInfo *STI) const override;
+ 
++  // Return Size with extra Nop Bytes for alignment directive in code section.
++  bool shouldInsertExtraNopBytesForCodeAlign(const MCAlignFragment &AF,
++                                             unsigned &Size) override;
++
++  // Insert target specific fixup type for alignment directive in code section.
++  bool shouldInsertFixupForCodeAlign(MCAssembler &Asm,
++                                     const MCAsmLayout &Layout,
++                                     MCAlignFragment &AF) override;
++
+   bool shouldForceRelocation(const MCAssembler &Asm, const MCFixup &Fixup,
+                              const MCValue &Target) override;
+ 
+@@ -79,6 +91,9 @@ public:
+   std::unique_ptr<MCObjectTargetWriter>
+   createObjectTargetWriter() const override;
+   const MCTargetOptions &getTargetOptions() const { return TargetOptions; }
++  DenseMap<MCSection *, const MCSymbolRefExpr *> &getSecToAlignSym() {
++    return SecToAlignSym;
++  }
+ };
+ } // end namespace llvm
+ 
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchFixupKinds.h b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchFixupKinds.h
+index 178fa6e5262b..78414408f21f 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchFixupKinds.h
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchFixupKinds.h
+@@ -108,7 +108,9 @@ enum Fixups {
+   // 20-bit fixup corresponding to %gd_hi20(foo) for instruction lu12i.w.
+   fixup_loongarch_tls_gd_hi20,
+   // Generate an R_LARCH_RELAX which indicates the linker may relax here.
+-  fixup_loongarch_relax = FirstLiteralRelocationKind + ELF::R_LARCH_RELAX
++  fixup_loongarch_relax = FirstLiteralRelocationKind + ELF::R_LARCH_RELAX,
++  // Generate an R_LARCH_ALIGN which indicates the linker may fixup align here.
++  fixup_loongarch_align = FirstLiteralRelocationKind + ELF::R_LARCH_ALIGN,
+ };
+ } // end namespace LoongArch
+ } // end namespace llvm
+diff --git a/llvm/test/MC/LoongArch/Relocations/align-non-executable.s b/llvm/test/MC/LoongArch/Relocations/align-non-executable.s
+new file mode 100644
+index 000000000000..47834acd9521
+--- /dev/null
++++ b/llvm/test/MC/LoongArch/Relocations/align-non-executable.s
+@@ -0,0 +1,27 @@
++## A label difference separated by an alignment directive, when the
++## referenced symbols are in a non-executable section with instructions,
++## should generate ADD/SUB relocations.
++## https://github.com/llvm/llvm-project/pull/76552
++
++# RUN: llvm-mc --filetype=obj --triple=loongarch64 --mattr=+relax %s \
++# RUN:     | llvm-readobj -r - | FileCheck --check-prefixes=CHECK,RELAX %s
++# RUN: llvm-mc --filetype=obj --triple=loongarch64 --mattr=-relax %s \
++# RUN:     | llvm-readobj -r - | FileCheck %s
++
++.section ".dummy", "a"
++.L1:
++  la.pcrel $t0, sym
++.p2align 3
++.L2:
++.dword .L2 - .L1
++
++# CHECK:       Relocations [
++# CHECK-NEXT:    Section ({{.*}}) .rela.dummy {
++# CHECK-NEXT:      0x0 R_LARCH_PCALA_HI20 sym 0x0
++# RELAX-NEXT:      0x0 R_LARCH_RELAX - 0x0
++# CHECK-NEXT:      0x4 R_LARCH_PCALA_LO12 sym 0x0
++# RELAX-NEXT:      0x4 R_LARCH_RELAX - 0x0
++# RELAX-NEXT:      0x8 R_LARCH_ADD64 .L2 0x0
++# RELAX-NEXT:      0x8 R_LARCH_SUB64 .L1 0x0
++# CHECK-NEXT:    }
++# CHECK-NEXT:  ]
+diff --git a/llvm/test/MC/LoongArch/Relocations/relax-addsub.s b/llvm/test/MC/LoongArch/Relocations/relax-addsub.s
+index cd01332afd0b..18e0ede5e293 100644
+--- a/llvm/test/MC/LoongArch/Relocations/relax-addsub.s
++++ b/llvm/test/MC/LoongArch/Relocations/relax-addsub.s
+@@ -28,12 +28,23 @@
+ 
+ # RELAX:       Relocations [
+ # RELAX-NEXT:    Section ({{.*}}) .rela.text {
++# RELAX-NEXT:      0x4 R_LARCH_ALIGN {{.*}} 0x4
+ # RELAX-NEXT:      0x10 R_LARCH_PCALA_HI20 .L1 0x0
+ # RELAX-NEXT:      0x10 R_LARCH_RELAX - 0x0
+ # RELAX-NEXT:      0x14 R_LARCH_PCALA_LO12 .L1 0x0
+ # RELAX-NEXT:      0x14 R_LARCH_RELAX - 0x0
+ # RELAX-NEXT:    }
+ # RELAX-NEXT:    Section ({{.*}}) .rela.data {
++# RELAX-NEXT:      0x10 R_LARCH_ADD8 .L3 0x0
++# RELAX-NEXT:      0x10 R_LARCH_SUB8 .L2 0x0
++# RELAX-NEXT:      0x11 R_LARCH_ADD16 .L3 0x0
++# RELAX-NEXT:      0x11 R_LARCH_SUB16 .L2 0x0
++# RELAX-NEXT:      0x13 R_LARCH_ADD32 .L3 0x0
++# RELAX-NEXT:      0x13 R_LARCH_SUB32 .L2 0x0
++# RELAX-NEXT:      0x17 R_LARCH_ADD64 .L3 0x0
++# RELAX-NEXT:      0x17 R_LARCH_SUB64 .L2 0x0
++# RELAX-NEXT:      0x1F R_LARCH_ADD_ULEB128 .L3 0x0
++# RELAX-NEXT:      0x1F R_LARCH_SUB_ULEB128 .L2 0x0
+ # RELAX-NEXT:      0x20 R_LARCH_ADD8 .L4 0x0
+ # RELAX-NEXT:      0x20 R_LARCH_SUB8 .L3 0x0
+ # RELAX-NEXT:      0x21 R_LARCH_ADD16 .L4 0x0
+@@ -57,7 +68,7 @@
+ 
+ # RELAX:      Hex dump of section '.data':
+ # RELAX-NEXT: 0x00000000 04040004 00000004 00000000 00000004
+-# RELAX-NEXT: 0x00000010 0c0c000c 0000000c 00000000 0000000c
++# RELAX-NEXT: 0x00000010 00000000 00000000 00000000 00000000
+ # RELAX-NEXT: 0x00000020 00000000 00000000 00000000 00000000
+ # RELAX-NEXT: 0x00000030 00000000 00000000 00000000 000000
+ 
+@@ -78,7 +89,7 @@
+ .word  .L2 - .L1
+ .dword .L2 - .L1
+ .uleb128 .L2 - .L1
+-## TODO Handle alignment directive.
++## With relaxation, emit relocs because the .align makes the diff variable.
+ .byte  .L3 - .L2
+ .short .L3 - .L2
+ .word  .L3 - .L2
+diff --git a/llvm/test/MC/LoongArch/Relocations/relax-align.s b/llvm/test/MC/LoongArch/Relocations/relax-align.s
+new file mode 100644
+index 000000000000..294fd9fb916c
+--- /dev/null
++++ b/llvm/test/MC/LoongArch/Relocations/relax-align.s
+@@ -0,0 +1,79 @@
++## The file testing Nop insertion with R_LARCH_ALIGN for relaxation.
++
++# RUN: llvm-mc --filetype=obj --triple=loongarch64 --mattr=-relax %s -o %t
++# RUN: llvm-objdump -d %t | FileCheck %s --check-prefix=INSTR
++# RUN: llvm-readobj -r %t | FileCheck %s --check-prefix=RELOC
++# RUN: llvm-mc --filetype=obj --triple=loongarch64 --mattr=+relax %s -o %t.r
++# RUN: llvm-objdump -d %t.r | FileCheck %s --check-prefixes=INSTR,RELAX-INSTR
++# RUN: llvm-readobj -r %t.r | FileCheck %s --check-prefixes=RELOC,RELAX-RELOC
++
++.text
++break 0
++# INSTR: break 0
++
++## Not emit R_LARCH_ALIGN if alignment directive is less than or equal to
++## minimum code alignment(a.k.a 4).
++.p2align 2
++.p2align 1
++.p2align 0
++
++## Not emit instructions if max emit bytes less than min nop size.
++.p2align 4, , 2
++
++## Not emit R_LARCH_ALIGN if alignment directive with specific padding value.
++## The behavior is the same as GNU assembler.
++break 1
++.p2align 4, 1
++# INSTR-NEXT:    break 1
++# INSTR-COUNT-2: 01 01 01 01
++
++break 2
++.p2align 4, 1, 12
++# INSTR-NEXT:    break 2
++# INSTR-COUNT-3: 01 01 01 01
++
++break 3
++.p2align 4
++# INSTR-NEXT:    break 3
++# INSTR-COUNT-3: nop
++
++break 4
++.p2align 5
++.p2align 4
++# INSTR-NEXT:          break 4
++# INSTR-COUNT-3:       nop
++# RELAX-INSTR-COUNT-7: nop
++
++break 5
++.p2align 4, , 11
++# INSTR-NEXT: break 5
++# RELAX-INSTR-COUNT-3: nop
++
++break 6
++## Not emit the third parameter.
++.p2align 4, , 12
++# INSTR-NEXT:       break 6
++# INSTR-NEXT:       nop
++# INSTR-NEXT:       nop
++# RELAX-INSTR-NEXT: nop
++
++ret
++# INSNR-NEXT: ret
++
++## Test the symbol index is different from .text.
++.section .text2, "ax"
++.p2align 4
++break 7
++
++# RELOC:            Relocations [
++# RELAX-RELOC-NEXT:   Section ({{.*}}) .rela.text {
++# RELAX-RELOC-NEXT:     0x24 R_LARCH_ALIGN .Lla-relax-align0 0x4
++# RELAX-RELOC-NEXT:     0x34 R_LARCH_ALIGN .Lla-relax-align0 0x5
++# RELAX-RELOC-NEXT:     0x50 R_LARCH_ALIGN .Lla-relax-align0 0x4
++# RELAX-RELOC-NEXT:     0x60 R_LARCH_ALIGN .Lla-relax-align0 0xB04
++# RELAX-RELOC-NEXT:     0x70 R_LARCH_ALIGN .Lla-relax-align0 0x4
++# RELAX-RELOC-NEXT:   }
++# RELAX-RELOC-NEXT:   Section ({{.*}}) .rela.text2 {
++# RELAX-RELOC-NEXT:     0x0 R_LARCH_ALIGN .Lla-relax-align1 0x4
++# RELAX-RELOC-NEXT:   }
++# RELOC-NEXT:       ]
+-- 
+2.20.1
+
