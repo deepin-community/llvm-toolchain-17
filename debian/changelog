@@ -1,3 +1,35 @@
+llvm-toolchain-17 (1:17.0.6-5deepin2) unstable; urgency=medium
+
+  [ Jinyang He ]
+  * Support the R_LARCH_{ADD,SUB}6 relocation type (#72190)
+  * Add relax feature and keep relocations (#72191)
+  * Allow delayed decision for ADD/SUB relocations (#72960)
+  * Emit R_LARCH_RELAX when expanding some LoadAddress (#72961)
+  * Add AlignFragment size if layout is available and not need
+    insert nops (#76552)
+  * Add relaxDwarfLineAddr and relaxDwarfCFA to handle the mutable
+    label diff in dwarfinfo (#77728)
+  * Insert nops and emit align reloc when handle alignment directive
+    (#72962)
+  * Support relax R_LARCH_ALIGN (#78692)
+  * Support the R_LARCH_{ADD,SUB}_ULEB128 relocation types (#81133)
+
+  [ Job Noorman ]
+  * Implement --emit-relocs with relaxation
+
+  [ Weining Lu ]
+  * Update dwarf-loongarch-relocs.ll
+
+  [ Fangrui Song ]
+  * Change ELF/uleb-ehtable.s Mach-O to use private symbols in .uleb128
+    for label differences
+  * AttemptToFoldSymbolOffsetDifference: revert isMicroMips special case
+
+  * Support R_LARCH_{ADD,SUB}_ULEB128/R_RISCV_{SET,SUB}_ULEB128 for
+    .uleb128 directives
+
+ -- Ami-zhang <zhanglimin@loongson.cn>  Thu, 22 Aug 2024 14:32:09 +0800
+
 llvm-toolchain-17 (1:17.0.6-5deepin1) unstable; urgency=medium
 
   [ chenli ]

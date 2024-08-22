@@ -1,0 +1,78 @@
+From 7f14e7c1b116fc865ddebb78e67816bfc5216178 Mon Sep 17 00:00:00 2001
+From: Jinyang He <hejinyang@loongson.cn>
+Date: Wed, 15 Nov 2023 09:57:45 +0800
+Subject: [PATCH 01/14] [lld][LoongArch] Support the R_LARCH_{ADD,SUB}6
+ relocation type (#72190)
+
+The R_LARCH_{ADD,SUB}6 relocation type are usually used by DwarfCFA to
+calculate a tiny offset. They appear after binutils 2.41, with GAS
+enabling relaxation by default.
+
+(cherry picked from commit 72accbfd0a1023b3182202276904120524ff9200)
+Change-Id: Iad676e522f11c52e5dc381243f1df60edcef58f5
+---
+ lld/ELF/Arch/LoongArch.cpp       | 8 ++++++++
+ lld/test/ELF/loongarch-add-sub.s | 6 +++++-
+ 2 files changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/lld/ELF/Arch/LoongArch.cpp b/lld/ELF/Arch/LoongArch.cpp
+index 04ddb4682917..d3a538577a59 100644
+--- a/lld/ELF/Arch/LoongArch.cpp
++++ b/lld/ELF/Arch/LoongArch.cpp
+@@ -444,10 +444,12 @@ RelExpr LoongArch::getRelExpr(const RelType type, const Symbol &s,
+   case R_LARCH_TLS_LE64_LO20:
+   case R_LARCH_TLS_LE64_HI12:
+     return R_TPREL;
++  case R_LARCH_ADD6:
+   case R_LARCH_ADD8:
+   case R_LARCH_ADD16:
+   case R_LARCH_ADD32:
+   case R_LARCH_ADD64:
++  case R_LARCH_SUB6:
+   case R_LARCH_SUB8:
+   case R_LARCH_SUB16:
+   case R_LARCH_SUB32:
+@@ -650,6 +652,9 @@ void LoongArch::relocate(uint8_t *loc, const Relocation &rel,
+     write32le(loc, setK12(read32le(loc), extractBits(val, 63, 52)));
+     return;
+ 
++  case R_LARCH_ADD6:
++    *loc = (*loc & 0xc0) | ((*loc + val) & 0x3f);
++    return;
+   case R_LARCH_ADD8:
+     *loc += val;
+     return;
+@@ -662,6 +667,9 @@ void LoongArch::relocate(uint8_t *loc, const Relocation &rel,
+   case R_LARCH_ADD64:
+     write64le(loc, read64le(loc) + val);
+     return;
++  case R_LARCH_SUB6:
++    *loc = (*loc & 0xc0) | ((*loc - val) & 0x3f);
++    return;
+   case R_LARCH_SUB8:
+     *loc -= val;
+     return;
+diff --git a/lld/test/ELF/loongarch-add-sub.s b/lld/test/ELF/loongarch-add-sub.s
+index 63a3f7de179e..35f8a053d69c 100644
+--- a/lld/test/ELF/loongarch-add-sub.s
++++ b/lld/test/ELF/loongarch-add-sub.s
+@@ -6,7 +6,7 @@
+ # RUN: llvm-readelf -x .rodata %t.la64 | FileCheck --check-prefix=CHECK %s
+ # CHECK:      section '.rodata':
+ # CHECK-NEXT: 0x9876543210 10325476 98badcfe 804602be 79ffffff
+-# CHECK-NEXT: 0x9876543220 804602be 804680
++# CHECK-NEXT: 0x9876543220 804602be 80468097
+ 
+ .text
+ .global _start
+@@ -34,3 +34,7 @@ quux:
+     .byte 0
+     .reloc quux, R_LARCH_ADD8, 1b
+     .reloc quux, R_LARCH_SUB8, 2b
++qux:
++    .byte 0b10000000
++    .reloc qux, R_LARCH_ADD6, qux
++    .reloc qux, R_LARCH_SUB6, 2b
+-- 
+2.20.1
+

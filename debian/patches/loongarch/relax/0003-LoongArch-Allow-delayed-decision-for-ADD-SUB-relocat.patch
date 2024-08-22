@@ -1,0 +1,299 @@
+From 77d74b8fa071fa2695c9782e2e63e7b930895b1b Mon Sep 17 00:00:00 2001
+From: Jinyang He <hejinyang@loongson.cn>
+Date: Wed, 20 Dec 2023 10:54:51 +0800
+Subject: [PATCH 03/14] [LoongArch] Allow delayed decision for ADD/SUB
+ relocations (#72960)
+
+Refer to RISCV [1], LoongArch also need delayed decision for ADD/SUB
+relocations. In handleAddSubRelocations, just return directly if SecA !=
+SecB, handleFixup usually will finish the the rest of creating PCRel
+relocations works. Otherwise we emit relocs depends on whether
+relaxation is enabled. If not, we return true and avoid record ADD/SUB
+relocations.
+Now the two symbols separated by alignment directive will return without
+folding symbol offset in AttemptToFoldSymbolOffsetDifference, which has
+the same effect when relaxation is enabled.
+
+[1] https://reviews.llvm.org/D155357
+
+(cherry picked from commit a8081ed8ff0fd11fb8d5f4c83df49da909e49612)
+Change-Id: Ic4c6a3eb11b576cb0c6ed0eba02150ad67c33cf2
+---
+ llvm/lib/MC/MCExpr.cpp                        |  3 +-
+ .../MCTargetDesc/LoongArchAsmBackend.cpp      | 78 +++++++++++++++++++
+ .../MCTargetDesc/LoongArchAsmBackend.h        |  9 ++-
+ .../MCTargetDesc/LoongArchFixupKinds.h        |  4 +-
+ llvm/test/MC/LoongArch/Misc/subsection.s      | 38 +++++++++
+ .../MC/LoongArch/Relocations/relax-addsub.s   | 68 ++++++++++++++++
+ 6 files changed, 196 insertions(+), 4 deletions(-)
+ create mode 100644 llvm/test/MC/LoongArch/Misc/subsection.s
+ create mode 100644 llvm/test/MC/LoongArch/Relocations/relax-addsub.s
+
+diff --git a/llvm/lib/MC/MCExpr.cpp b/llvm/lib/MC/MCExpr.cpp
+index a7b980553af0..5a6596f93824 100644
+--- a/llvm/lib/MC/MCExpr.cpp
++++ b/llvm/lib/MC/MCExpr.cpp
+@@ -635,7 +635,8 @@ static void AttemptToFoldSymbolOffsetDifference(
+   // instructions and InSet is false (not expressions in directive like
+   // .size/.fill), disable the fast path.
+   if (Layout && (InSet || !SecA.hasInstructions() ||
+-                 !Asm->getContext().getTargetTriple().isRISCV())) {
++                 !(Asm->getContext().getTargetTriple().isRISCV() ||
++                   Asm->getContext().getTargetTriple().isLoongArch()))) {
+     // If both symbols are in the same fragment, return the difference of their
+     // offsets. canGetFragmentOffset(FA) may be false.
+     if (FA == FB && !SA.isVariable() && !SB.isVariable()) {
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.cpp b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.cpp
+index aae3e544d326..1ed047a8e632 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.cpp
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.cpp
+@@ -177,6 +177,34 @@ bool LoongArchAsmBackend::shouldForceRelocation(const MCAssembler &Asm,
+   }
+ }
+ 
++static inline std::pair<MCFixupKind, MCFixupKind>
++getRelocPairForSize(unsigned Size) {
++  switch (Size) {
++  default:
++    llvm_unreachable("unsupported fixup size");
++  case 6:
++    return std::make_pair(
++        MCFixupKind(FirstLiteralRelocationKind + ELF::R_LARCH_ADD6),
++        MCFixupKind(FirstLiteralRelocationKind + ELF::R_LARCH_SUB6));
++  case 8:
++    return std::make_pair(
++        MCFixupKind(FirstLiteralRelocationKind + ELF::R_LARCH_ADD8),
++        MCFixupKind(FirstLiteralRelocationKind + ELF::R_LARCH_SUB8));
++  case 16:
++    return std::make_pair(
++        MCFixupKind(FirstLiteralRelocationKind + ELF::R_LARCH_ADD16),
++        MCFixupKind(FirstLiteralRelocationKind + ELF::R_LARCH_SUB16));
++  case 32:
++    return std::make_pair(
++        MCFixupKind(FirstLiteralRelocationKind + ELF::R_LARCH_ADD32),
++        MCFixupKind(FirstLiteralRelocationKind + ELF::R_LARCH_SUB32));
++  case 64:
++    return std::make_pair(
++        MCFixupKind(FirstLiteralRelocationKind + ELF::R_LARCH_ADD64),
++        MCFixupKind(FirstLiteralRelocationKind + ELF::R_LARCH_SUB64));
++  }
++}
++
+ bool LoongArchAsmBackend::writeNopData(raw_ostream &OS, uint64_t Count,
+                                        const MCSubtargetInfo *STI) const {
+   // We mostly follow binutils' convention here: align to 4-byte boundary with a
+@@ -191,6 +219,56 @@ bool LoongArchAsmBackend::writeNopData(raw_ostream &OS, uint64_t Count,
+   return true;
+ }
+ 
++bool LoongArchAsmBackend::handleAddSubRelocations(const MCAsmLayout &Layout,
++                                                  const MCFragment &F,
++                                                  const MCFixup &Fixup,
++                                                  const MCValue &Target,
++                                                  uint64_t &FixedValue) const {
++  std::pair<MCFixupKind, MCFixupKind> FK;
++  uint64_t FixedValueA, FixedValueB;
++  const MCSection &SecA = Target.getSymA()->getSymbol().getSection();
++  const MCSection &SecB = Target.getSymB()->getSymbol().getSection();
++
++  // We need record relocation if SecA != SecB. Usually SecB is same as the
++  // section of Fixup, which will be record the relocation as PCRel. If SecB
++  // is not same as the section of Fixup, it will report error. Just return
++  // false and then this work can be finished by handleFixup.
++  if (&SecA != &SecB)
++    return false;
++
++  // In SecA == SecB case. If the linker relaxation is enabled, we need record
++  // the ADD, SUB relocations. Otherwise the FixedValue has already been
++  // calculated out in evaluateFixup, return true and avoid record relocations.
++  if (!STI.hasFeature(LoongArch::FeatureRelax))
++    return true;
++
++  switch (Fixup.getKind()) {
++  case llvm::FK_Data_1:
++    FK = getRelocPairForSize(8);
++    break;
++  case llvm::FK_Data_2:
++    FK = getRelocPairForSize(16);
++    break;
++  case llvm::FK_Data_4:
++    FK = getRelocPairForSize(32);
++    break;
++  case llvm::FK_Data_8:
++    FK = getRelocPairForSize(64);
++    break;
++  default:
++    llvm_unreachable("unsupported fixup size");
++  }
++  MCValue A = MCValue::get(Target.getSymA(), nullptr, Target.getConstant());
++  MCValue B = MCValue::get(Target.getSymB());
++  auto FA = MCFixup::create(Fixup.getOffset(), nullptr, std::get<0>(FK));
++  auto FB = MCFixup::create(Fixup.getOffset(), nullptr, std::get<1>(FK));
++  auto &Asm = Layout.getAssembler();
++  Asm.getWriter().recordRelocation(Asm, Layout, &F, FA, A, FixedValueA);
++  Asm.getWriter().recordRelocation(Asm, Layout, &F, FB, B, FixedValueB);
++  FixedValue = FixedValueA - FixedValueB;
++  return true;
++}
++
+ std::unique_ptr<MCObjectTargetWriter>
+ LoongArchAsmBackend::createObjectTargetWriter() const {
+   return createLoongArchELFObjectWriter(
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.h b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.h
+index ae9bb8af0419..20f25b5cf53b 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.h
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.h
+@@ -31,10 +31,15 @@ class LoongArchAsmBackend : public MCAsmBackend {
+ public:
+   LoongArchAsmBackend(const MCSubtargetInfo &STI, uint8_t OSABI, bool Is64Bit,
+                       const MCTargetOptions &Options)
+-      : MCAsmBackend(support::little), STI(STI), OSABI(OSABI), Is64Bit(Is64Bit),
+-        TargetOptions(Options) {}
++      : MCAsmBackend(support::little,
++                     LoongArch::fixup_loongarch_relax),
++        STI(STI), OSABI(OSABI), Is64Bit(Is64Bit), TargetOptions(Options) {}
+   ~LoongArchAsmBackend() override {}
+ 
++  bool handleAddSubRelocations(const MCAsmLayout &Layout, const MCFragment &F,
++                               const MCFixup &Fixup, const MCValue &Target,
++                               uint64_t &FixedValue) const override;
++
+   void applyFixup(const MCAssembler &Asm, const MCFixup &Fixup,
+                   const MCValue &Target, MutableArrayRef<char> Data,
+                   uint64_t Value, bool IsResolved,
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchFixupKinds.h b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchFixupKinds.h
+index ba2d6718cdf9..178fa6e5262b 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchFixupKinds.h
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchFixupKinds.h
+@@ -106,7 +106,9 @@ enum Fixups {
+   // 20-bit fixup corresponding to %gd_pc_hi20(foo) for instruction pcalau12i.
+   fixup_loongarch_tls_gd_pc_hi20,
+   // 20-bit fixup corresponding to %gd_hi20(foo) for instruction lu12i.w.
+-  fixup_loongarch_tls_gd_hi20
++  fixup_loongarch_tls_gd_hi20,
++  // Generate an R_LARCH_RELAX which indicates the linker may relax here.
++  fixup_loongarch_relax = FirstLiteralRelocationKind + ELF::R_LARCH_RELAX
+ };
+ } // end namespace LoongArch
+ } // end namespace llvm
+diff --git a/llvm/test/MC/LoongArch/Misc/subsection.s b/llvm/test/MC/LoongArch/Misc/subsection.s
+new file mode 100644
+index 000000000000..0bd22b474536
+--- /dev/null
++++ b/llvm/test/MC/LoongArch/Misc/subsection.s
+@@ -0,0 +1,38 @@
++# RUN: not llvm-mc --filetype=obj --triple=loongarch64 --mattr=-relax %s -o /dev/null 2>&1 | FileCheck %s --check-prefixes=ERR,NORELAX --implicit-check-not=error:
++## TODO: not llvm-mc --filetype=obj --triple=loongarch64 --mattr=+relax %s -o /dev/null 2>&1 | FileCheck %s --check-prefixes=ERR,RELAX --implicit-check-not=error:
++
++a:
++  nop
++b:
++  la.pcrel $t0, a
++c:
++  nop
++d:
++
++.data
++## Positive subsection numbers
++## With relaxation, report an error as c-b is not an assemble-time constant.
++# RELAX: :[[#@LINE+1]]:14: error: cannot evaluate subsection number
++.subsection c-b
++# RELAX: :[[#@LINE+1]]:14: error: cannot evaluate subsection number
++.subsection d-b
++# RELAX: :[[#@LINE+1]]:14: error: cannot evaluate subsection number
++.subsection c-a
++
++.subsection b-a
++.subsection d-c
++
++## Negative subsection numbers
++# NORELAX: :[[#@LINE+2]]:14: error: subsection number -8 is not within [0,2147483647]
++# RELAX:   :[[#@LINE+1]]:14: error: cannot evaluate subsection number
++.subsection b-c
++# NORELAX: :[[#@LINE+2]]:14: error: subsection number -12 is not within [0,2147483647]
++# RELAX:   :[[#@LINE+1]]:14: error: cannot evaluate subsection number
++.subsection b-d
++# NORELAX: :[[#@LINE+2]]:14: error: subsection number -12 is not within [0,2147483647]
++# RELAX:   :[[#@LINE+1]]:14: error: cannot evaluate subsection number
++.subsection a-c
++# ERR:     :[[#@LINE+1]]:14: error: subsection number -4 is not within [0,2147483647]
++.subsection a-b
++# ERR:     :[[#@LINE+1]]:14: error: subsection number -4 is not within [0,2147483647]
++.subsection c-d
+diff --git a/llvm/test/MC/LoongArch/Relocations/relax-addsub.s b/llvm/test/MC/LoongArch/Relocations/relax-addsub.s
+new file mode 100644
+index 000000000000..532eb4e0561a
+--- /dev/null
++++ b/llvm/test/MC/LoongArch/Relocations/relax-addsub.s
+@@ -0,0 +1,68 @@
++# RUN: llvm-mc --filetype=obj --triple=loongarch64 --mattr=-relax %s \
++# RUN:     | llvm-readobj -r -x .data - | FileCheck %s --check-prefix=NORELAX
++# RUN: llvm-mc --filetype=obj --triple=loongarch64 --mattr=+relax %s \
++# RUN:     | llvm-readobj -r -x .data - | FileCheck %s --check-prefix=RELAX
++
++# NORELAX:       Relocations [
++# NORELAX-NEXT:    Section ({{.*}}) .rela.text {
++# NORELAX-NEXT:      0x10 R_LARCH_PCALA_HI20 .text 0x0
++# NORELAX-NEXT:      0x14 R_LARCH_PCALA_LO12 .text 0x0
++# NORELAX-NEXT:    }
++# NORELAX-NEXT:  ]
++
++# NORELAX:      Hex dump of section '.data':
++# NORELAX-NEXT: 0x00000000 04040004 00000004 00000000 0000000c
++# NORELAX-NEXT: 0x00000010 0c000c00 00000c00 00000000 00000808
++# NORELAX-NEXT: 0x00000020 00080000 00080000 00000000 00
++
++# RELAX:       Relocations [
++# RELAX-NEXT:    Section ({{.*}}) .rela.text {
++# RELAX-NEXT:      0x10 R_LARCH_PCALA_HI20 .L1 0x0
++# RELAX-NEXT:      0x14 R_LARCH_PCALA_LO12 .L1 0x0
++# RELAX-NEXT:    }
++# RELAX-NEXT:    Section ({{.*}}) .rela.data {
++# RELAX-NEXT:      0xF R_LARCH_ADD8 .L3 0x0
++# RELAX-NEXT:      0xF R_LARCH_SUB8 .L2 0x0
++# RELAX-NEXT:      0x10 R_LARCH_ADD16 .L3 0x0
++# RELAX-NEXT:      0x10 R_LARCH_SUB16 .L2 0x0
++# RELAX-NEXT:      0x12 R_LARCH_ADD32 .L3 0x0
++# RELAX-NEXT:      0x12 R_LARCH_SUB32 .L2 0x0
++# RELAX-NEXT:      0x16 R_LARCH_ADD64 .L3 0x0
++# RELAX-NEXT:      0x16 R_LARCH_SUB64 .L2 0x0
++# RELAX-NEXT:    }
++# RELAX-NEXT:  ]
++
++# RELAX:      Hex dump of section '.data':
++# RELAX-NEXT: 0x00000000 04040004 00000004 00000000 00000000
++# RELAX-NEXT: 0x00000010 00000000 00000000 00000000 00000808
++# RELAX-NEXT: 0x00000020 00080000 00080000 00000000 00
++
++.text
++.L1:
++  nop
++.L2:
++  .align 4
++.L3:
++  la.pcrel $t0, .L1
++.L4:
++  ret
++
++.data
++## Not emit relocs
++.byte  .L2 - .L1
++.short .L2 - .L1
++.word  .L2 - .L1
++.dword .L2 - .L1
++## With relaxation, emit relocs because of the .align making the diff variable.
++## TODO Handle alignment directive. Why they emit relocs now? They returns
++## without folding symbols offset in AttemptToFoldSymbolOffsetDifference().
++.byte  .L3 - .L2
++.short .L3 - .L2
++.word  .L3 - .L2
++.dword .L3 - .L2
++## TODO
++## With relaxation, emit relocs because la.pcrel is a linker-relaxable inst.
++.byte  .L4 - .L3
++.short .L4 - .L3
++.word  .L4 - .L3
++.dword .L4 - .L3
+-- 
+2.20.1
+

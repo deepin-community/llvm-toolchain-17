@@ -1,0 +1,563 @@
+From 80c56e85d742bb88533e4789c76ae2b55dc36835 Mon Sep 17 00:00:00 2001
+From: Jinyang He <hejinyang@loongson.cn>
+Date: Tue, 6 Feb 2024 09:09:13 +0800
+Subject: [PATCH 10/14] [lld][ELF] Support relax R_LARCH_ALIGN (#78692)
+
+Refer to commit 6611d58f5bbc ("Relax R_RISCV_ALIGN"), we can relax
+R_LARCH_ALIGN by same way. Reuse `SymbolAnchor`, `RISCVRelaxAux` and
+`initSymbolAnchors` to simplify codes. As `riscvFinalizeRelax` is an
+arch-specific function, put it override on `TargetInfo::finalizeRelax`,
+so that LoongArch can override it, too.
+
+The flow of relax R_LARCH_ALIGN is almost consistent with RISCV. The
+difference is that LoongArch only has 4-bytes NOP and all executable
+insn is 4-bytes aligned. So LoongArch not need rewrite NOP sequence.
+Alignment maxBytesEmit parameter is supported in psABI v2.30.
+
+(cherry picked from commit 06a728f3feab876f9195738b5774e82dadc0f3a7)
+(cherry picked from commit 60a8ec3a35c722a9eb8298c215321b89d0faf5b5)
+Change-Id: I680e9a44f05fb2cc820736eee63ddd999e689daf
+---
+ lld/ELF/Arch/LoongArch.cpp                 | 156 ++++++++++++++++++++-
+ lld/ELF/Arch/RISCV.cpp                     |  28 +---
+ lld/ELF/InputSection.cpp                   |   5 +-
+ lld/ELF/InputSection.h                     |  24 +++-
+ lld/ELF/Target.h                           |   3 +
+ lld/ELF/Writer.cpp                         |   4 +-
+ lld/test/ELF/loongarch-relax-align.s       | 126 +++++++++++++++++
+ lld/test/ELF/loongarch-relax-emit-relocs.s |  49 +++++++
+ 8 files changed, 362 insertions(+), 33 deletions(-)
+ create mode 100644 lld/test/ELF/loongarch-relax-align.s
+ create mode 100644 lld/test/ELF/loongarch-relax-emit-relocs.s
+
+diff --git a/lld/ELF/Arch/LoongArch.cpp b/lld/ELF/Arch/LoongArch.cpp
+index d3a538577a59..3f57a76873f9 100644
+--- a/lld/ELF/Arch/LoongArch.cpp
++++ b/lld/ELF/Arch/LoongArch.cpp
+@@ -36,6 +36,8 @@ public:
+   bool usesOnlyLowPageBits(RelType type) const override;
+   void relocate(uint8_t *loc, const Relocation &rel,
+                 uint64_t val) const override;
++  bool relaxOnce(int pass) const override;
++  void finalizeRelax(int passes) const override;
+ };
+ } // end anonymous namespace
+ 
+@@ -521,8 +523,9 @@ RelExpr LoongArch::getRelExpr(const RelType type, const Symbol &s,
+   case R_LARCH_TLS_GD_HI20:
+     return R_TLSGD_GOT;
+   case R_LARCH_RELAX:
+-    // LoongArch linker relaxation is not implemented yet.
+-    return R_NONE;
++    return config->relax ? R_RELAX_HINT : R_NONE;
++  case R_LARCH_ALIGN:
++    return R_RELAX_HINT;
+ 
+   // Other known relocs that are explicitly unimplemented:
+   //
+@@ -696,6 +699,155 @@ void LoongArch::relocate(uint8_t *loc, const Relocation &rel,
+   }
+ }
+ 
++static bool relax(InputSection &sec) {
++  const uint64_t secAddr = sec.getVA();
++  const MutableArrayRef<Relocation> relocs = sec.relocs();
++  auto &aux = *sec.relaxAux;
++  bool changed = false;
++  ArrayRef<SymbolAnchor> sa = ArrayRef(aux.anchors);
++  uint64_t delta = 0;
++
++  std::fill_n(aux.relocTypes.get(), relocs.size(), R_LARCH_NONE);
++  aux.writes.clear();
++  for (auto [i, r] : llvm::enumerate(relocs)) {
++    const uint64_t loc = secAddr + r.offset - delta;
++    uint32_t &cur = aux.relocDeltas[i], remove = 0;
++    switch (r.type) {
++    case R_LARCH_ALIGN: {
++      const uint64_t addend =
++          r.sym->isUndefined() ? Log2_64(r.addend) + 1 : r.addend;
++      const uint64_t allBytes = (1 << (addend & 0xff)) - 4;
++      const uint64_t align = 1 << (addend & 0xff);
++      const uint64_t maxBytes = addend >> 8;
++      const uint64_t off = loc & (align - 1);
++      const uint64_t curBytes = off == 0 ? 0 : align - off;
++      // All bytes beyond the alignment boundary should be removed.
++      // If emit bytes more than max bytes to emit, remove all.
++      if (maxBytes != 0 && curBytes > maxBytes)
++        remove = allBytes;
++      else
++        remove = allBytes - curBytes;
++      // If we can't satisfy this alignment, we've found a bad input.
++      if (LLVM_UNLIKELY(static_cast<int32_t>(remove) < 0)) {
++        errorOrWarn(getErrorLocation((const uint8_t *)loc) +
++                    "insufficient padding bytes for " + lld::toString(r.type) +
++                    ": " + Twine(allBytes) + " bytes available for " +
++                    "requested alignment of " + Twine(align) + " bytes");
++        remove = 0;
++      }
++      break;
++    }
++    }
++
++    // For all anchors whose offsets are <= r.offset, they are preceded by
++    // the previous relocation whose `relocDeltas` value equals `delta`.
++    // Decrease their st_value and update their st_size.
++    for (; sa.size() && sa[0].offset <= r.offset; sa = sa.slice(1)) {
++      if (sa[0].end)
++        sa[0].d->size = sa[0].offset - delta - sa[0].d->value;
++      else
++        sa[0].d->value = sa[0].offset - delta;
++    }
++    delta += remove;
++    if (delta != cur) {
++      cur = delta;
++      changed = true;
++    }
++  }
++
++  for (const SymbolAnchor &a : sa) {
++    if (a.end)
++      a.d->size = a.offset - delta - a.d->value;
++    else
++      a.d->value = a.offset - delta;
++  }
++  // Inform assignAddresses that the size has changed.
++  if (!isUInt<32>(delta))
++    fatal("section size decrease is too large: " + Twine(delta));
++  sec.bytesDropped = delta;
++  return changed;
++}
++
++// When relaxing just R_LARCH_ALIGN, relocDeltas is usually changed only once in
++// the absence of a linker script. For call and load/store R_LARCH_RELAX, code
++// shrinkage may reduce displacement and make more relocations eligible for
++// relaxation. Code shrinkage may increase displacement to a call/load/store
++// target at a higher fixed address, invalidating an earlier relaxation. Any
++// change in section sizes can have cascading effect and require another
++// relaxation pass.
++bool LoongArch::relaxOnce(int pass) const {
++  if (config->relocatable)
++    return false;
++
++  if (pass == 0)
++    initSymbolAnchors();
++
++  SmallVector<InputSection *, 0> storage;
++  bool changed = false;
++  for (OutputSection *osec : outputSections) {
++    if (!(osec->flags & SHF_EXECINSTR))
++      continue;
++    for (InputSection *sec : getInputSections(*osec, storage))
++      changed |= relax(*sec);
++  }
++  return changed;
++}
++
++void LoongArch::finalizeRelax(int passes) const {
++  log("relaxation passes: " + Twine(passes));
++  SmallVector<InputSection *, 0> storage;
++  for (OutputSection *osec : outputSections) {
++    if (!(osec->flags & SHF_EXECINSTR))
++      continue;
++    for (InputSection *sec : getInputSections(*osec, storage)) {
++      RelaxAux &aux = *sec->relaxAux;
++      if (!aux.relocDeltas)
++        continue;
++
++      MutableArrayRef<Relocation> rels = sec->relocs();
++      ArrayRef<uint8_t> old = sec->content();
++      size_t newSize = old.size() - aux.relocDeltas[rels.size() - 1];
++      uint8_t *p = context().bAlloc.Allocate<uint8_t>(newSize);
++      uint64_t offset = 0;
++      int64_t delta = 0;
++      sec->content_ = p;
++      sec->size = newSize;
++      sec->bytesDropped = 0;
++
++      // Update section content: remove NOPs for R_LARCH_ALIGN and rewrite
++      // instructions for relaxed relocations.
++      for (size_t i = 0, e = rels.size(); i != e; ++i) {
++        uint32_t remove = aux.relocDeltas[i] - delta;
++        delta = aux.relocDeltas[i];
++        if (remove == 0 && aux.relocTypes[i] == R_LARCH_NONE)
++          continue;
++
++        // Copy from last location to the current relocated location.
++        const Relocation &r = rels[i];
++        uint64_t size = r.offset - offset;
++        memcpy(p, old.data() + offset, size);
++        p += size;
++        offset = r.offset + remove;
++      }
++      memcpy(p, old.data() + offset, old.size() - offset);
++
++      // Subtract the previous relocDeltas value from the relocation offset.
++      // For a pair of R_LARCH_XXX/R_LARCH_RELAX with the same offset, decrease
++      // their r_offset by the same delta.
++      delta = 0;
++      for (size_t i = 0, e = rels.size(); i != e;) {
++        uint64_t cur = rels[i].offset;
++        do {
++          rels[i].offset -= delta;
++          if (aux.relocTypes[i] != R_LARCH_NONE)
++            rels[i].type = aux.relocTypes[i];
++        } while (++i != e && rels[i].offset == cur);
++        delta = aux.relocDeltas[i - 1];
++      }
++    }
++  }
++}
++
+ TargetInfo *elf::getLoongArchTargetInfo() {
+   static LoongArch target;
+   return &target;
+diff --git a/lld/ELF/Arch/RISCV.cpp b/lld/ELF/Arch/RISCV.cpp
+index d0d75118e30d..06120cabc132 100644
+--- a/lld/ELF/Arch/RISCV.cpp
++++ b/lld/ELF/Arch/RISCV.cpp
+@@ -44,6 +44,7 @@ public:
+   void relocate(uint8_t *loc, const Relocation &rel,
+                 uint64_t val) const override;
+   bool relaxOnce(int pass) const override;
++  void finalizeRelax(int passes) const override;
+ };
+ 
+ } // end anonymous namespace
+@@ -513,33 +514,14 @@ void RISCV::relocate(uint8_t *loc, const Relocation &rel, uint64_t val) const {
+   }
+ }
+ 
+-namespace {
+-struct SymbolAnchor {
+-  uint64_t offset;
+-  Defined *d;
+-  bool end; // true for the anchor of st_value+st_size
+-};
+-} // namespace
+-
+-struct elf::RISCVRelaxAux {
+-  // This records symbol start and end offsets which will be adjusted according
+-  // to the nearest relocDeltas element.
+-  SmallVector<SymbolAnchor, 0> anchors;
+-  // For relocations[i], the actual offset is r_offset - (i ? relocDeltas[i-1] :
+-  // 0).
+-  std::unique_ptr<uint32_t[]> relocDeltas;
+-  // For relocations[i], the actual type is relocTypes[i].
+-  std::unique_ptr<RelType[]> relocTypes;
+-  SmallVector<uint32_t, 0> writes;
+-};
+ 
+-static void initSymbolAnchors() {
++void elf::initSymbolAnchors() {
+   SmallVector<InputSection *, 0> storage;
+   for (OutputSection *osec : outputSections) {
+     if (!(osec->flags & SHF_EXECINSTR))
+       continue;
+     for (InputSection *sec : getInputSections(*osec, storage)) {
+-      sec->relaxAux = make<RISCVRelaxAux>();
++      sec->relaxAux = make<RelaxAux>();
+       if (sec->relocs().size()) {
+         sec->relaxAux->relocDeltas =
+             std::make_unique<uint32_t[]>(sec->relocs().size());
+@@ -766,7 +748,7 @@ bool RISCV::relaxOnce(int pass) const {
+   return changed;
+ }
+ 
+-void elf::riscvFinalizeRelax(int passes) {
++void RISCV::finalizeRelax(int passes) const {
+   llvm::TimeTraceScope timeScope("Finalize RISC-V relaxation");
+   log("relaxation passes: " + Twine(passes));
+   SmallVector<InputSection *, 0> storage;
+@@ -774,7 +756,7 @@ void elf::riscvFinalizeRelax(int passes) {
+     if (!(osec->flags & SHF_EXECINSTR))
+       continue;
+     for (InputSection *sec : getInputSections(*osec, storage)) {
+-      RISCVRelaxAux &aux = *sec->relaxAux;
++      RelaxAux &aux = *sec->relaxAux;
+       if (!aux.relocDeltas)
+         continue;
+ 
+diff --git a/lld/ELF/InputSection.cpp b/lld/ELF/InputSection.cpp
+index 1aff6b968d86..b178d82407e3 100644
+--- a/lld/ELF/InputSection.cpp
++++ b/lld/ELF/InputSection.cpp
+@@ -351,8 +351,9 @@ InputSectionBase *InputSection::getRelocatedSection() const {
+ 
+ template <class ELFT, class RelTy>
+ void InputSection::copyRelocations(uint8_t *buf) {
+-  if (config->relax && !config->relocatable && config->emachine == EM_RISCV) {
+-    // On RISC-V, relaxation might change relocations: copy from
++  if (config->relax && !config->relocatable &&
++      (config->emachine == EM_RISCV || config->emachine == EM_LOONGARCH)) {
++    // On LoongArch and RISC-V, relaxation might change relocations: copy from
+     // internal ones that are updated by relaxation.
+     InputSectionBase *sec = getRelocatedSection();
+     copyRelocations<ELFT, RelTy>(buf, llvm::make_range(sec->relocations.begin(),
+diff --git a/lld/ELF/InputSection.h b/lld/ELF/InputSection.h
+index 2b91711abba3..842bc369909d 100644
+--- a/lld/ELF/InputSection.h
++++ b/lld/ELF/InputSection.h
+@@ -101,7 +101,23 @@ protected:
+         link(link), info(info) {}
+ };
+ 
+-struct RISCVRelaxAux;
++struct SymbolAnchor {
++  uint64_t offset;
++  Defined *d;
++  bool end; // true for the anchor of st_value+st_size
++};
++
++struct RelaxAux {
++  // This records symbol start and end offsets which will be adjusted according
++  // to the nearest relocDeltas element.
++  SmallVector<SymbolAnchor, 0> anchors;
++  // For relocations[i], the actual offset is
++  //   r_offset - (i ? relocDeltas[i-1] : 0).
++  std::unique_ptr<uint32_t[]> relocDeltas;
++  // For relocations[i], the actual type is relocTypes[i].
++  std::unique_ptr<RelType[]> relocTypes;
++  SmallVector<uint32_t, 0> writes;
++};
+ 
+ // This corresponds to a section of an input file.
+ class InputSectionBase : public SectionBase {
+@@ -222,9 +238,9 @@ public:
+     // basic blocks.
+     JumpInstrMod *jumpInstrMod = nullptr;
+ 
+-    // Auxiliary information for RISC-V linker relaxation. RISC-V does not use
+-    // jumpInstrMod.
+-    RISCVRelaxAux *relaxAux;
++    // Auxiliary information for RISC-V and LoongArch linker relaxation.
++    // They do not use jumpInstrMod.
++    RelaxAux *relaxAux;
+ 
+     // The compressed content size when `compressed` is true.
+     size_t compressedSize;
+diff --git a/lld/ELF/Target.h b/lld/ELF/Target.h
+index 47dbe6b4d1c6..bf831afa1793 100644
+--- a/lld/ELF/Target.h
++++ b/lld/ELF/Target.h
+@@ -94,6 +94,8 @@ public:
+ 
+   // Do a linker relaxation pass and return true if we changed something.
+   virtual bool relaxOnce(int pass) const { return false; }
++  // Do finalize relaxation after collecting relaxation infos.
++  virtual void finalizeRelax(int passes) const {}
+ 
+   virtual void applyJumpInstrMod(uint8_t *loc, JumpModType type,
+                                  JumpModType val) const {}
+@@ -234,6 +236,7 @@ void addArmInputSectionMappingSymbols();
+ void addArmSyntheticSectionMappingSymbol(Defined *);
+ void sortArmMappingSymbols();
+ void convertArmInstructionstoBE8(InputSection *sec, uint8_t *buf);
++void initSymbolAnchors();
+ 
+ LLVM_LIBRARY_VISIBILITY extern const TargetInfo *target;
+ TargetInfo *getTarget();
+diff --git a/lld/ELF/Writer.cpp b/lld/ELF/Writer.cpp
+index 368c9aabceae..dd37bbbf76c1 100644
+--- a/lld/ELF/Writer.cpp
++++ b/lld/ELF/Writer.cpp
+@@ -1668,8 +1668,8 @@ template <class ELFT> void Writer<ELFT>::finalizeAddressDependentContent() {
+       }
+     }
+   }
+-  if (!config->relocatable && config->emachine == EM_RISCV)
+-    riscvFinalizeRelax(pass);
++  if (!config->relocatable)
++    target->finalizeRelax(pass);
+ 
+   if (config->relocatable)
+     for (OutputSection *sec : outputSections)
+diff --git a/lld/test/ELF/loongarch-relax-align.s b/lld/test/ELF/loongarch-relax-align.s
+new file mode 100644
+index 000000000000..ab61e15d5cac
+--- /dev/null
++++ b/lld/test/ELF/loongarch-relax-align.s
+@@ -0,0 +1,126 @@
++# REQUIRES: loongarch
++
++# RUN: llvm-mc --filetype=obj --triple=loongarch32 --mattr=+relax %s -o %t.32.o
++# RUN: llvm-mc --filetype=obj --triple=loongarch64 --mattr=+relax %s -o %t.64.o
++# RUN: ld.lld --section-start=.text=0x10000 --section-start=.text2=0x20000 -e 0 %t.32.o -o %t.32
++# RUN: ld.lld --section-start=.text=0x10000 --section-start=.text2=0x20000 -e 0 %t.64.o -o %t.64
++# RUN: ld.lld --section-start=.text=0x10000 --section-start=.text2=0x20000 -e 0 %t.32.o --no-relax -o %t.32n
++# RUN: ld.lld --section-start=.text=0x10000 --section-start=.text2=0x20000 -e 0 %t.64.o --no-relax -o %t.64n
++# RUN: llvm-objdump -td --no-show-raw-insn %t.32 | FileCheck %s
++# RUN: llvm-objdump -td --no-show-raw-insn %t.64 | FileCheck %s
++# RUN: llvm-objdump -td --no-show-raw-insn %t.32n | FileCheck %s
++# RUN: llvm-objdump -td --no-show-raw-insn %t.64n | FileCheck %s
++
++## Test the R_LARCH_ALIGN without symbol index.
++# RUN: llvm-mc --filetype=obj --triple=loongarch64 --mattr=+relax %s -o %t.o64.o --defsym=old=1
++# RUN: ld.lld --section-start=.text=0x10000 --section-start=.text2=0x20000 -e 0 %t.o64.o -o %t.o64
++# RUN: ld.lld --section-start=.text=0x10000 --section-start=.text2=0x20000 -e 0 %t.o64.o --no-relax -o %t.o64n
++# RUN: llvm-objdump -td --no-show-raw-insn %t.o64 | FileCheck %s
++# RUN: llvm-objdump -td --no-show-raw-insn %t.o64n | FileCheck %s
++
++## -r keeps section contents unchanged.
++# RUN: ld.lld -r %t.64.o -o %t.64.r
++# RUN: llvm-objdump -dr --no-show-raw-insn %t.64.r | FileCheck %s --check-prefix=CHECKR
++
++# CHECK-DAG: {{0*}}10000 l .text  {{0*}}44 .Ltext_start
++# CHECK-DAG: {{0*}}10038 l .text  {{0*}}0c .L1
++# CHECK-DAG: {{0*}}10040 l .text  {{0*}}04 .L2
++# CHECK-DAG: {{0*}}20000 l .text2 {{0*}}14 .Ltext2_start
++
++# CHECK:      <.Ltext_start>:
++# CHECK-NEXT:   break 1
++# CHECK-NEXT:   break 2
++# CHECK-NEXT:   nop
++# CHECK-NEXT:   nop
++# CHECK-NEXT:   break 3
++# CHECK-NEXT:   break 4
++# CHECK-NEXT:   nop
++# CHECK-NEXT:   nop
++# CHECK-NEXT:   pcalau12i     $a0, 0
++# CHECK-NEXT:   addi.{{[dw]}} $a0, $a0, 0
++# CHECK-NEXT:   pcalau12i     $a0, 0
++# CHECK-NEXT:   addi.{{[dw]}} $a0, $a0, 56
++# CHECK-NEXT:   pcalau12i     $a0, 0
++# CHECK-NEXT:   addi.{{[dw]}} $a0, $a0, 64
++# CHECK-EMPTY:
++# CHECK-NEXT: <.L1>:
++# CHECK-NEXT:   nop
++# CHECK-NEXT:   nop
++# CHECK-EMPTY:
++# CHECK-NEXT: <.L2>:
++# CHECK-NEXT:   break 5
++
++# CHECK:      <.Ltext2_start>:
++# CHECK-NEXT:   pcalau12i     $a0, 0
++# CHECK-NEXT:   addi.{{[dw]}} $a0, $a0, 0
++# CHECK-NEXT:   nop
++# CHECK-NEXT:   nop
++# CHECK-NEXT:   break 6
++
++# CHECKR:      <.Ltext2_start>:
++# CHECKR-NEXT:   pcalau12i $a0, 0
++# CHECKR-NEXT:   {{0*}}00: R_LARCH_PCALA_HI20 .Ltext2_start
++# CHECKR-NEXT:   {{0*}}00: R_LARCH_RELAX      *ABS*
++# CHECKR-NEXT:   addi.d    $a0, $a0, 0
++# CHECKR-NEXT:   {{0*}}04: R_LARCH_PCALA_LO12 .Ltext2_start
++# CHECKR-NEXT:   {{0*}}04: R_LARCH_RELAX      *ABS*
++# CHECKR-NEXT:   nop
++# CHECKR-NEXT:   {{0*}}08: R_LARCH_ALIGN      .Lalign_symbol+0x4
++# CHECKR-NEXT:   nop
++# CHECKR-NEXT:   nop
++# CHECKR-NEXT:   break 6
++
++.macro .fake_p2align_4 max=0
++  .ifdef old
++    .if \max==0
++      .reloc ., R_LARCH_ALIGN, 0xc
++      nop; nop; nop
++    .endif
++  .else
++    .reloc ., R_LARCH_ALIGN, .Lalign_symbol + 0x4 + (\max << 8)
++    nop; nop; nop
++  .endif
++.endm
++
++  .text
++.Lalign_symbol:
++.Ltext_start:
++  break 1
++  break 2
++## +0x8: Emit 2 nops, delete 1 nop.
++  .fake_p2align_4
++
++  break 3
++## +0x14: Emit 3 nops > 8 bytes, not emit.
++  .fake_p2align_4 8
++
++  break 4
++  .fake_p2align_4 8
++## +0x18: Emit 2 nops <= 8 bytes.
++
++## Compensate
++.ifdef old
++  nop; nop
++.endif
++
++## +0x20: Test symbol value and symbol size can be handled.
++  la.pcrel $a0, .Ltext_start
++  la.pcrel $a0, .L1
++  la.pcrel $a0, .L2
++
++## +0x38: Emit 2 nops, delete 1 nop.
++.L1:
++  .fake_p2align_4
++.L2:
++  break 5
++  .size .L1, . - .L1
++  .size .L2, . - .L2
++  .size .Ltext_start, . - .Ltext_start
++
++## Test another text section.
++  .section .text2,"ax",@progbits
++.Ltext2_start:
++  la.pcrel $a0, .Ltext2_start
++  .fake_p2align_4
++  break 6
++  .size .Ltext2_start, . - .Ltext2_start
+diff --git a/lld/test/ELF/loongarch-relax-emit-relocs.s b/lld/test/ELF/loongarch-relax-emit-relocs.s
+new file mode 100644
+index 000000000000..581fce8c95ca
+--- /dev/null
++++ b/lld/test/ELF/loongarch-relax-emit-relocs.s
+@@ -0,0 +1,49 @@
++# REQUIRES: loongarch
++## Test that we can handle --emit-relocs while relaxing.
++
++# RUN: llvm-mc --filetype=obj --triple=loongarch32 --mattr=+relax %s -o %t.32.o
++# RUN: llvm-mc --filetype=obj --triple=loongarch64 --mattr=+relax %s -o %t.64.o
++# RUN: ld.lld -Ttext=0x10000 --emit-relocs %t.32.o -o %t.32
++# RUN: ld.lld -Ttext=0x10000 --emit-relocs %t.64.o -o %t.64
++# RUN: llvm-objdump -dr %t.32 | FileCheck %s
++# RUN: llvm-objdump -dr %t.64 | FileCheck %s
++
++## -r should keep original relocations.
++# RUN: ld.lld -r %t.64.o -o %t.64.r
++# RUN: llvm-objdump -dr %t.64.r | FileCheck %s --check-prefix=CHECKR
++
++## --no-relax should keep original relocations.
++## TODO Due to R_LARCH_RELAX is not relaxed, it plays same as --relax now.
++# RUN: ld.lld -Ttext=0x10000 --emit-relocs --no-relax %t.64.o -o %t.64.norelax
++# RUN: llvm-objdump -dr %t.64.norelax | FileCheck %s
++
++# CHECK:      00010000 <_start>:
++# CHECK-NEXT:   pcalau12i $a0, 0
++# CHECK-NEXT:     R_LARCH_PCALA_HI20 _start
++# CHECK-NEXT:     R_LARCH_RELAX *ABS*
++# CHECK-NEXT:   addi.{{[dw]}} $a0, $a0, 0
++# CHECK-NEXT:     R_LARCH_PCALA_LO12 _start
++# CHECK-NEXT:     R_LARCH_RELAX *ABS*
++# CHECK-NEXT:   nop
++# CHECK-NEXT:     R_LARCH_ALIGN .Lla-relax-align0+0x4
++# CHECK-NEXT:   nop
++# CHECK-NEXT:   ret
++
++# CHECKR:      <_start>:
++# CHECKR-NEXT:   pcalau12i $a0, 0
++# CHECKR-NEXT:     R_LARCH_PCALA_HI20 _start
++# CHECKR-NEXT:     R_LARCH_RELAX *ABS*
++# CHECKR-NEXT:   addi.d $a0, $a0, 0
++# CHECKR-NEXT:     R_LARCH_PCALA_LO12 _start
++# CHECKR-NEXT:     R_LARCH_RELAX *ABS*
++# CHECKR-NEXT:   nop
++# CHECKR-NEXT:     R_LARCH_ALIGN .Lla-relax-align0+0x4
++# CHECKR-NEXT:   nop
++# CHECKR-NEXT:   nop
++# CHECKR-NEXT:   ret
++
++.global _start
++_start:
++  la.pcrel $a0, _start
++  .p2align 4
++  ret
+-- 
+2.20.1
+

@@ -1,0 +1,376 @@
+From 286c92a8e78c4b67368c2f47a8e73036fdacbae2 Mon Sep 17 00:00:00 2001
+From: Jinyang He <hejinyang@loongson.cn>
+Date: Tue, 16 Jan 2024 13:20:13 +0800
+Subject: [PATCH 07/14] [LoongArch] Add relaxDwarfLineAddr and relaxDwarfCFA to
+ handle the mutable label diff in dwarfinfo (#77728)
+
+When linker-relaxation is enabled, part of the label diff in dwarfinfo
+cannot be computed before static link. Refer to RISCV, we add the
+relaxDwarfLineAddr and relaxDwarfCFA to add relocations for these label
+diffs. Calculate whether the label diff is mutable. For immutable label
+diff, return false and do the other works by its parent function.
+
+(cherry picked from commit ed7f4edc19ada006789318a0929b57d1b5a761bd)
+Change-Id: Iae5bad958c6d1a71dac1672f5f03991eaeea6d22
+---
+ llvm/lib/Object/RelocationResolver.cpp        |  12 +-
+ .../MCTargetDesc/LoongArchAsmBackend.cpp      | 129 ++++++++++++++++++
+ .../MCTargetDesc/LoongArchAsmBackend.h        |   5 +
+ .../LoongArch/dwarf-loongarch-relocs.ll       | 128 +++++++++++++++++
+ llvm/test/DebugInfo/LoongArch/lit.local.cfg   |   2 +
+ 5 files changed, 274 insertions(+), 2 deletions(-)
+ create mode 100644 llvm/test/DebugInfo/LoongArch/dwarf-loongarch-relocs.ll
+ create mode 100644 llvm/test/DebugInfo/LoongArch/lit.local.cfg
+
+diff --git a/llvm/lib/Object/RelocationResolver.cpp b/llvm/lib/Object/RelocationResolver.cpp
+index 03ac59289528..0e5036d7dfcc 100644
+--- a/llvm/lib/Object/RelocationResolver.cpp
++++ b/llvm/lib/Object/RelocationResolver.cpp
+@@ -539,6 +539,8 @@ static bool supportsLoongArch(uint64_t Type) {
+   case ELF::R_LARCH_32:
+   case ELF::R_LARCH_32_PCREL:
+   case ELF::R_LARCH_64:
++  case ELF::R_LARCH_ADD6:
++  case ELF::R_LARCH_SUB6:
+   case ELF::R_LARCH_ADD8:
+   case ELF::R_LARCH_SUB8:
+   case ELF::R_LARCH_ADD16:
+@@ -564,6 +566,10 @@ static uint64_t resolveLoongArch(uint64_t Type, uint64_t Offset, uint64_t S,
+     return (S + Addend - Offset) & 0xFFFFFFFF;
+   case ELF::R_LARCH_64:
+     return S + Addend;
++  case ELF::R_LARCH_ADD6:
++    return (LocData & 0xC0) | ((LocData + S + Addend) & 0x3F);
++  case ELF::R_LARCH_SUB6:
++    return (LocData & 0xC0) | ((LocData - (S + Addend)) & 0x3F);
+   case ELF::R_LARCH_ADD8:
+     return (LocData + (S + Addend)) & 0xFF;
+   case ELF::R_LARCH_SUB8:
+@@ -880,8 +886,10 @@ uint64_t resolveRelocation(RelocationResolver Resolver, const RelocationRef &R,
+ 
+       if (GetRelSectionType() == ELF::SHT_RELA) {
+         Addend = getELFAddend(R);
+-        // RISCV relocations use both LocData and Addend.
+-        if (Obj->getArch() != Triple::riscv32 &&
++        // LoongArch and RISCV relocations use both LocData and Addend.
++        if (Obj->getArch() != Triple::loongarch32 &&
++            Obj->getArch() != Triple::loongarch64 &&
++            Obj->getArch() != Triple::riscv32 &&
+             Obj->getArch() != Triple::riscv64)
+           LocData = 0;
+       }
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.cpp b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.cpp
+index 9227d4d6afed..8d82327b2e2b 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.cpp
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.cpp
+@@ -12,6 +12,7 @@
+ 
+ #include "LoongArchAsmBackend.h"
+ #include "LoongArchFixupKinds.h"
++#include "llvm/MC/MCAsmInfo.h"
+ #include "llvm/MC/MCAsmLayout.h"
+ #include "llvm/MC/MCAssembler.h"
+ #include "llvm/MC/MCContext.h"
+@@ -19,6 +20,7 @@
+ #include "llvm/MC/MCValue.h"
+ #include "llvm/Support/Endian.h"
+ #include "llvm/Support/EndianStream.h"
++#include "llvm/Support/LEB128.h"
+ 
+ #define DEBUG_TYPE "loongarch-asmbackend"
+ 
+@@ -235,6 +237,133 @@ std::pair<bool, bool> LoongArchAsmBackend::relaxLEB128(MCLEBFragment &LF,
+   return std::make_pair(true, true);
+ }
+ 
++bool LoongArchAsmBackend::relaxDwarfLineAddr(MCDwarfLineAddrFragment &DF,
++                                             MCAsmLayout &Layout,
++                                             bool &WasRelaxed) const {
++  MCContext &C = Layout.getAssembler().getContext();
++
++  int64_t LineDelta = DF.getLineDelta();
++  const MCExpr &AddrDelta = DF.getAddrDelta();
++  SmallVectorImpl<char> &Data = DF.getContents();
++  SmallVectorImpl<MCFixup> &Fixups = DF.getFixups();
++  size_t OldSize = Data.size();
++
++  int64_t Value;
++  if (AddrDelta.evaluateAsAbsolute(Value, Layout))
++    return false;
++  bool IsAbsolute = AddrDelta.evaluateKnownAbsolute(Value, Layout);
++  assert(IsAbsolute && "CFA with invalid expression");
++  (void)IsAbsolute;
++
++  Data.clear();
++  Fixups.clear();
++  raw_svector_ostream OS(Data);
++
++  // INT64_MAX is a signal that this is actually a DW_LNE_end_sequence.
++  if (LineDelta != INT64_MAX) {
++    OS << uint8_t(dwarf::DW_LNS_advance_line);
++    encodeSLEB128(LineDelta, OS);
++  }
++
++  unsigned Offset;
++  std::pair<MCFixupKind, MCFixupKind> FK;
++
++  // According to the DWARF specification, the `DW_LNS_fixed_advance_pc` opcode
++  // takes a single unsigned half (unencoded) operand. The maximum encodable
++  // value is therefore 65535.  Set a conservative upper bound for relaxation.
++  if (Value > 60000) {
++    unsigned PtrSize = C.getAsmInfo()->getCodePointerSize();
++
++    OS << uint8_t(dwarf::DW_LNS_extended_op);
++    encodeULEB128(PtrSize + 1, OS);
++
++    OS << uint8_t(dwarf::DW_LNE_set_address);
++    Offset = OS.tell();
++    assert((PtrSize == 4 || PtrSize == 8) && "Unexpected pointer size");
++    FK = getRelocPairForSize(PtrSize == 4 ? 32 : 64);
++    OS.write_zeros(PtrSize);
++  } else {
++    OS << uint8_t(dwarf::DW_LNS_fixed_advance_pc);
++    Offset = OS.tell();
++    FK = getRelocPairForSize(16);
++    support::endian::write<uint16_t>(OS, 0, support::little);
++  }
++
++  const MCBinaryExpr &MBE = cast<MCBinaryExpr>(AddrDelta);
++  Fixups.push_back(MCFixup::create(Offset, MBE.getLHS(), std::get<0>(FK)));
++  Fixups.push_back(MCFixup::create(Offset, MBE.getRHS(), std::get<1>(FK)));
++
++  if (LineDelta == INT64_MAX) {
++    OS << uint8_t(dwarf::DW_LNS_extended_op);
++    OS << uint8_t(1);
++    OS << uint8_t(dwarf::DW_LNE_end_sequence);
++  } else {
++    OS << uint8_t(dwarf::DW_LNS_copy);
++  }
++
++  WasRelaxed = OldSize != Data.size();
++  return true;
++}
++
++bool LoongArchAsmBackend::relaxDwarfCFA(MCDwarfCallFrameFragment &DF,
++                                        MCAsmLayout &Layout,
++                                        bool &WasRelaxed) const {
++  const MCExpr &AddrDelta = DF.getAddrDelta();
++  SmallVectorImpl<char> &Data = DF.getContents();
++  SmallVectorImpl<MCFixup> &Fixups = DF.getFixups();
++  size_t OldSize = Data.size();
++
++  int64_t Value;
++  if (AddrDelta.evaluateAsAbsolute(Value, Layout))
++    return false;
++  bool IsAbsolute = AddrDelta.evaluateKnownAbsolute(Value, Layout);
++  assert(IsAbsolute && "CFA with invalid expression");
++  (void)IsAbsolute;
++
++  Data.clear();
++  Fixups.clear();
++  raw_svector_ostream OS(Data);
++
++  assert(
++      Layout.getAssembler().getContext().getAsmInfo()->getMinInstAlignment() ==
++          1 &&
++      "expected 1-byte alignment");
++  if (Value == 0) {
++    WasRelaxed = OldSize != Data.size();
++    return true;
++  }
++
++  auto AddFixups = [&Fixups,
++                    &AddrDelta](unsigned Offset,
++                                std::pair<MCFixupKind, MCFixupKind> FK) {
++    const MCBinaryExpr &MBE = cast<MCBinaryExpr>(AddrDelta);
++    Fixups.push_back(MCFixup::create(Offset, MBE.getLHS(), std::get<0>(FK)));
++    Fixups.push_back(MCFixup::create(Offset, MBE.getRHS(), std::get<1>(FK)));
++  };
++
++  if (isUIntN(6, Value)) {
++    OS << uint8_t(dwarf::DW_CFA_advance_loc);
++    AddFixups(0, getRelocPairForSize(6));
++  } else if (isUInt<8>(Value)) {
++    OS << uint8_t(dwarf::DW_CFA_advance_loc1);
++    support::endian::write<uint8_t>(OS, 0, support::little);
++    AddFixups(1, getRelocPairForSize(8));
++  } else if (isUInt<16>(Value)) {
++    OS << uint8_t(dwarf::DW_CFA_advance_loc2);
++    support::endian::write<uint16_t>(OS, 0, support::little);
++    AddFixups(1, getRelocPairForSize(16));
++  } else if (isUInt<32>(Value)) {
++    OS << uint8_t(dwarf::DW_CFA_advance_loc4);
++    support::endian::write<uint32_t>(OS, 0, support::little);
++    AddFixups(1, getRelocPairForSize(32));
++  } else {
++    llvm_unreachable("unsupported CFA encoding");
++  }
++
++  WasRelaxed = OldSize != Data.size();
++  return true;
++}
++
+ bool LoongArchAsmBackend::writeNopData(raw_ostream &OS, uint64_t Count,
+                                        const MCSubtargetInfo *STI) const {
+   // We mostly follow binutils' convention here: align to 4-byte boundary with a
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.h b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.h
+index 49801e4fd81a..657f5ca5e731 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.h
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.h
+@@ -68,6 +68,11 @@ public:
+   std::pair<bool, bool> relaxLEB128(MCLEBFragment &LF, MCAsmLayout &Layout,
+                                     int64_t &Value) const override;
+ 
++  bool relaxDwarfLineAddr(MCDwarfLineAddrFragment &DF, MCAsmLayout &Layout,
++                          bool &WasRelaxed) const override;
++  bool relaxDwarfCFA(MCDwarfCallFrameFragment &DF, MCAsmLayout &Layout,
++                     bool &WasRelaxed) const override;
++
+   bool writeNopData(raw_ostream &OS, uint64_t Count,
+                     const MCSubtargetInfo *STI) const override;
+ 
+diff --git a/llvm/test/DebugInfo/LoongArch/dwarf-loongarch-relocs.ll b/llvm/test/DebugInfo/LoongArch/dwarf-loongarch-relocs.ll
+new file mode 100644
+index 000000000000..e03b4c1d34de
+--- /dev/null
++++ b/llvm/test/DebugInfo/LoongArch/dwarf-loongarch-relocs.ll
+@@ -0,0 +1,128 @@
++; RUN: llc --filetype=obj --mtriple=loongarch64 --mattr=-relax %s -o %t.o
++; RUN: llvm-readobj -r %t.o | FileCheck --check-prefixes=RELOCS-BOTH,RELOCS-NORL %s
++; RUN: llvm-objdump --source %t.o | FileCheck --check-prefix=SOURCE %s
++; RUN: llvm-dwarfdump --debug-info --debug-line %t.o | FileCheck --check-prefix=DWARF %s
++
++; RUN: llc --filetype=obj --mtriple=loongarch64 --mattr=+relax %s -o %t.r.o
++; RUN: llvm-readobj -r %t.r.o | FileCheck --check-prefixes=RELOCS-BOTH,RELOCS-ENRL %s
++; RUN: llvm-objdump --source %t.r.o | FileCheck --check-prefix=SOURCE %s
++; RUN: llvm-dwarfdump --debug-info --debug-line %t.r.o | FileCheck --check-prefix=DWARF %s
++
++; RELOCS-BOTH:       Relocations [
++; RELOCS-BOTH-NEXT:    Section ({{.*}}) .rela.text {
++; RELOCS-BOTH-NEXT:      0x14 R_LARCH_PCALA_HI20 sym 0x0
++; RELOCS-ENRL-NEXT:      0x14 R_LARCH_RELAX - 0x0
++; RELOCS-BOTH-NEXT:      0x18 R_LARCH_PCALA_LO12 sym 0x0
++; RELOCS-ENRL-NEXT:      0x18 R_LARCH_RELAX - 0x0
++; RELOCS-BOTH-NEXT:    }
++; RELOCS-BOTH:         Section ({{.*}}) .rela.debug_frame {
++; RELOCS-NORL-NEXT:      0x1C R_LARCH_32 .debug_frame 0x0
++; RELOCS-NORL-NEXT:      0x20 R_LARCH_64 .text 0x0
++; RELOCS-ENRL-NEXT:      0x1C R_LARCH_32 <null> 0x0
++; RELOCS-ENRL-NEXT:      0x20 R_LARCH_64 <null> 0x0
++; RELOCS-ENRL-NEXT:      0x28 R_LARCH_ADD64 <null> 0x0
++; RELOCS-ENRL-NEXT:      0x28 R_LARCH_SUB64 <null> 0x0
++; RELOCS-ENRL-NEXT:      0x3F R_LARCH_ADD6 <null> 0x0
++; RELOCS-ENRL-NEXT:      0x3F R_LARCH_SUB6 <null> 0x0
++; RELOCS-BOTH-NEXT:    }
++; RELOCS-BOTH:         Section ({{.*}}) .rela.debug_line {
++; RELOCS-BOTH-NEXT:      0x22 R_LARCH_32 .debug_line_str 0x0
++; RELOCS-BOTH-NEXT:      0x31 R_LARCH_32 .debug_line_str 0x2
++; RELOCS-BOTH-NEXT:      0x46 R_LARCH_32 .debug_line_str 0x1B
++; RELOCS-NORL-NEXT:      0x4F R_LARCH_64 .text 0x0
++; RELOCS-ENRL-NEXT:      0x4F R_LARCH_64 <null> 0x0
++; RELOCS-ENRL-NEXT:      0x5F R_LARCH_ADD16 <null> 0x0
++; RELOCS-ENRL-NEXT:      0x5F R_LARCH_SUB16 <null> 0x0
++; RELOCS-BOTH-NEXT:    }
++; RELOCS-BOTH-NEXT:  ]
++
++; SOURCE:  0000000000000000 <foo>:
++; SOURCE:  ; {
++; SOURCE:  ;   asm volatile(
++; SOURCE:  ;   return 0;
++
++; DWARF:       DW_AT_producer ("clang")
++; DWARF:       DW_AT_name ("dwarf-loongarch-relocs.c")
++; DWARF:       DW_AT_comp_dir (".")
++; DWARF:       DW_AT_name ("foo")
++; DWARF-NEXT:  DW_AT_decl_file ("{{.*}}dwarf-loongarch-relocs.c")
++; DWARF-NEXT:  DW_AT_decl_line (1)
++; DWARF-NEXT:  DW_AT_type (0x00000032 "int")
++; DWARF:       DW_AT_name ("int")
++; DWARF-NEXT:  DW_AT_encoding (DW_ATE_signed)
++; DWARF-NEXT:  DW_AT_byte_size (0x04)
++; DWARF:       .debug_line contents:
++; DWARF-NEXT:  debug_line[0x00000000]
++; DWARF-NEXT:  Line table prologue:
++; DWARF-NEXT:      total_length: {{.*}}
++; DWARF-NEXT:            format: DWARF32
++; DWARF-NEXT:           version: 5
++; DWARF-NEXT:      address_size: 8
++; DWARF-NEXT:   seg_select_size: 0
++; DWARF-NEXT:   prologue_length: 0x0000003e
++; DWARF-NEXT:   min_inst_length: 1
++; DWARF-NEXT:  max_ops_per_inst: 1
++; DWARF-NEXT:   default_is_stmt: 1
++; DWARF-NEXT:         line_base: -5
++; DWARF-NEXT:        line_range: 14
++; DWARF-NEXT:       opcode_base: 13
++; DWARF-NEXT:  standard_opcode_lengths[DW_LNS_copy] = 0
++; DWARF-NEXT:  standard_opcode_lengths[DW_LNS_advance_pc] = 1
++; DWARF-NEXT:  standard_opcode_lengths[DW_LNS_advance_line] = 1
++; DWARF-NEXT:  standard_opcode_lengths[DW_LNS_set_file] = 1
++; DWARF-NEXT:  standard_opcode_lengths[DW_LNS_set_column] = 1
++; DWARF-NEXT:  standard_opcode_lengths[DW_LNS_negate_stmt] = 0
++; DWARF-NEXT:  standard_opcode_lengths[DW_LNS_set_basic_block] = 0
++; DWARF-NEXT:  standard_opcode_lengths[DW_LNS_const_add_pc] = 0
++; DWARF-NEXT:  standard_opcode_lengths[DW_LNS_fixed_advance_pc] = 1
++; DWARF-NEXT:  standard_opcode_lengths[DW_LNS_set_prologue_end] = 0
++; DWARF-NEXT:  standard_opcode_lengths[DW_LNS_set_epilogue_begin] = 0
++; DWARF-NEXT:  standard_opcode_lengths[DW_LNS_set_isa] = 1
++; DWARF-NEXT:  include_directories[  0] = "."
++; DWARF-NEXT:  file_names[  0]:
++; DWARF-NEXT:             name: "dwarf-loongarch-relocs.c"
++; DWARF-NEXT:        dir_index: 0
++; DWARF-NEXT:     md5_checksum: f44d6d71bc4da58b4abe338ca507c007
++; DWARF-NEXT:           source: "{{.*}}"
++; DWARF-EMPTY:
++; DWARF-NEXT:  Address            Line   Column File   ISA Discriminator OpIndex Flags
++; DWARF-NEXT:  ------------------ ------ ------ ------ --- ------------- ------- -------------
++; DWARF-NEXT:  0x0000000000000000      2      0      0   0             0       0  is_stmt
++; DWARF-NEXT:  0x0000000000000010      3      3      0   0             0       0  is_stmt prologue_end
++; DWARF-NEXT:  0x0000000000000020     10      3      0   0             0       0  is_stmt
++; DWARF-NEXT:  0x000000000000002c     10      3      0   0             0       0  epilogue_begin
++; DWARF-NEXT:  0x0000000000000034     10      3      0   0             0       0  end_sequence
++
++; ModuleID = 'dwarf-loongarch-relocs.c'
++source_filename = "dwarf-loongarch-relocs.c"
++target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n64-S128"
++target triple = "loongarch64"
++
++; Function Attrs: noinline nounwind optnone
++define dso_local signext i32 @foo() #0 !dbg !8 {
++  call void asm sideeffect ".cfi_remember_state\0A\09.cfi_adjust_cfa_offset 16\0A\09nop\0A\09la.pcrel $$t0, sym\0A\09nop\0A\09.cfi_restore_state\0A\09", ""() #1, !dbg !12, !srcloc !13
++  ret i32 0, !dbg !14
++}
++
++attributes #0 = { noinline nounwind optnone "frame-pointer"="all" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="loongarch64" "target-features"="+64bit,+d,+f,+ual" }
++attributes #1 = { nounwind }
++
++!llvm.dbg.cu = !{!0}
++!llvm.module.flags = !{!2, !3, !4, !5, !6}
++!llvm.ident = !{!7}
++
++!0 = distinct !DICompileUnit(language: DW_LANG_C11, file: !1, producer: "clang", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug, splitDebugInlining: false, nameTableKind: None)
++!1 = !DIFile(filename: "dwarf-loongarch-relocs.c", directory: ".", checksumkind: CSK_MD5, checksum: "f44d6d71bc4da58b4abe338ca507c007", source: "int foo()\0A{\0A  asm volatile(\0A    \22.cfi_remember_state\\n\\t\22\0A    \22.cfi_adjust_cfa_offset 16\\n\\t\22\0A    \22nop\\n\\t\22\0A    \22la.pcrel $t0, sym\\n\\t\22\0A    \22nop\\n\\t\22\0A    \22.cfi_restore_state\\n\\t\22);\0A  return 0;\0A}\0A")
++!2 = !{i32 7, !"Dwarf Version", i32 5}
++!3 = !{i32 2, !"Debug Info Version", i32 3}
++!4 = !{i32 1, !"wchar_size", i32 4}
++!5 = !{i32 7, !"direct-access-external-data", i32 0}
++!6 = !{i32 7, !"frame-pointer", i32 2}
++!7 = !{!"clang"}
++!8 = distinct !DISubprogram(name: "foo", scope: !1, file: !1, line: 1, type: !9, scopeLine: 2, spFlags: DISPFlagDefinition, unit: !0)
++!9 = !DISubroutineType(types: !10)
++!10 = !{!11}
++!11 = !DIBasicType(name: "int", size: 32, encoding: DW_ATE_signed)
++!12 = !DILocation(line: 3, column: 3, scope: !8)
++!13 = !{i64 34, i64 56, i64 92, i64 106, i64 134, i64 148, i64 177}
++!14 = !DILocation(line: 10, column: 3, scope: !8)
+diff --git a/llvm/test/DebugInfo/LoongArch/lit.local.cfg b/llvm/test/DebugInfo/LoongArch/lit.local.cfg
+new file mode 100644
+index 000000000000..77becb8eee90
+--- /dev/null
++++ b/llvm/test/DebugInfo/LoongArch/lit.local.cfg
+@@ -0,0 +1,2 @@
++if "LoongArch" not in config.root.targets:
++    config.unsupported = True
+-- 
+2.20.1
+

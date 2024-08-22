@@ -154,3 +154,20 @@ D148945-revert.diff
 arm32-defaults.diff
 mips/D154390-pre-R6.diff
 D154931-revert-loong64.patch
+
+# These patches{0001~0014}, which add support for `relax` feature on LoongArch
+# in LLVM 18, are backported to LLVM 17.
+loongarch/relax/0001-lld-LoongArch-Support-the-R_LARCH_-ADD-SUB-6-relocat.patch
+loongarch/relax/0002-LoongArch-Add-relax-feature-and-keep-relocations-721.patch
+loongarch/relax/0003-LoongArch-Allow-delayed-decision-for-ADD-SUB-relocat.patch
+loongarch/relax/0004-LoongArch-Emit-R_LARCH_RELAX-when-expanding-some-Loa.patch
+loongarch/relax/0005-MC-LoongArch-Add-AlignFragment-size-if-layout-is-ava.patch
+loongarch/relax/0006-LoongArch-RISCV-Support-R_LARCH_-ADD-SUB-_ULEB128-R_.patch
+loongarch/relax/0007-LoongArch-Add-relaxDwarfLineAddr-and-relaxDwarfCFA-t.patch
+loongarch/relax/0008-LoongArch-Insert-nops-and-emit-align-reloc-when-hand.patch
+loongarch/relax/0009-ELF-RISCV-Implement-emit-relocs-with-relaxation.patch
+loongarch/relax/0010-lld-ELF-Support-relax-R_LARCH_ALIGN-78692.patch
+loongarch/relax/0011-test-Update-dwarf-loongarch-relocs.ll.patch
+loongarch/relax/0012-lld-LoongArch-Support-the-R_LARCH_-ADD-SUB-_ULEB128-.patch
+loongarch/relax/0013-MC-test-Change-ELF-uleb-ehtable.s-Mach-O-to-use-priv.patch
+loongarch/relax/0014-Mips-MC-AttemptToFoldSymbolOffsetDifference-revert-i.patch

@@ -1,0 +1,364 @@
+From f2495d7efb79fdc82af6147f7201d9cf3c91beba Mon Sep 17 00:00:00 2001
+From: Jinyang He <hejinyang@loongson.cn>
+Date: Wed, 27 Dec 2023 08:51:48 +0800
+Subject: [PATCH 04/14] [LoongArch] Emit R_LARCH_RELAX when expanding some
+ LoadAddress (#72961)
+
+Emit relax relocs when expand non-large la.pcrel and non-large la.got on
+llvm-mc stage, which like what does on GAS.
+1, la.pcrel -> PCALA_HI20 + RELAX + PCALA_LO12 + RELAX
+2, la.got -> GOT_PC_HI20 + RELAX + GOT_PC_LO12 + RELAX
+
+(cherry picked from commit b3ef8dce9811b2725639b0d4fac3f85c7e112817)
+Change-Id: I222daf60b36ee70e23c76b753e1d2a3b8148f44b
+---
+ .../AsmParser/LoongArchAsmParser.cpp          | 12 +--
+ .../MCTargetDesc/LoongArchMCCodeEmitter.cpp   | 13 +++
+ .../MCTargetDesc/LoongArchMCExpr.cpp          |  7 +-
+ .../LoongArch/MCTargetDesc/LoongArchMCExpr.h  |  8 +-
+ llvm/test/MC/LoongArch/Macros/macros-la.s     | 84 ++++++++++++++++---
+ llvm/test/MC/LoongArch/Misc/subsection.s      |  2 +-
+ .../MC/LoongArch/Relocations/relax-addsub.s   | 16 +++-
+ 7 files changed, 115 insertions(+), 27 deletions(-)
+
+diff --git a/llvm/lib/Target/LoongArch/AsmParser/LoongArchAsmParser.cpp b/llvm/lib/Target/LoongArch/AsmParser/LoongArchAsmParser.cpp
+index 94d530306536..a132e645c864 100644
+--- a/llvm/lib/Target/LoongArch/AsmParser/LoongArchAsmParser.cpp
++++ b/llvm/lib/Target/LoongArch/AsmParser/LoongArchAsmParser.cpp
+@@ -86,7 +86,7 @@ class LoongArchAsmParser : public MCTargetAsmParser {
+   // "emitLoadAddress*" functions.
+   void emitLAInstSeq(MCRegister DestReg, MCRegister TmpReg,
+                      const MCExpr *Symbol, SmallVectorImpl<Inst> &Insts,
+-                     SMLoc IDLoc, MCStreamer &Out);
++                     SMLoc IDLoc, MCStreamer &Out, bool RelaxHint = false);
+ 
+   // Helper to emit pseudo instruction "la.abs $rd, sym".
+   void emitLoadAddressAbs(MCInst &Inst, SMLoc IDLoc, MCStreamer &Out);
+@@ -749,12 +749,14 @@ bool LoongArchAsmParser::ParseInstruction(ParseInstructionInfo &Info,
+ void LoongArchAsmParser::emitLAInstSeq(MCRegister DestReg, MCRegister TmpReg,
+                                        const MCExpr *Symbol,
+                                        SmallVectorImpl<Inst> &Insts,
+-                                       SMLoc IDLoc, MCStreamer &Out) {
++                                       SMLoc IDLoc, MCStreamer &Out,
++                                       bool RelaxHint) {
+   MCContext &Ctx = getContext();
+   for (LoongArchAsmParser::Inst &Inst : Insts) {
+     unsigned Opc = Inst.Opc;
+     LoongArchMCExpr::VariantKind VK = Inst.VK;
+-    const LoongArchMCExpr *LE = LoongArchMCExpr::create(Symbol, VK, Ctx);
++    const LoongArchMCExpr *LE =
++        LoongArchMCExpr::create(Symbol, VK, Ctx, RelaxHint);
+     switch (Opc) {
+     default:
+       llvm_unreachable("unexpected opcode");
+@@ -855,7 +857,7 @@ void LoongArchAsmParser::emitLoadAddressPcrel(MCInst &Inst, SMLoc IDLoc,
+   Insts.push_back(
+       LoongArchAsmParser::Inst(ADDI, LoongArchMCExpr::VK_LoongArch_PCALA_LO12));
+ 
+-  emitLAInstSeq(DestReg, DestReg, Symbol, Insts, IDLoc, Out);
++  emitLAInstSeq(DestReg, DestReg, Symbol, Insts, IDLoc, Out, true);
+ }
+ 
+ void LoongArchAsmParser::emitLoadAddressPcrelLarge(MCInst &Inst, SMLoc IDLoc,
+@@ -901,7 +903,7 @@ void LoongArchAsmParser::emitLoadAddressGot(MCInst &Inst, SMLoc IDLoc,
+   Insts.push_back(
+       LoongArchAsmParser::Inst(LD, LoongArchMCExpr::VK_LoongArch_GOT_PC_LO12));
+ 
+-  emitLAInstSeq(DestReg, DestReg, Symbol, Insts, IDLoc, Out);
++  emitLAInstSeq(DestReg, DestReg, Symbol, Insts, IDLoc, Out, true);
+ }
+ 
+ void LoongArchAsmParser::emitLoadAddressGotLarge(MCInst &Inst, SMLoc IDLoc,
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCCodeEmitter.cpp b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCCodeEmitter.cpp
+index 03fb9e008ae9..08c0820cb862 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCCodeEmitter.cpp
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCCodeEmitter.cpp
+@@ -19,6 +19,7 @@
+ #include "llvm/MC/MCInstBuilder.h"
+ #include "llvm/MC/MCInstrInfo.h"
+ #include "llvm/MC/MCRegisterInfo.h"
++#include "llvm/MC/MCSubtargetInfo.h"
+ #include "llvm/Support/Casting.h"
+ #include "llvm/Support/EndianStream.h"
+ 
+@@ -120,12 +121,15 @@ LoongArchMCCodeEmitter::getExprOpValue(const MCInst &MI, const MCOperand &MO,
+                                        SmallVectorImpl<MCFixup> &Fixups,
+                                        const MCSubtargetInfo &STI) const {
+   assert(MO.isExpr() && "getExprOpValue expects only expressions");
++  bool RelaxCandidate = false;
++  bool EnableRelax = STI.hasFeature(LoongArch::FeatureRelax);
+   const MCExpr *Expr = MO.getExpr();
+   MCExpr::ExprKind Kind = Expr->getKind();
+   LoongArch::Fixups FixupKind = LoongArch::fixup_loongarch_invalid;
+   if (Kind == MCExpr::Target) {
+     const LoongArchMCExpr *LAExpr = cast<LoongArchMCExpr>(Expr);
+ 
++    RelaxCandidate = LAExpr->getRelaxHint();
+     switch (LAExpr->getKind()) {
+     case LoongArchMCExpr::VK_LoongArch_None:
+     case LoongArchMCExpr::VK_LoongArch_Invalid:
+@@ -269,6 +273,15 @@ LoongArchMCCodeEmitter::getExprOpValue(const MCInst &MI, const MCOperand &MO,
+ 
+   Fixups.push_back(
+       MCFixup::create(0, Expr, MCFixupKind(FixupKind), MI.getLoc()));
++
++  // Emit an R_LARCH_RELAX if linker relaxation is enabled and LAExpr has relax
++  // hint.
++  if (EnableRelax && RelaxCandidate) {
++    const MCConstantExpr *Dummy = MCConstantExpr::create(0, Ctx);
++    Fixups.push_back(MCFixup::create(
++        0, Dummy, MCFixupKind(LoongArch::fixup_loongarch_relax), MI.getLoc()));
++  }
++
+   return 0;
+ }
+ 
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCExpr.cpp b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCExpr.cpp
+index 993111552a31..82c992b1cc8c 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCExpr.cpp
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCExpr.cpp
+@@ -25,9 +25,10 @@ using namespace llvm;
+ 
+ #define DEBUG_TYPE "loongarch-mcexpr"
+ 
+-const LoongArchMCExpr *
+-LoongArchMCExpr::create(const MCExpr *Expr, VariantKind Kind, MCContext &Ctx) {
+-  return new (Ctx) LoongArchMCExpr(Expr, Kind);
++const LoongArchMCExpr *LoongArchMCExpr::create(const MCExpr *Expr,
++                                               VariantKind Kind, MCContext &Ctx,
++                                               bool Hint) {
++  return new (Ctx) LoongArchMCExpr(Expr, Kind, Hint);
+ }
+ 
+ void LoongArchMCExpr::printImpl(raw_ostream &OS, const MCAsmInfo *MAI) const {
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCExpr.h b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCExpr.h
+index 0945cf82db86..93251f824103 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCExpr.h
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCExpr.h
+@@ -67,16 +67,18 @@ public:
+ private:
+   const MCExpr *Expr;
+   const VariantKind Kind;
++  const bool RelaxHint;
+ 
+-  explicit LoongArchMCExpr(const MCExpr *Expr, VariantKind Kind)
+-      : Expr(Expr), Kind(Kind) {}
++  explicit LoongArchMCExpr(const MCExpr *Expr, VariantKind Kind, bool Hint)
++      : Expr(Expr), Kind(Kind), RelaxHint(Hint) {}
+ 
+ public:
+   static const LoongArchMCExpr *create(const MCExpr *Expr, VariantKind Kind,
+-                                       MCContext &Ctx);
++                                       MCContext &Ctx, bool Hint = false);
+ 
+   VariantKind getKind() const { return Kind; }
+   const MCExpr *getSubExpr() const { return Expr; }
++  bool getRelaxHint() const { return RelaxHint; }
+ 
+   void printImpl(raw_ostream &OS, const MCAsmInfo *MAI) const override;
+   bool evaluateAsRelocatableImpl(MCValue &Res, const MCAsmLayout *Layout,
+diff --git a/llvm/test/MC/LoongArch/Macros/macros-la.s b/llvm/test/MC/LoongArch/Macros/macros-la.s
+index 924e4326b8e5..1a1d12d7d7df 100644
+--- a/llvm/test/MC/LoongArch/Macros/macros-la.s
++++ b/llvm/test/MC/LoongArch/Macros/macros-la.s
+@@ -1,66 +1,128 @@
+ # RUN: llvm-mc --triple=loongarch64 %s | FileCheck %s
++# RUN: llvm-mc --filetype=obj --triple=loongarch64 --mattr=-relax %s -o %t
++# RUN: llvm-readobj -r %t | FileCheck %s --check-prefix=RELOC
++# RUN: llvm-mc --filetype=obj --triple=loongarch64 --mattr=+relax %s -o %t.relax
++# RUN: llvm-readobj -r %t.relax | FileCheck %s --check-prefixes=RELOC,RELAX
++
++# RELOC:      Relocations [
++# RELOC-NEXT:   Section ({{.*}}) .rela.text {
+ 
+ la.abs $a0, sym_abs
+ # CHECK:      lu12i.w $a0, %abs_hi20(sym_abs)
+ # CHECK-NEXT: ori $a0, $a0, %abs_lo12(sym_abs)
+ # CHECK-NEXT: lu32i.d $a0, %abs64_lo20(sym_abs)
+ # CHECK-NEXT: lu52i.d $a0, $a0, %abs64_hi12(sym_abs)
++# CHECK-EMPTY:
++# RELOC-NEXT: R_LARCH_ABS_HI20 sym_abs 0x0
++# RELOC-NEXT: R_LARCH_ABS_LO12 sym_abs 0x0
++# RELOC-NEXT: R_LARCH_ABS64_LO20 sym_abs 0x0
++# RELOC-NEXT: R_LARCH_ABS64_HI12 sym_abs 0x0
+ 
+ la.pcrel $a0, sym_pcrel
+-# CHECK:      pcalau12i $a0, %pc_hi20(sym_pcrel)
++# CHECK-NEXT: pcalau12i $a0, %pc_hi20(sym_pcrel)
+ # CHECK-NEXT: addi.d $a0, $a0, %pc_lo12(sym_pcrel)
++# CHECK-EMPTY:
++# RELOC-NEXT: R_LARCH_PCALA_HI20 sym_pcrel 0x0
++# RELAX-NEXT: R_LARCH_RELAX - 0x0
++# RELOC-NEXT: R_LARCH_PCALA_LO12 sym_pcrel 0x0
++# RELAX-NEXT: R_LARCH_RELAX - 0x0
+ 
+ la.pcrel $a0, $a1, sym_pcrel_large
+-# CHECK:      pcalau12i $a0, %pc_hi20(sym_pcrel_large)
++# CHECK-NEXT: pcalau12i $a0, %pc_hi20(sym_pcrel_large)
+ # CHECK-NEXT: addi.d $a1, $zero, %pc_lo12(sym_pcrel_large)
+ # CHECK-NEXT: lu32i.d $a1, %pc64_lo20(sym_pcrel_large)
+ # CHECK-NEXT: lu52i.d $a1, $a1, %pc64_hi12(sym_pcrel_large)
+ # CHECK-NEXT: add.d $a0, $a0, $a1
++# CHECK-EMPTY:
++# RELOC-NEXT: R_LARCH_PCALA_HI20 sym_pcrel_large 0x0
++# RELOC-NEXT: R_LARCH_PCALA_LO12 sym_pcrel_large 0x0
++# RELOC-NEXT: R_LARCH_PCALA64_LO20 sym_pcrel_large 0x0
++# RELOC-NEXT: R_LARCH_PCALA64_HI12 sym_pcrel_large 0x0
+ 
+ la.got $a0, sym_got
+-# CHECK:      pcalau12i $a0, %got_pc_hi20(sym_got)
++# CHECK-NEXT: pcalau12i $a0, %got_pc_hi20(sym_got)
+ # CHECK-NEXT: ld.d $a0, $a0, %got_pc_lo12(sym_got)
++# CHECK-EMPTY:
++# RELOC-NEXT: R_LARCH_GOT_PC_HI20 sym_got 0x0
++# RELAX-NEXT: R_LARCH_RELAX - 0x0
++# RELOC-NEXT: R_LARCH_GOT_PC_LO12 sym_got 0x0
++# RELAX-NEXT: R_LARCH_RELAX - 0x0
+ 
+ la.got $a0, $a1, sym_got_large
+-# CHECK:      pcalau12i $a0, %got_pc_hi20(sym_got_large)
++# CHECK-NEXT: pcalau12i $a0, %got_pc_hi20(sym_got_large)
+ # CHECK-NEXT: addi.d $a1, $zero, %got_pc_lo12(sym_got_large)
+ # CHECK-NEXT: lu32i.d $a1, %got64_pc_lo20(sym_got_large)
+ # CHECK-NEXT: lu52i.d $a1, $a1, %got64_pc_hi12(sym_got_large)
+ # CHECK-NEXT: ldx.d $a0, $a0, $a1
++# CHECK-EMPTY:
++# RELOC-NEXT: R_LARCH_GOT_PC_HI20 sym_got_large 0x0
++# RELOC-NEXT: R_LARCH_GOT_PC_LO12 sym_got_large 0x0
++# RELOC-NEXT: R_LARCH_GOT64_PC_LO20 sym_got_large 0x0
++# RELOC-NEXT: R_LARCH_GOT64_PC_HI12 sym_got_large 0x0
+ 
+ la.tls.le $a0, sym_le
+-# CHECK:      lu12i.w $a0, %le_hi20(sym_le)
++# CHECK-NEXT: lu12i.w $a0, %le_hi20(sym_le)
+ # CHECK-NEXT: ori $a0, $a0, %le_lo12(sym_le)
++# CHECK-EMPTY:
++# RELOC-NEXT: R_LARCH_TLS_LE_HI20 sym_le 0x0
++# RELOC-NEXT: R_LARCH_TLS_LE_LO12 sym_le 0x0
+ 
+ la.tls.ie $a0, sym_ie
+-# CHECK:      pcalau12i $a0, %ie_pc_hi20(sym_ie)
++# CHECK-NEXT: pcalau12i $a0, %ie_pc_hi20(sym_ie)
+ # CHECK-NEXT: ld.d $a0, $a0, %ie_pc_lo12(sym_ie)
++# CHECK-EMPTY:
++# RELOC-NEXT: R_LARCH_TLS_IE_PC_HI20 sym_ie 0x0
++# RELOC-NEXT: R_LARCH_TLS_IE_PC_LO12 sym_ie 0x0
+ 
+ la.tls.ie $a0, $a1, sym_ie_large
+-# CHECK:      pcalau12i $a0, %ie_pc_hi20(sym_ie_large)
++# CHECK-NEXT: pcalau12i $a0, %ie_pc_hi20(sym_ie_large)
+ # CHECK-NEXT: addi.d $a1, $zero, %ie_pc_lo12(sym_ie_large)
+ # CHECK-NEXT: lu32i.d $a1, %ie64_pc_lo20(sym_ie_large)
+ # CHECK-NEXT: lu52i.d $a1, $a1, %ie64_pc_hi12(sym_ie_large)
+ # CHECK-NEXT: ldx.d $a0, $a0, $a1
++# CHECK-EMPTY:
++# RELOC-NEXT: R_LARCH_TLS_IE_PC_HI20 sym_ie_large 0x0
++# RELOC-NEXT: R_LARCH_TLS_IE_PC_LO12 sym_ie_large 0x0
++# RELOC-NEXT: R_LARCH_TLS_IE64_PC_LO20 sym_ie_large 0x0
++# RELOC-NEXT: R_LARCH_TLS_IE64_PC_HI12 sym_ie_large 0x0
+ 
+ la.tls.ld $a0, sym_ld
+-# CHECK:      pcalau12i $a0, %ld_pc_hi20(sym_ld)
++# CHECK-NEXT: pcalau12i $a0, %ld_pc_hi20(sym_ld)
+ # CHECK-NEXT: addi.d $a0, $a0, %got_pc_lo12(sym_ld)
++# CHECK-EMPTY:
++# RELOC-NEXT: R_LARCH_TLS_LD_PC_HI20 sym_ld 0x0
++# RELOC-NEXT: R_LARCH_GOT_PC_LO12 sym_ld 0x0
+ 
+ la.tls.ld $a0, $a1, sym_ld_large
+-# CHECK:      pcalau12i $a0, %ld_pc_hi20(sym_ld_large)
++# CHECK-NEXT: pcalau12i $a0, %ld_pc_hi20(sym_ld_large)
+ # CHECK-NEXT: addi.d $a1, $zero, %got_pc_lo12(sym_ld_large)
+ # CHECK-NEXT: lu32i.d $a1, %got64_pc_lo20(sym_ld_large)
+ # CHECK-NEXT: lu52i.d $a1, $a1, %got64_pc_hi12(sym_ld_large)
+ # CHECK-NEXT: add.d $a0, $a0, $a1
++# CHECK-EMPTY:
++# RELOC-NEXT: R_LARCH_TLS_LD_PC_HI20 sym_ld_large 0x0
++# RELOC-NEXT: R_LARCH_GOT_PC_LO12 sym_ld_large 0x0
++# RELOC-NEXT: R_LARCH_GOT64_PC_LO20 sym_ld_large 0x0
++# RELOC-NEXT: R_LARCH_GOT64_PC_HI12 sym_ld_large 0x0
+ 
+ la.tls.gd $a0, sym_gd
+-# CHECK:      pcalau12i $a0, %gd_pc_hi20(sym_gd)
++# CHECK-NEXT: pcalau12i $a0, %gd_pc_hi20(sym_gd)
+ # CHECK-NEXT: addi.d $a0, $a0, %got_pc_lo12(sym_gd)
++# CHECK-EMPTY:
++# RELOC-NEXT: R_LARCH_TLS_GD_PC_HI20 sym_gd 0x0
++# RELOC-NEXT: R_LARCH_GOT_PC_LO12 sym_gd 0x0
+ 
+ la.tls.gd $a0, $a1, sym_gd_large
+-# CHECK:      pcalau12i $a0, %gd_pc_hi20(sym_gd_large)
++# CHECK-NEXT: pcalau12i $a0, %gd_pc_hi20(sym_gd_large)
+ # CHECK-NEXT: addi.d $a1, $zero, %got_pc_lo12(sym_gd_large)
+ # CHECK-NEXT: lu32i.d $a1, %got64_pc_lo20(sym_gd_large)
+ # CHECK-NEXT: lu52i.d $a1, $a1, %got64_pc_hi12(sym_gd_large)
+ # CHECK-NEXT: add.d $a0, $a0, $a1
++# CHECK-EMPTY:
++# RELOC-NEXT: R_LARCH_TLS_GD_PC_HI20 sym_gd_large 0x0
++# RELOC-NEXT: R_LARCH_GOT_PC_LO12 sym_gd_large 0x0
++# RELOC-NEXT: R_LARCH_GOT64_PC_LO20 sym_gd_large 0x0
++# RELOC-NEXT: R_LARCH_GOT64_PC_HI12 sym_gd_large 0x0
++
++# RELOC-NEXT:   }
++# RELOC-NEXT: ]
+diff --git a/llvm/test/MC/LoongArch/Misc/subsection.s b/llvm/test/MC/LoongArch/Misc/subsection.s
+index 0bd22b474536..566a2408d691 100644
+--- a/llvm/test/MC/LoongArch/Misc/subsection.s
++++ b/llvm/test/MC/LoongArch/Misc/subsection.s
+@@ -1,5 +1,5 @@
+ # RUN: not llvm-mc --filetype=obj --triple=loongarch64 --mattr=-relax %s -o /dev/null 2>&1 | FileCheck %s --check-prefixes=ERR,NORELAX --implicit-check-not=error:
+-## TODO: not llvm-mc --filetype=obj --triple=loongarch64 --mattr=+relax %s -o /dev/null 2>&1 | FileCheck %s --check-prefixes=ERR,RELAX --implicit-check-not=error:
++# RUN: not llvm-mc --filetype=obj --triple=loongarch64 --mattr=+relax %s -o /dev/null 2>&1 | FileCheck %s --check-prefixes=ERR,RELAX --implicit-check-not=error:
+ 
+ a:
+   nop
+diff --git a/llvm/test/MC/LoongArch/Relocations/relax-addsub.s b/llvm/test/MC/LoongArch/Relocations/relax-addsub.s
+index 532eb4e0561a..c4454f5bb98d 100644
+--- a/llvm/test/MC/LoongArch/Relocations/relax-addsub.s
++++ b/llvm/test/MC/LoongArch/Relocations/relax-addsub.s
+@@ -18,7 +18,9 @@
+ # RELAX:       Relocations [
+ # RELAX-NEXT:    Section ({{.*}}) .rela.text {
+ # RELAX-NEXT:      0x10 R_LARCH_PCALA_HI20 .L1 0x0
++# RELAX-NEXT:      0x10 R_LARCH_RELAX - 0x0
+ # RELAX-NEXT:      0x14 R_LARCH_PCALA_LO12 .L1 0x0
++# RELAX-NEXT:      0x14 R_LARCH_RELAX - 0x0
+ # RELAX-NEXT:    }
+ # RELAX-NEXT:    Section ({{.*}}) .rela.data {
+ # RELAX-NEXT:      0xF R_LARCH_ADD8 .L3 0x0
+@@ -29,13 +31,21 @@
+ # RELAX-NEXT:      0x12 R_LARCH_SUB32 .L2 0x0
+ # RELAX-NEXT:      0x16 R_LARCH_ADD64 .L3 0x0
+ # RELAX-NEXT:      0x16 R_LARCH_SUB64 .L2 0x0
++# RELAX-NEXT:      0x1E R_LARCH_ADD8 .L4 0x0
++# RELAX-NEXT:      0x1E R_LARCH_SUB8 .L3 0x0
++# RELAX-NEXT:      0x1F R_LARCH_ADD16 .L4 0x0
++# RELAX-NEXT:      0x1F R_LARCH_SUB16 .L3 0x0
++# RELAX-NEXT:      0x21 R_LARCH_ADD32 .L4 0x0
++# RELAX-NEXT:      0x21 R_LARCH_SUB32 .L3 0x0
++# RELAX-NEXT:      0x25 R_LARCH_ADD64 .L4 0x0
++# RELAX-NEXT:      0x25 R_LARCH_SUB64 .L3 0x0
+ # RELAX-NEXT:    }
+ # RELAX-NEXT:  ]
+ 
+ # RELAX:      Hex dump of section '.data':
+ # RELAX-NEXT: 0x00000000 04040004 00000004 00000000 00000000
+-# RELAX-NEXT: 0x00000010 00000000 00000000 00000000 00000808
+-# RELAX-NEXT: 0x00000020 00080000 00080000 00000000 00
++# RELAX-NEXT: 0x00000010 00000000 00000000 00000000 00000000
++# RELAX-NEXT: 0x00000020 00000000 00000000 00000000 00
+ 
+ .text
+ .L1:
+@@ -60,8 +70,6 @@
+ .short .L3 - .L2
+ .word  .L3 - .L2
+ .dword .L3 - .L2
+-## TODO
+-## With relaxation, emit relocs because la.pcrel is a linker-relaxable inst.
+ .byte  .L4 - .L3
+ .short .L4 - .L3
+ .word  .L4 - .L3
+-- 
+2.20.1
+

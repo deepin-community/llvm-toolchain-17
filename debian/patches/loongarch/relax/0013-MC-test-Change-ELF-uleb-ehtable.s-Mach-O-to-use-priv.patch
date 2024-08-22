@@ -1,0 +1,53 @@
+From 442b5109ccbabed1110c122c1ca92d4194ba632b Mon Sep 17 00:00:00 2001
+From: Fangrui Song <i@maskray.me>
+Date: Wed, 9 Aug 2023 21:42:18 -0700
+Subject: [PATCH 13/14] [MC][test] Change ELF/uleb-ehtable.s Mach-O to use
+ private symbols in .uleb128 for label differences
+
+On Mach-O, `.uleb128 A-B` where A and B are separated by a non-private symbol is invalid
+(see D153167).
+
+(cherry picked from commit 0a89bda4a8b756a00985e0965f7686b5ceb43295)
+Change-Id: I92ed11d6913b8c781e29be6e8c642cf0a371910d
+---
+ llvm/test/MC/ELF/uleb-ehtable.s | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/llvm/test/MC/ELF/uleb-ehtable.s b/llvm/test/MC/ELF/uleb-ehtable.s
+index ca3f9e97bffc..6407223f36e7 100644
+--- a/llvm/test/MC/ELF/uleb-ehtable.s
++++ b/llvm/test/MC/ELF/uleb-ehtable.s
+@@ -1,7 +1,7 @@
+ // RUN: llvm-mc -filetype=obj -triple i686-pc-linux-gnu    %s -o - | llvm-readobj -S --sd - | FileCheck %s -check-prefix=CHECK -check-prefix=ELF
+ // RUN: llvm-mc -filetype=obj -triple x86_64-pc-linux-gnu  %s -o - | llvm-readobj -S --sd - | FileCheck %s -check-prefix=CHECK -check-prefix=ELF
+-// RUN: llvm-mc -filetype=obj -triple i386-apple-darwin9   %s -o - | llvm-readobj -S --sd - | FileCheck %s -check-prefix=CHECK -check-prefix=MACHO
+-// RUN: llvm-mc -filetype=obj -triple x86_64-apple-darwin9 %s -o - | llvm-readobj -S --sd - | FileCheck %s -check-prefix=CHECK -check-prefix=MACHO
++// RUN: llvm-mc -filetype=obj -triple i386-apple-darwin9 --defsym MACHO=1 %s -o - | llvm-readobj -S --sd - | FileCheck %s -check-prefix=CHECK -check-prefix=MACHO
++// RUN: llvm-mc -filetype=obj -triple x86_64-apple-darwin9 --defsym MACHO=1 %s -o - | llvm-readobj -S --sd - | FileCheck %s -check-prefix=CHECK -check-prefix=MACHO
+ 
+ // Test that we can assemble a GCC-like EH table that has 16381-16383 bytes of
+ // non-padding data between .ttbaseref and .ttbase. The assembler must insert
+@@ -13,11 +13,20 @@
+ foo:
+         .byte 0xff  // LPStart omitted
+         .byte 0x1   // TType encoding (uleb128)
++.ifdef MACHO
++        .uleb128 Lttbase-Lttbaseref
++Lttbaseref:
++.else
+         .uleb128 .ttbase-.ttbaseref
+ .ttbaseref:
++.endif
+         .fill 128*128-1, 1, 0xcd    // call site and actions tables
+         .balign 4
++.ifdef MACHO
++Lttbase:
++.else
+ .ttbase:
++.endif
+         .byte 1, 2, 3, 4
+ 
+ // ELF:   Name: .data
+-- 
+2.20.1
+

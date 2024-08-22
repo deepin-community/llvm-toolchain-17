@@ -1,0 +1,633 @@
+From 8d7b71890179d32474b3a1a1c627481bd5a2327d Mon Sep 17 00:00:00 2001
+From: zhanglimin <zhanglimin@loongson.cn>
+Date: Fri, 15 Mar 2024 14:39:48 +0800
+Subject: [PATCH 06/14] [LoongArch][RISCV] Support
+ R_LARCH_{ADD,SUB}_ULEB128/R_RISCV_{SET,SUB}_ULEB128 for .uleb128 directives
+
+This patch is originally from three upstream commits:
+1, R_LARCH_{ADD,SUB}_ULEB128 are originally landed from b57159cb(#76433).
+2, R_RISCV_{SET,SUB}_ULEB128 are originally supported from 1df5ea29. Among it, we change
+the default behaviour of `-riscv-uleb128-reloc` to not produce uleb128 reloc, in order
+to avoid any other side-effects due to the updated implementation of `MCAssembler::relaxLEB()`
+function. And at the same time, we ensure that this patch can't introduce new default traits
+(such as the generation for uleb128 reloc) on RISCV in this version.
+3, Fix invalid-sleb.s in original commit d7398a35.
+
+Change-Id: Ie687b7d8483c76cf647141162641db1a9d819a04
+---
+ .../llvm/BinaryFormat/ELFRelocs/RISCV.def     |  2 +
+ llvm/include/llvm/MC/MCAsmBackend.h           |  8 +++
+ llvm/include/llvm/MC/MCFixup.h                |  1 +
+ llvm/include/llvm/MC/MCFragment.h             |  9 ++-
+ llvm/lib/MC/MCAsmBackend.cpp                  |  1 +
+ llvm/lib/MC/MCAssembler.cpp                   | 39 ++++++++--
+ .../MCTargetDesc/LoongArchAsmBackend.cpp      | 69 ++++++++++++++----
+ .../MCTargetDesc/LoongArchAsmBackend.h        |  3 +
+ .../RISCV/MCTargetDesc/RISCVAsmBackend.cpp    | 27 +++++++
+ .../RISCV/MCTargetDesc/RISCVAsmBackend.h      |  2 +
+ llvm/test/MC/ELF/RISCV/gen-dwarf.s            |  5 +-
+ llvm/test/MC/LoongArch/Relocations/leb128.s   | 72 +++++++++++++++++++
+ .../MC/LoongArch/Relocations/relax-addsub.s   | 57 +++++++++++----
+ llvm/test/MC/X86/invalid-sleb.s               |  5 --
+ 14 files changed, 252 insertions(+), 48 deletions(-)
+ create mode 100644 llvm/test/MC/LoongArch/Relocations/leb128.s
+ delete mode 100644 llvm/test/MC/X86/invalid-sleb.s
+
+diff --git a/llvm/include/llvm/BinaryFormat/ELFRelocs/RISCV.def b/llvm/include/llvm/BinaryFormat/ELFRelocs/RISCV.def
+index 9a126df01531..c7fd6490041c 100644
+--- a/llvm/include/llvm/BinaryFormat/ELFRelocs/RISCV.def
++++ b/llvm/include/llvm/BinaryFormat/ELFRelocs/RISCV.def
+@@ -55,3 +55,5 @@ ELF_RELOC(R_RISCV_SET32,             56)
+ ELF_RELOC(R_RISCV_32_PCREL,          57)
+ ELF_RELOC(R_RISCV_IRELATIVE,         58)
+ ELF_RELOC(R_RISCV_PLT32,             59)
++ELF_RELOC(R_RISCV_SET_ULEB128,       60)
++ELF_RELOC(R_RISCV_SUB_ULEB128,       61)
+diff --git a/llvm/include/llvm/MC/MCAsmBackend.h b/llvm/include/llvm/MC/MCAsmBackend.h
+index 5e08fb41679b..968a767b17f8 100644
+--- a/llvm/include/llvm/MC/MCAsmBackend.h
++++ b/llvm/include/llvm/MC/MCAsmBackend.h
+@@ -21,6 +21,7 @@ class MCAlignFragment;
+ class MCDwarfCallFrameFragment;
+ class MCDwarfLineAddrFragment;
+ class MCFragment;
++class MCLEBFragment;
+ class MCRelaxableFragment;
+ class MCSymbol;
+ class MCAsmLayout;
+@@ -194,6 +195,13 @@ public:
+     return false;
+   }
+ 
++  // Defined by linker relaxation targets to possibly emit LEB128 relocations
++  // and set Value at the relocated location.
++  virtual std::pair<bool, bool>
++  relaxLEB128(MCLEBFragment &LF, MCAsmLayout &Layout, int64_t &Value) const {
++    return std::make_pair(false, false);
++  }
++
+   /// @}
+ 
+   /// Returns the minimum size of a nop in bytes on this target. The assembler
+diff --git a/llvm/include/llvm/MC/MCFixup.h b/llvm/include/llvm/MC/MCFixup.h
+index 069ca058310f..7f48a90cb1ec 100644
+--- a/llvm/include/llvm/MC/MCFixup.h
++++ b/llvm/include/llvm/MC/MCFixup.h
+@@ -25,6 +25,7 @@ enum MCFixupKind {
+   FK_Data_4,      ///< A four-byte fixup.
+   FK_Data_8,      ///< A eight-byte fixup.
+   FK_Data_6b,     ///< A six-bits fixup.
++  FK_Data_leb128, ///< A leb128 fixup.
+   FK_PCRel_1,     ///< A one-byte pc relative fixup.
+   FK_PCRel_2,     ///< A two-byte pc relative fixup.
+   FK_PCRel_4,     ///< A four-byte pc relative fixup.
+diff --git a/llvm/include/llvm/MC/MCFragment.h b/llvm/include/llvm/MC/MCFragment.h
+index 7be4792a4521..e965732010fe 100644
+--- a/llvm/include/llvm/MC/MCFragment.h
++++ b/llvm/include/llvm/MC/MCFragment.h
+@@ -428,7 +428,7 @@ public:
+   }
+ };
+ 
+-class MCLEBFragment : public MCFragment {
++class MCLEBFragment final : public MCEncodedFragmentWithFixups<10, 1> {
+   /// True if this is a sleb128, false if uleb128.
+   bool IsSigned;
+ 
+@@ -439,17 +439,16 @@ class MCLEBFragment : public MCFragment {
+ 
+ public:
+   MCLEBFragment(const MCExpr &Value_, bool IsSigned_, MCSection *Sec = nullptr)
+-      : MCFragment(FT_LEB, false, Sec), IsSigned(IsSigned_), Value(&Value_) {
++      : MCEncodedFragmentWithFixups<10, 1>(FT_LEB, false, Sec),
++        IsSigned(IsSigned_), Value(&Value_) {
+     Contents.push_back(0);
+   }
+ 
+   const MCExpr &getValue() const { return *Value; }
++  void setValue(const MCExpr *Expr) { Value = Expr; }
+ 
+   bool isSigned() const { return IsSigned; }
+ 
+-  SmallString<8> &getContents() { return Contents; }
+-  const SmallString<8> &getContents() const { return Contents; }
+-
+   /// @}
+ 
+   static bool classof(const MCFragment *F) {
+diff --git a/llvm/lib/MC/MCAsmBackend.cpp b/llvm/lib/MC/MCAsmBackend.cpp
+index 64bbc63719c7..2eef7d363fe7 100644
+--- a/llvm/lib/MC/MCAsmBackend.cpp
++++ b/llvm/lib/MC/MCAsmBackend.cpp
+@@ -89,6 +89,7 @@ const MCFixupKindInfo &MCAsmBackend::getFixupKindInfo(MCFixupKind Kind) const {
+       {"FK_Data_4", 0, 32, 0},
+       {"FK_Data_8", 0, 64, 0},
+       {"FK_Data_6b", 0, 6, 0},
++      {"FK_Data_leb128", 0, 0, 0},
+       {"FK_PCRel_1", 0, 8, MCFixupKindInfo::FKF_IsPCRel},
+       {"FK_PCRel_2", 0, 16, MCFixupKindInfo::FKF_IsPCRel},
+       {"FK_PCRel_4", 0, 32, MCFixupKindInfo::FKF_IsPCRel},
+diff --git a/llvm/lib/MC/MCAssembler.cpp b/llvm/lib/MC/MCAssembler.cpp
+index 55ed1a285cd7..86c798ec9e27 100644
+--- a/llvm/lib/MC/MCAssembler.cpp
++++ b/llvm/lib/MC/MCAssembler.cpp
+@@ -918,6 +918,12 @@ void MCAssembler::layout(MCAsmLayout &Layout) {
+         Contents = DF.getContents();
+         break;
+       }
++      case MCFragment::FT_LEB: {
++        auto &LF = cast<MCLEBFragment>(Frag);
++        Fixups = LF.getFixups();
++        Contents = LF.getContents();
++        break;
++      }
+       case MCFragment::FT_PseudoProbe: {
+         MCPseudoProbeAddrFragment &PF = cast<MCPseudoProbeAddrFragment>(Frag);
+         Fixups = PF.getFixups();
+@@ -1006,12 +1012,31 @@ bool MCAssembler::relaxInstruction(MCAsmLayout &Layout,
+ }
+ 
+ bool MCAssembler::relaxLEB(MCAsmLayout &Layout, MCLEBFragment &LF) {
+-  uint64_t OldSize = LF.getContents().size();
++  const unsigned OldSize = static_cast<unsigned>(LF.getContents().size());
++  unsigned PadTo = OldSize;
+   int64_t Value;
+-  bool Abs = LF.getValue().evaluateKnownAbsolute(Value, Layout);
+-  if (!Abs)
+-    report_fatal_error("sleb128 and uleb128 expressions must be absolute");
+-  SmallString<8> &Data = LF.getContents();
++  SmallVectorImpl<char> &Data = LF.getContents();
++  LF.getFixups().clear();
++  // Use evaluateKnownAbsolute for Mach-O as a hack: .subsections_via_symbols
++  // requires that .uleb128 A-B is foldable where A and B reside in different
++  // fragments. This is used by __gcc_except_table.
++  bool Abs = getSubsectionsViaSymbols()
++                 ? LF.getValue().evaluateKnownAbsolute(Value, Layout)
++                 : LF.getValue().evaluateAsAbsolute(Value, Layout);
++  if (!Abs) {
++    bool Relaxed, UseZeroPad;
++    std::tie(Relaxed, UseZeroPad) = getBackend().relaxLEB128(LF, Layout, Value);
++    if (!Relaxed) {
++      getContext().reportError(LF.getValue().getLoc(),
++                               Twine(LF.isSigned() ? ".s" : ".u") +
++                                   "leb128 expression is not absolute");
++      LF.setValue(MCConstantExpr::create(0, Context));
++    }
++    uint8_t Tmp[10]; // maximum size: ceil(64/7)
++    PadTo = std::max(PadTo, encodeULEB128(uint64_t(Value), Tmp));
++    if (UseZeroPad)
++      Value = 0;
++  }
+   Data.clear();
+   raw_svector_ostream OSE(Data);
+   // The compiler can generate EH table assembly that is impossible to assemble
+@@ -1019,9 +1044,9 @@ bool MCAssembler::relaxLEB(MCAsmLayout &Layout, MCLEBFragment &LF) {
+   // to a later alignment fragment. To accommodate such tables, relaxation can
+   // only increase an LEB fragment size here, not decrease it. See PR35809.
+   if (LF.isSigned())
+-    encodeSLEB128(Value, OSE, OldSize);
++    encodeSLEB128(Value, OSE, PadTo);
+   else
+-    encodeULEB128(Value, OSE, OldSize);
++    encodeULEB128(Value, OSE, PadTo);
+   return OldSize != LF.getContents().size();
+ }
+ 
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.cpp b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.cpp
+index 1ed047a8e632..9227d4d6afed 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.cpp
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.cpp
+@@ -92,6 +92,7 @@ static uint64_t adjustFixupValue(const MCFixup &Fixup, uint64_t Value,
+   case FK_Data_2:
+   case FK_Data_4:
+   case FK_Data_8:
++  case FK_Data_leb128:
+     return Value;
+   case LoongArch::fixup_loongarch_b16: {
+     if (!isInt<18>(Value))
+@@ -129,6 +130,15 @@ static uint64_t adjustFixupValue(const MCFixup &Fixup, uint64_t Value,
+   }
+ }
+ 
++static void fixupLeb128(MCContext &Ctx, const MCFixup &Fixup,
++                        MutableArrayRef<char> Data, uint64_t Value) {
++  unsigned I;
++  for (I = 0; I != Data.size() && Value; ++I, Value >>= 7)
++    Data[I] |= uint8_t(Value & 0x7f);
++  if (Value)
++    Ctx.reportError(Fixup.getLoc(), "Invalid uleb128 value!");
++}
++
+ void LoongArchAsmBackend::applyFixup(const MCAssembler &Asm,
+                                      const MCFixup &Fixup,
+                                      const MCValue &Target,
+@@ -144,6 +154,10 @@ void LoongArchAsmBackend::applyFixup(const MCAssembler &Asm,
+   MCFixupKindInfo Info = getFixupKindInfo(Kind);
+   MCContext &Ctx = Asm.getContext();
+ 
++  // Fixup leb128 separately.
++  if (Fixup.getTargetKind() == FK_Data_leb128)
++    return fixupLeb128(Ctx, Fixup, Data, Value);
++
+   // Apply any target-specific value adjustments.
+   Value = adjustFixupValue(Fixup, Value, Ctx);
+ 
+@@ -173,6 +187,7 @@ bool LoongArchAsmBackend::shouldForceRelocation(const MCAssembler &Asm,
+   case FK_Data_2:
+   case FK_Data_4:
+   case FK_Data_8:
++  case FK_Data_leb128:
+     return !Target.isAbsolute();
+   }
+ }
+@@ -202,9 +217,24 @@ getRelocPairForSize(unsigned Size) {
+     return std::make_pair(
+         MCFixupKind(FirstLiteralRelocationKind + ELF::R_LARCH_ADD64),
+         MCFixupKind(FirstLiteralRelocationKind + ELF::R_LARCH_SUB64));
++  case 128:
++    return std::make_pair(
++        MCFixupKind(FirstLiteralRelocationKind + ELF::R_LARCH_ADD_ULEB128),
++        MCFixupKind(FirstLiteralRelocationKind + ELF::R_LARCH_SUB_ULEB128));
+   }
+ }
+ 
++std::pair<bool, bool> LoongArchAsmBackend::relaxLEB128(MCLEBFragment &LF,
++                                                       MCAsmLayout &Layout,
++                                                       int64_t &Value) const {
++  const MCExpr &Expr = LF.getValue();
++  if (LF.isSigned() || !Expr.evaluateKnownAbsolute(Value, Layout))
++    return std::make_pair(false, false);
++  LF.getFixups().push_back(
++      MCFixup::create(0, &Expr, FK_Data_leb128, Expr.getLoc()));
++  return std::make_pair(true, true);
++}
++
+ bool LoongArchAsmBackend::writeNopData(raw_ostream &OS, uint64_t Count,
+                                        const MCSubtargetInfo *STI) const {
+   // We mostly follow binutils' convention here: align to 4-byte boundary with a
+@@ -226,21 +256,27 @@ bool LoongArchAsmBackend::handleAddSubRelocations(const MCAsmLayout &Layout,
+                                                   uint64_t &FixedValue) const {
+   std::pair<MCFixupKind, MCFixupKind> FK;
+   uint64_t FixedValueA, FixedValueB;
+-  const MCSection &SecA = Target.getSymA()->getSymbol().getSection();
+-  const MCSection &SecB = Target.getSymB()->getSymbol().getSection();
+-
+-  // We need record relocation if SecA != SecB. Usually SecB is same as the
+-  // section of Fixup, which will be record the relocation as PCRel. If SecB
+-  // is not same as the section of Fixup, it will report error. Just return
+-  // false and then this work can be finished by handleFixup.
+-  if (&SecA != &SecB)
+-    return false;
+-
+-  // In SecA == SecB case. If the linker relaxation is enabled, we need record
+-  // the ADD, SUB relocations. Otherwise the FixedValue has already been
+-  // calculated out in evaluateFixup, return true and avoid record relocations.
+-  if (!STI.hasFeature(LoongArch::FeatureRelax))
+-    return true;
++  const MCSymbol &SA = Target.getSymA()->getSymbol();
++  const MCSymbol &SB = Target.getSymB()->getSymbol();
++
++  bool force = !SA.isInSection() || !SB.isInSection();
++  if (!force) {
++    const MCSection &SecA = SA.getSection();
++    const MCSection &SecB = SB.getSection();
++
++    // We need record relocation if SecA != SecB. Usually SecB is same as the
++    // section of Fixup, which will be record the relocation as PCRel. If SecB
++    // is not same as the section of Fixup, it will report error. Just return
++    // false and then this work can be finished by handleFixup.
++    if (&SecA != &SecB)
++      return false;
++
++    // In SecA == SecB case. If the linker relaxation is enabled, we need record
++    // the ADD, SUB relocations. Otherwise the FixedValue has already been calc-
++    // ulated out in evaluateFixup, return true and avoid record relocations.
++    if (!STI.hasFeature(LoongArch::FeatureRelax))
++      return true;
++  }
+ 
+   switch (Fixup.getKind()) {
+   case llvm::FK_Data_1:
+@@ -255,6 +291,9 @@ bool LoongArchAsmBackend::handleAddSubRelocations(const MCAsmLayout &Layout,
+   case llvm::FK_Data_8:
+     FK = getRelocPairForSize(64);
+     break;
++  case llvm::FK_Data_leb128:
++    FK = getRelocPairForSize(128);
++    break;
+   default:
+     llvm_unreachable("unsupported fixup size");
+   }
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.h b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.h
+index 20f25b5cf53b..49801e4fd81a 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.h
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchAsmBackend.h
+@@ -65,6 +65,9 @@ public:
+   void relaxInstruction(MCInst &Inst,
+                         const MCSubtargetInfo &STI) const override {}
+ 
++  std::pair<bool, bool> relaxLEB128(MCLEBFragment &LF, MCAsmLayout &Layout,
++                                    int64_t &Value) const override;
++
+   bool writeNopData(raw_ostream &OS, uint64_t Count,
+                     const MCSubtargetInfo *STI) const override;
+ 
+diff --git a/llvm/lib/Target/RISCV/MCTargetDesc/RISCVAsmBackend.cpp b/llvm/lib/Target/RISCV/MCTargetDesc/RISCVAsmBackend.cpp
+index 1b890fbe041a..5c651aa93225 100644
+--- a/llvm/lib/Target/RISCV/MCTargetDesc/RISCVAsmBackend.cpp
++++ b/llvm/lib/Target/RISCV/MCTargetDesc/RISCVAsmBackend.cpp
+@@ -19,6 +19,7 @@
+ #include "llvm/MC/MCObjectWriter.h"
+ #include "llvm/MC/MCSymbol.h"
+ #include "llvm/MC/MCValue.h"
++#include "llvm/Support/CommandLine.h"
+ #include "llvm/Support/Endian.h"
+ #include "llvm/Support/EndianStream.h"
+ #include "llvm/Support/ErrorHandling.h"
+@@ -27,6 +28,13 @@
+ 
+ using namespace llvm;
+ 
++// Temporary workaround for old linkers that do not support ULEB128 relocations,
++// which are abused by DWARF v5 DW_LLE_offset_pair/DW_RLE_offset_pair
++// implemented in Clang/LLVM.
++static cl::opt<bool> ULEB128Reloc(
++    "riscv-uleb128-reloc", cl::init(false), cl::Hidden,
++    cl::desc("Emit R_RISCV_SET_ULEB128/E_RISCV_SUB_ULEB128 if appropriate"));
++
+ std::optional<MCFixupKind> RISCVAsmBackend::getFixupKind(StringRef Name) const {
+   if (STI.getTargetTriple().isOSBinFormatELF()) {
+     unsigned Type;
+@@ -126,6 +134,7 @@ bool RISCVAsmBackend::shouldForceRelocation(const MCAssembler &Asm,
+   case FK_Data_2:
+   case FK_Data_4:
+   case FK_Data_8:
++  case FK_Data_leb128:
+     if (Target.isAbsolute())
+       return false;
+     break;
+@@ -330,6 +339,19 @@ bool RISCVAsmBackend::relaxDwarfCFA(MCDwarfCallFrameFragment &DF,
+   return true;
+ }
+ 
++std::pair<bool, bool> RISCVAsmBackend::relaxLEB128(MCLEBFragment &LF,
++                                                   MCAsmLayout &Layout,
++                                                   int64_t &Value) const {
++  if (LF.isSigned())
++    return std::make_pair(false, false);
++  const MCExpr &Expr = LF.getValue();
++  if (ULEB128Reloc) {
++    LF.getFixups().push_back(
++        MCFixup::create(0, &Expr, FK_Data_leb128, Expr.getLoc()));
++  }
++  return std::make_pair(Expr.evaluateKnownAbsolute(Value, Layout), false);
++}
++
+ // Given a compressed control flow instruction this function returns
+ // the expanded instruction.
+ unsigned RISCVAsmBackend::getRelaxedOpcode(unsigned Op) const {
+@@ -416,6 +438,7 @@ static uint64_t adjustFixupValue(const MCFixup &Fixup, uint64_t Value,
+   case FK_Data_4:
+   case FK_Data_8:
+   case FK_Data_6b:
++  case FK_Data_leb128:
+     return Value;
+   case RISCV::fixup_riscv_set_6b:
+     return Value & 0x03;
+@@ -596,6 +619,10 @@ bool RISCVAsmBackend::handleAddSubRelocations(const MCAsmLayout &Layout,
+     TA = ELF::R_RISCV_ADD64;
+     TB = ELF::R_RISCV_SUB64;
+     break;
++  case llvm::FK_Data_leb128:
++    TA = ELF::R_RISCV_SET_ULEB128;
++    TB = ELF::R_RISCV_SUB_ULEB128;
++    break;
+   default:
+     llvm_unreachable("unsupported fixup size");
+   }
+diff --git a/llvm/lib/Target/RISCV/MCTargetDesc/RISCVAsmBackend.h b/llvm/lib/Target/RISCV/MCTargetDesc/RISCVAsmBackend.h
+index 0ea1f32e8296..edefb171bcdc 100644
+--- a/llvm/lib/Target/RISCV/MCTargetDesc/RISCVAsmBackend.h
++++ b/llvm/lib/Target/RISCV/MCTargetDesc/RISCVAsmBackend.h
+@@ -99,6 +99,8 @@ public:
+                           bool &WasRelaxed) const override;
+   bool relaxDwarfCFA(MCDwarfCallFrameFragment &DF, MCAsmLayout &Layout,
+                      bool &WasRelaxed) const override;
++  std::pair<bool, bool> relaxLEB128(MCLEBFragment &LF, MCAsmLayout &Layout,
++                                    int64_t &Value) const override;
+ 
+   bool writeNopData(raw_ostream &OS, uint64_t Count,
+                     const MCSubtargetInfo *STI) const override;
+diff --git a/llvm/test/MC/ELF/RISCV/gen-dwarf.s b/llvm/test/MC/ELF/RISCV/gen-dwarf.s
+index 2235559d5f35..2a7dc777e70c 100644
+--- a/llvm/test/MC/ELF/RISCV/gen-dwarf.s
++++ b/llvm/test/MC/ELF/RISCV/gen-dwarf.s
+@@ -9,7 +9,7 @@
+ ## emit special opcodes to make .debug_line smaller, but we don't do this for
+ ## consistency.
+ 
+-# RUN: llvm-mc -filetype=obj -triple=riscv64 -g -dwarf-version=5 -mattr=+relax < %s -o %t
++# RUN: llvm-mc -filetype=obj -triple=riscv64 -g -dwarf-version=5 -mattr=+relax -riscv-uleb128-reloc=1 < %s -o %t
+ # RUN: llvm-dwarfdump -eh-frame -debug-line -debug-rnglists -v %t | FileCheck %s
+ # RUN: llvm-readobj -r -x .eh_frame %t | FileCheck %s --check-prefix=RELOC
+ 
+@@ -48,9 +48,10 @@
+ # RELOC-NEXT:   0x34 R_RISCV_32_PCREL <null> 0x0
+ # RELOC-NEXT: }
+ 
+-## TODO A section needs two relocations.
+ # RELOC:      Section ([[#]]) .rela.debug_rnglists {
+ # RELOC-NEXT:   0xD R_RISCV_64 .text.foo 0x0
++# RELOC-NEXT:   0x15 R_RISCV_SET_ULEB128 <null> 0x0
++# RELOC-NEXT:   0x15 R_RISCV_SUB_ULEB128 .text.foo 0x0
+ # RELOC-NEXT:   0x17 R_RISCV_64 .text.bar 0x0
+ # RELOC-NEXT: }
+ 
+diff --git a/llvm/test/MC/LoongArch/Relocations/leb128.s b/llvm/test/MC/LoongArch/Relocations/leb128.s
+new file mode 100644
+index 000000000000..7a96ec551b76
+--- /dev/null
++++ b/llvm/test/MC/LoongArch/Relocations/leb128.s
+@@ -0,0 +1,72 @@
++# RUN: llvm-mc --filetype=obj --triple=loongarch64 --mattr=-relax %s -o %t
++# RUN: llvm-readobj -r -x .alloc_w %t | FileCheck --check-prefixes=CHECK,NORELAX %s
++# RUN: llvm-mc --filetype=obj --triple=loongarch64 --mattr=+relax %s -o %t.relax
++# RUN: llvm-readobj -r -x .alloc_w %t.relax | FileCheck --check-prefixes=CHECK,RELAX %s
++
++# RUN: not llvm-mc --filetype=obj --triple=loongarch64 --mattr=-relax --defsym ERR=1 %s -o /dev/null 2>&1 | \
++# RUN:   FileCheck %s --check-prefix=ERR
++# RUN: not llvm-mc --filetype=obj --triple=loongarch64 --mattr=+relax --defsym ERR=1 %s -o /dev/null 2>&1 | \
++# RUN:   FileCheck %s --check-prefix=ERR
++
++# CHECK:      Relocations [
++# CHECK-NEXT:   .rela.alloc_w {
++# RELAX-NEXT:      0x0 R_LARCH_ADD_ULEB128 w1 0x0
++# RELAX-NEXT:      0x0 R_LARCH_SUB_ULEB128 w 0x0
++# RELAX-NEXT:      0x1 R_LARCH_ADD_ULEB128 w2 0x0
++# RELAX-NEXT:      0x1 R_LARCH_SUB_ULEB128 w1 0x0
++# CHECK-NEXT:      0x2 R_LARCH_PCALA_HI20 foo 0x0
++# RELAX-NEXT:      0x2 R_LARCH_RELAX - 0x0
++# CHECK-NEXT:      0x6 R_LARCH_PCALA_LO12 foo 0x0
++# RELAX-NEXT:      0x6 R_LARCH_RELAX - 0x0
++# RELAX-NEXT:      0xA R_LARCH_ADD_ULEB128 w2 0x0
++# RELAX-NEXT:      0xA R_LARCH_SUB_ULEB128 w1 0x0
++# RELAX-NEXT:      0xB R_LARCH_ADD_ULEB128 w2 0x78
++# RELAX-NEXT:      0xB R_LARCH_SUB_ULEB128 w1 0x0
++# RELAX-NEXT:      0xD R_LARCH_ADD_ULEB128 w1 0x0
++# RELAX-NEXT:      0xD R_LARCH_SUB_ULEB128 w2 0x0
++# RELAX-NEXT:      0x17 R_LARCH_ADD_ULEB128 w3 0x6F
++# RELAX-NEXT:      0x17 R_LARCH_SUB_ULEB128 w2 0x0
++# RELAX-NEXT:      0x18 R_LARCH_ADD_ULEB128 w3 0x71
++# RELAX-NEXT:      0x18 R_LARCH_SUB_ULEB128 w2 0x0
++# CHECK-NEXT:   }
++# CHECK-NEXT: ]
++
++# CHECK:        Hex dump of section '.alloc_w':
++# NORELAX-NEXT: 0x00000000 02080c00 001a8c01 c0020880 01f8ffff
++# NORELAX-NEXT: 0x00000010 ffffffff ffff017f 8101
++# RELAX-NEXT:   0x00000000 00000c00 001a8c01 c0020080 00808080
++# RELAX-NEXT:   0x00000010 80808080 80800000 8000
++
++.section .alloc_w,"ax",@progbits; w:
++.uleb128 w1-w       # w1 is later defined in the same section
++.uleb128 w2-w1      # w1 and w2 are separated by a linker relaxable instruction
++w1:
++  la.pcrel $t0, foo
++w2:
++.uleb128 w2-w1      # 0x08
++.uleb128 w2-w1+120  # 0x0180
++.uleb128 -(w2-w1)   # 0x01fffffffffffffffff8
++.uleb128 w3-w2+111  # 0x7f
++.uleb128 w3-w2+113  # 0x0181
++w3:
++
++.ifdef ERR
++# ERR: :[[#@LINE+1]]:16: error: .uleb128 expression is not absolute
++.uleb128 extern-w   # extern is undefined
++# ERR: :[[#@LINE+1]]:11: error: .uleb128 expression is not absolute
++.uleb128 w-extern
++# ERR: :[[#@LINE+1]]:11: error: .uleb128 expression is not absolute
++.uleb128 x-w        # x is later defined in another section
++
++.section .alloc_x,"aw",@progbits; x:
++# ERR: :[[#@LINE+1]]:11: error: .uleb128 expression is not absolute
++.uleb128 y-x
++.section .alloc_y,"aw",@progbits; y:
++# ERR: :[[#@LINE+1]]:11: error: .uleb128 expression is not absolute
++.uleb128 x-y
++
++# ERR: :[[#@LINE+1]]:10: error: .uleb128 expression is not absolute
++.uleb128 extern
++# ERR: :[[#@LINE+1]]:10: error: .uleb128 expression is not absolute
++.uleb128 y
++.endif
+diff --git a/llvm/test/MC/LoongArch/Relocations/relax-addsub.s b/llvm/test/MC/LoongArch/Relocations/relax-addsub.s
+index 14922657ae89..cd01332afd0b 100644
+--- a/llvm/test/MC/LoongArch/Relocations/relax-addsub.s
++++ b/llvm/test/MC/LoongArch/Relocations/relax-addsub.s
+@@ -8,12 +8,23 @@
+ # NORELAX-NEXT:      0x10 R_LARCH_PCALA_HI20 .text 0x0
+ # NORELAX-NEXT:      0x14 R_LARCH_PCALA_LO12 .text 0x0
+ # NORELAX-NEXT:    }
++# NORELAX-NEXT:    Section ({{.*}}) .rela.data {
++# NORELAX-NEXT:      0x30 R_LARCH_ADD8 foo 0x0
++# NORELAX-NEXT:      0x30 R_LARCH_SUB8 .text 0x10
++# NORELAX-NEXT:      0x31 R_LARCH_ADD16 foo 0x0
++# NORELAX-NEXT:      0x31 R_LARCH_SUB16 .text 0x10
++# NORELAX-NEXT:      0x33 R_LARCH_ADD32 foo 0x0
++# NORELAX-NEXT:      0x33 R_LARCH_SUB32 .text 0x10
++# NORELAX-NEXT:      0x37 R_LARCH_ADD64 foo 0x0
++# NORELAX-NEXT:      0x37 R_LARCH_SUB64 .text 0x10
++# NORELAX-NEXT:    }
+ # NORELAX-NEXT:  ]
+ 
+ # NORELAX:      Hex dump of section '.data':
+-# NORELAX-NEXT: 0x00000000 04040004 00000004 00000000 0000000c
+-# NORELAX-NEXT: 0x00000010 0c000c00 00000c00 00000000 00000808
+-# NORELAX-NEXT: 0x00000020 00080000 00080000 00000000 00
++# NORELAX-NEXT: 0x00000000 04040004 00000004 00000000 00000004
++# NORELAX-NEXT: 0x00000010 0c0c000c 0000000c 00000000 0000000c
++# NORELAX-NEXT: 0x00000020 08080008 00000008 00000000 00000008
++# NORELAX-NEXT: 0x00000030 00000000 00000000 00000000 000000
+ 
+ # RELAX:       Relocations [
+ # RELAX-NEXT:    Section ({{.*}}) .rela.text {
+@@ -23,21 +34,32 @@
+ # RELAX-NEXT:      0x14 R_LARCH_RELAX - 0x0
+ # RELAX-NEXT:    }
+ # RELAX-NEXT:    Section ({{.*}}) .rela.data {
+-# RELAX-NEXT:      0x1E R_LARCH_ADD8 .L4 0x0
+-# RELAX-NEXT:      0x1E R_LARCH_SUB8 .L3 0x0
+-# RELAX-NEXT:      0x1F R_LARCH_ADD16 .L4 0x0
+-# RELAX-NEXT:      0x1F R_LARCH_SUB16 .L3 0x0
+-# RELAX-NEXT:      0x21 R_LARCH_ADD32 .L4 0x0
+-# RELAX-NEXT:      0x21 R_LARCH_SUB32 .L3 0x0
+-# RELAX-NEXT:      0x25 R_LARCH_ADD64 .L4 0x0
+-# RELAX-NEXT:      0x25 R_LARCH_SUB64 .L3 0x0
++# RELAX-NEXT:      0x20 R_LARCH_ADD8 .L4 0x0
++# RELAX-NEXT:      0x20 R_LARCH_SUB8 .L3 0x0
++# RELAX-NEXT:      0x21 R_LARCH_ADD16 .L4 0x0
++# RELAX-NEXT:      0x21 R_LARCH_SUB16 .L3 0x0
++# RELAX-NEXT:      0x23 R_LARCH_ADD32 .L4 0x0
++# RELAX-NEXT:      0x23 R_LARCH_SUB32 .L3 0x0
++# RELAX-NEXT:      0x27 R_LARCH_ADD64 .L4 0x0
++# RELAX-NEXT:      0x27 R_LARCH_SUB64 .L3 0x0
++# RELAX-NEXT:      0x2F R_LARCH_ADD_ULEB128 .L4 0x0
++# RELAX-NEXT:      0x2F R_LARCH_SUB_ULEB128 .L3 0x0
++# RELAX-NEXT:      0x30 R_LARCH_ADD8 foo 0x0
++# RELAX-NEXT:      0x30 R_LARCH_SUB8 .L3 0x0
++# RELAX-NEXT:      0x31 R_LARCH_ADD16 foo 0x0
++# RELAX-NEXT:      0x31 R_LARCH_SUB16 .L3 0x0
++# RELAX-NEXT:      0x33 R_LARCH_ADD32 foo 0x0
++# RELAX-NEXT:      0x33 R_LARCH_SUB32 .L3 0x0
++# RELAX-NEXT:      0x37 R_LARCH_ADD64 foo 0x0
++# RELAX-NEXT:      0x37 R_LARCH_SUB64 .L3 0x0
+ # RELAX-NEXT:    }
+ # RELAX-NEXT:  ]
+ 
+ # RELAX:      Hex dump of section '.data':
+-# RELAX-NEXT: 0x00000000 04040004 00000004 00000000 0000000c
+-# RELAX-NEXT: 0x00000010 0c000c00 00000c00 00000000 00000000
+-# RELAX-NEXT: 0x00000020 00000000 00000000 00000000 00
++# RELAX-NEXT: 0x00000000 04040004 00000004 00000000 00000004
++# RELAX-NEXT: 0x00000010 0c0c000c 0000000c 00000000 0000000c
++# RELAX-NEXT: 0x00000020 00000000 00000000 00000000 00000000
++# RELAX-NEXT: 0x00000030 00000000 00000000 00000000 000000
+ 
+ .text
+ .L1:
+@@ -55,13 +77,20 @@
+ .short .L2 - .L1
+ .word  .L2 - .L1
+ .dword .L2 - .L1
++.uleb128 .L2 - .L1
+ ## TODO Handle alignment directive.
+ .byte  .L3 - .L2
+ .short .L3 - .L2
+ .word  .L3 - .L2
+ .dword .L3 - .L2
++.uleb128 .L3 - .L2
+ ## With relaxation, emit relocs because the la.pcrel makes the diff variable.
+ .byte  .L4 - .L3
+ .short .L4 - .L3
+ .word  .L4 - .L3
+ .dword .L4 - .L3
++.uleb128 .L4 - .L3
++.byte  foo - .L3
++.short foo - .L3
++.word  foo - .L3
++.dword foo - .L3
+diff --git a/llvm/test/MC/X86/invalid-sleb.s b/llvm/test/MC/X86/invalid-sleb.s
+deleted file mode 100644
+index 7d7df351ce4e..000000000000
+--- a/llvm/test/MC/X86/invalid-sleb.s
++++ /dev/null
+@@ -1,5 +0,0 @@
+-// RUN: not --crash llvm-mc -filetype=obj -triple x86_64-pc-linux %s -o %t 2>&1 | FileCheck %s
+-
+-// CHECK:  sleb128 and uleb128 expressions must be absolute
+-
+-        .sleb128 undefined
+-- 
+2.20.1
+
