@@ -1,0 +1,517 @@
+From 5755e6dc93999099ef4825971cd613cf1754ab6c Mon Sep 17 00:00:00 2001
+From: wanglei <wanglei@loongson.cn>
+Date: Thu, 30 Nov 2023 17:29:18 +0800
+Subject: [PATCH 19/42] [LoongArch] Add codegen support for extractelement
+ (#73759)
+
+Add codegen support for extractelement when enable `lsx` or `lasx`
+feature.
+
+(cherry picked from commit b72456120f1db38ed7068fb592fcf768c6d5cce2)
+
+Change-Id: If45075ec3b5f8fc8388b81c4da71e31c98d444ff
+---
+ .../LoongArch/LoongArchISelLowering.cpp       |   2 +
+ .../Target/LoongArch/LoongArchInstrInfo.cpp   |   8 +
+ .../LoongArch/LoongArchLASXInstrInfo.td       |  38 ++++
+ .../Target/LoongArch/LoongArchLSXInstrInfo.td |  38 ++++
+ .../lasx/ir-instruction/extractelement.ll     | 172 ++++++++++++++++++
+ .../lsx/ir-instruction/extractelement.ll      | 170 +++++++++++++++++
+ 6 files changed, 428 insertions(+)
+ create mode 100644 llvm/test/CodeGen/LoongArch/lasx/ir-instruction/extractelement.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lsx/ir-instruction/extractelement.ll
+
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+index d3627cec2e8c..26e94a53b344 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+@@ -238,6 +238,7 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+       // will be `Custom` handled in the future.
+       setOperationAction(ISD::BUILD_VECTOR, VT, Legal);
+       setOperationAction(ISD::INSERT_VECTOR_ELT, VT, Legal);
++      setOperationAction(ISD::EXTRACT_VECTOR_ELT, VT, Legal);
+     }
+     for (MVT VT : {MVT::v16i8, MVT::v8i16, MVT::v4i32, MVT::v2i64}) {
+       setOperationAction({ISD::ADD, ISD::SUB}, VT, Legal);
+@@ -267,6 +268,7 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+       // FIXME: Same as above.
+       setOperationAction(ISD::BUILD_VECTOR, VT, Legal);
+       setOperationAction(ISD::INSERT_VECTOR_ELT, VT, Legal);
++      setOperationAction(ISD::EXTRACT_VECTOR_ELT, VT, Legal);
+     }
+     for (MVT VT : {MVT::v4i64, MVT::v8i32, MVT::v16i16, MVT::v32i8}) {
+       setOperationAction({ISD::ADD, ISD::SUB}, VT, Legal);
+diff --git a/llvm/lib/Target/LoongArch/LoongArchInstrInfo.cpp b/llvm/lib/Target/LoongArch/LoongArchInstrInfo.cpp
+index ddd1c9943fac..6576100d3b32 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchInstrInfo.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchInstrInfo.cpp
+@@ -90,6 +90,14 @@ void LoongArchInstrInfo::copyPhysReg(MachineBasicBlock &MBB,
+     Opc = LoongArch::FMOV_S;
+   } else if (LoongArch::FPR64RegClass.contains(DstReg, SrcReg)) {
+     Opc = LoongArch::FMOV_D;
++  } else if (LoongArch::GPRRegClass.contains(DstReg) &&
++             LoongArch::FPR32RegClass.contains(SrcReg)) {
++    // FPR32 -> GPR copies
++    Opc = LoongArch::MOVFR2GR_S;
++  } else if (LoongArch::GPRRegClass.contains(DstReg) &&
++             LoongArch::FPR64RegClass.contains(SrcReg)) {
++    // FPR64 -> GPR copies
++    Opc = LoongArch::MOVFR2GR_D;
+   } else {
+     // TODO: support other copies.
+     llvm_unreachable("Impossible reg-to-reg copy");
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+index e19aa92266b1..380206ddcf10 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+@@ -1401,6 +1401,44 @@ foreach vt = [v32i8, v16i16, v8i32, v4i64, v8f32, v4f64] in {
+   def  : RegRegStPat<store, XVSTX, LASX256, vt>;
+ }
+ 
++// Vector extraction with constant index.
++def : Pat<(i64 (vector_extract v32i8:$xj, uimm4:$imm)),
++          (VPICKVE2GR_B (EXTRACT_SUBREG v32i8:$xj, sub_128), uimm4:$imm)>;
++def : Pat<(i64 (vector_extract v16i16:$xj, uimm3:$imm)),
++          (VPICKVE2GR_H (EXTRACT_SUBREG v16i16:$xj, sub_128), uimm3:$imm)>;
++def : Pat<(i64 (vector_extract v8i32:$xj, uimm2:$imm)),
++          (VPICKVE2GR_W (EXTRACT_SUBREG v8i32:$xj, sub_128), uimm2:$imm)>;
++def : Pat<(i64 (vector_extract v4i64:$xj, uimm1:$imm)),
++          (VPICKVE2GR_D (EXTRACT_SUBREG v4i64:$xj, sub_128), uimm1:$imm)>;
++def : Pat<(f32 (vector_extract v8f32:$xj, uimm2:$imm)),
++          (f32 (EXTRACT_SUBREG (XVREPL128VEI_W v8f32:$xj, uimm2:$imm), sub_32))>;
++def : Pat<(f64 (vector_extract v4f64:$xj, uimm1:$imm)),
++          (f64 (EXTRACT_SUBREG (XVREPL128VEI_D v4f64:$xj, uimm1:$imm), sub_64))>;
++
++// Vector extraction with variable index.
++def : Pat<(i64 (vector_extract v32i8:$xj, i64:$rk)),
++          (SRAI_W (COPY_TO_REGCLASS (f32 (EXTRACT_SUBREG (XVREPLVE_B v32i8:$xj,
++                                                                    i64:$rk),
++                                                         sub_32)),
++                                    GPR), (i64 24))>;
++def : Pat<(i64 (vector_extract v16i16:$xj, i64:$rk)),
++          (SRAI_W (COPY_TO_REGCLASS (f32 (EXTRACT_SUBREG (XVREPLVE_H v16i16:$xj,
++                                                                    i64:$rk),
++                                                         sub_32)),
++                                    GPR), (i64 16))>;
++def : Pat<(i64 (vector_extract v8i32:$xj, i64:$rk)),
++          (COPY_TO_REGCLASS (f32 (EXTRACT_SUBREG (XVREPLVE_W v8i32:$xj, i64:$rk),
++                                                 sub_32)),
++                            GPR)>;
++def : Pat<(i64 (vector_extract v4i64:$xj, i64:$rk)),
++          (COPY_TO_REGCLASS (f64 (EXTRACT_SUBREG (XVREPLVE_D v4i64:$xj, i64:$rk),
++                                                 sub_64)),
++                            GPR)>;
++def : Pat<(f32 (vector_extract v8f32:$xj, i64:$rk)),
++          (f32 (EXTRACT_SUBREG (XVREPLVE_W v8f32:$xj, i64:$rk), sub_32))>;
++def : Pat<(f64 (vector_extract v4f64:$xj, i64:$rk)),
++          (f64 (EXTRACT_SUBREG (XVREPLVE_D v4f64:$xj, i64:$rk), sub_64))>;
++
+ } // Predicates = [HasExtLASX]
+ 
+ /// Intrinsic pattern
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+index 9391b1a8a20c..980870e34503 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+@@ -1501,6 +1501,44 @@ foreach vt = [v16i8, v8i16, v4i32, v2i64, v4f32, v2f64] in {
+   def  : RegRegStPat<store, VSTX, LSX128, vt>;
+ }
+ 
++// Vector extraction with constant index.
++def : Pat<(i64 (vector_extract v16i8:$vj, uimm4:$imm)),
++          (VPICKVE2GR_B v16i8:$vj, uimm4:$imm)>;
++def : Pat<(i64 (vector_extract v8i16:$vj, uimm3:$imm)),
++          (VPICKVE2GR_H v8i16:$vj, uimm3:$imm)>;
++def : Pat<(i64 (vector_extract v4i32:$vj, uimm2:$imm)),
++          (VPICKVE2GR_W v4i32:$vj, uimm2:$imm)>;
++def : Pat<(i64 (vector_extract v2i64:$vj, uimm1:$imm)),
++          (VPICKVE2GR_D v2i64:$vj, uimm1:$imm)>;
++def : Pat<(f32 (vector_extract v4f32:$vj, uimm2:$imm)),
++          (f32 (EXTRACT_SUBREG (VREPLVEI_W v4f32:$vj, uimm2:$imm), sub_32))>;
++def : Pat<(f64 (vector_extract v2f64:$vj, uimm1:$imm)),
++          (f64 (EXTRACT_SUBREG (VREPLVEI_D v2f64:$vj, uimm1:$imm), sub_64))>;
++
++// Vector extraction with variable index.
++def : Pat<(i64 (vector_extract v16i8:$vj, i64:$rk)),
++          (SRAI_W (COPY_TO_REGCLASS (f32 (EXTRACT_SUBREG (VREPLVE_B v16i8:$vj,
++                                                                    i64:$rk),
++                                                         sub_32)),
++                                    GPR), (i64 24))>;
++def : Pat<(i64 (vector_extract v8i16:$vj, i64:$rk)),
++          (SRAI_W (COPY_TO_REGCLASS (f32 (EXTRACT_SUBREG (VREPLVE_H v8i16:$vj,
++                                                                    i64:$rk),
++                                                         sub_32)),
++                                    GPR), (i64 16))>;
++def : Pat<(i64 (vector_extract v4i32:$vj, i64:$rk)),
++          (COPY_TO_REGCLASS (f32 (EXTRACT_SUBREG (VREPLVE_W v4i32:$vj, i64:$rk),
++                                                 sub_32)),
++                            GPR)>;
++def : Pat<(i64 (vector_extract v2i64:$vj, i64:$rk)),
++          (COPY_TO_REGCLASS (f64 (EXTRACT_SUBREG (VREPLVE_D v2i64:$vj, i64:$rk),
++                                                 sub_64)),
++                            GPR)>;
++def : Pat<(f32 (vector_extract v4f32:$vj, i64:$rk)),
++          (f32 (EXTRACT_SUBREG (VREPLVE_W v4f32:$vj, i64:$rk), sub_32))>;
++def : Pat<(f64 (vector_extract v2f64:$vj, i64:$rk)),
++          (f64 (EXTRACT_SUBREG (VREPLVE_D v2f64:$vj, i64:$rk), sub_64))>;
++
+ } // Predicates = [HasExtLSX]
+ 
+ /// Intrinsic pattern
+diff --git a/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/extractelement.ll b/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/extractelement.ll
+new file mode 100644
+index 000000000000..78f584cd09a8
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/extractelement.ll
+@@ -0,0 +1,172 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py UTC_ARGS: --version 3
++; RUN: llc --mtriple=loongarch64 --mattr=+lasx < %s | FileCheck %s
++
++define void @extract_32xi8(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: extract_32xi8:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    vpickve2gr.b $a0, $vr0, 1
++; CHECK-NEXT:    st.b $a0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <32 x i8>, ptr %src
++  %e = extractelement <32 x i8> %v, i32 1
++  store i8 %e, ptr %dst
++  ret void
++}
++
++define void @extract_16xi16(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: extract_16xi16:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    vpickve2gr.h $a0, $vr0, 1
++; CHECK-NEXT:    st.h $a0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <16 x i16>, ptr %src
++  %e = extractelement <16 x i16> %v, i32 1
++  store i16 %e, ptr %dst
++  ret void
++}
++
++define void @extract_8xi32(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: extract_8xi32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    vpickve2gr.w $a0, $vr0, 1
++; CHECK-NEXT:    st.w $a0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <8 x i32>, ptr %src
++  %e = extractelement <8 x i32> %v, i32 1
++  store i32 %e, ptr %dst
++  ret void
++}
++
++define void @extract_4xi64(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: extract_4xi64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    vpickve2gr.d $a0, $vr0, 1
++; CHECK-NEXT:    st.d $a0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <4 x i64>, ptr %src
++  %e = extractelement <4 x i64> %v, i32 1
++  store i64 %e, ptr %dst
++  ret void
++}
++
++define void @extract_8xfloat(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: extract_8xfloat:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    ori $a0, $zero, 7
++; CHECK-NEXT:    xvreplve.w $xr0, $xr0, $a0
++; CHECK-NEXT:    fst.s $fa0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <8 x float>, ptr %src
++  %e = extractelement <8 x float> %v, i32 7
++  store float %e, ptr %dst
++  ret void
++}
++
++define void @extract_4xdouble(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: extract_4xdouble:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    ori $a0, $zero, 3
++; CHECK-NEXT:    xvreplve.d $xr0, $xr0, $a0
++; CHECK-NEXT:    fst.d $fa0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <4 x double>, ptr %src
++  %e = extractelement <4 x double> %v, i32 3
++  store double %e, ptr %dst
++  ret void
++}
++
++define void @extract_32xi8_idx(ptr %src, ptr %dst, i32 %idx) nounwind {
++; CHECK-LABEL: extract_32xi8_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    bstrpick.d $a2, $a2, 31, 0
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvreplve.b $xr0, $xr0, $a2
++; CHECK-NEXT:    movfr2gr.s $a0, $fa0
++; CHECK-NEXT:    srai.w $a0, $a0, 24
++; CHECK-NEXT:    st.b $a0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <32 x i8>, ptr %src
++  %e = extractelement <32 x i8> %v, i32 %idx
++  store i8 %e, ptr %dst
++  ret void
++}
++
++define void @extract_16xi16_idx(ptr %src, ptr %dst, i32 %idx) nounwind {
++; CHECK-LABEL: extract_16xi16_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    bstrpick.d $a2, $a2, 31, 0
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvreplve.h $xr0, $xr0, $a2
++; CHECK-NEXT:    movfr2gr.s $a0, $fa0
++; CHECK-NEXT:    srai.w $a0, $a0, 16
++; CHECK-NEXT:    st.h $a0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <16 x i16>, ptr %src
++  %e = extractelement <16 x i16> %v, i32 %idx
++  store i16 %e, ptr %dst
++  ret void
++}
++
++define void @extract_8xi32_idx(ptr %src, ptr %dst, i32 %idx) nounwind {
++; CHECK-LABEL: extract_8xi32_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    bstrpick.d $a2, $a2, 31, 0
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvreplve.w $xr0, $xr0, $a2
++; CHECK-NEXT:    movfr2gr.s $a0, $fa0
++; CHECK-NEXT:    st.w $a0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <8 x i32>, ptr %src
++  %e = extractelement <8 x i32> %v, i32 %idx
++  store i32 %e, ptr %dst
++  ret void
++}
++
++define void @extract_4xi64_idx(ptr %src, ptr %dst, i32 %idx) nounwind {
++; CHECK-LABEL: extract_4xi64_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    bstrpick.d $a2, $a2, 31, 0
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvreplve.d $xr0, $xr0, $a2
++; CHECK-NEXT:    movfr2gr.d $a0, $fa0
++; CHECK-NEXT:    st.d $a0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <4 x i64>, ptr %src
++  %e = extractelement <4 x i64> %v, i32 %idx
++  store i64 %e, ptr %dst
++  ret void
++}
++
++define void @extract_8xfloat_idx(ptr %src, ptr %dst, i32 %idx) nounwind {
++; CHECK-LABEL: extract_8xfloat_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    bstrpick.d $a2, $a2, 31, 0
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvreplve.w $xr0, $xr0, $a2
++; CHECK-NEXT:    fst.s $fa0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <8 x float>, ptr %src
++  %e = extractelement <8 x float> %v, i32 %idx
++  store float %e, ptr %dst
++  ret void
++}
++
++define void @extract_4xdouble_idx(ptr %src, ptr %dst, i32 %idx) nounwind {
++; CHECK-LABEL: extract_4xdouble_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    bstrpick.d $a2, $a2, 31, 0
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvreplve.d $xr0, $xr0, $a2
++; CHECK-NEXT:    fst.d $fa0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <4 x double>, ptr %src
++  %e = extractelement <4 x double> %v, i32 %idx
++  store double %e, ptr %dst
++  ret void
++}
+diff --git a/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/extractelement.ll b/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/extractelement.ll
+new file mode 100644
+index 000000000000..b8798c97861e
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/extractelement.ll
+@@ -0,0 +1,170 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py UTC_ARGS: --version 3
++; RUN: llc --mtriple=loongarch64 --mattr=+lsx < %s | FileCheck %s
++
++define void @extract_16xi8(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: extract_16xi8:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vpickve2gr.b $a0, $vr0, 1
++; CHECK-NEXT:    st.b $a0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <16 x i8>, ptr %src
++  %e = extractelement <16 x i8> %v, i32 1
++  store i8 %e, ptr %dst
++  ret void
++}
++
++define void @extract_8xi16(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: extract_8xi16:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vpickve2gr.h $a0, $vr0, 1
++; CHECK-NEXT:    st.h $a0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <8 x i16>, ptr %src
++  %e = extractelement <8 x i16> %v, i32 1
++  store i16 %e, ptr %dst
++  ret void
++}
++
++define void @extract_4xi32(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: extract_4xi32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vpickve2gr.w $a0, $vr0, 1
++; CHECK-NEXT:    st.w $a0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <4 x i32>, ptr %src
++  %e = extractelement <4 x i32> %v, i32 1
++  store i32 %e, ptr %dst
++  ret void
++}
++
++define void @extract_2xi64(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: extract_2xi64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vpickve2gr.d $a0, $vr0, 1
++; CHECK-NEXT:    st.d $a0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <2 x i64>, ptr %src
++  %e = extractelement <2 x i64> %v, i32 1
++  store i64 %e, ptr %dst
++  ret void
++}
++
++define void @extract_4xfloat(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: extract_4xfloat:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vreplvei.w $vr0, $vr0, 1
++; CHECK-NEXT:    fst.s $fa0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <4 x float>, ptr %src
++  %e = extractelement <4 x float> %v, i32 1
++  store float %e, ptr %dst
++  ret void
++}
++
++define void @extract_2xdouble(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: extract_2xdouble:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vreplvei.d $vr0, $vr0, 1
++; CHECK-NEXT:    fst.d $fa0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <2 x double>, ptr %src
++  %e = extractelement <2 x double> %v, i32 1
++  store double %e, ptr %dst
++  ret void
++}
++
++define void @extract_16xi8_idx(ptr %src, ptr %dst, i32 %idx) nounwind {
++; CHECK-LABEL: extract_16xi8_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    bstrpick.d $a2, $a2, 31, 0
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vreplve.b $vr0, $vr0, $a2
++; CHECK-NEXT:    movfr2gr.s $a0, $fa0
++; CHECK-NEXT:    srai.w $a0, $a0, 24
++; CHECK-NEXT:    st.b $a0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <16 x i8>, ptr %src
++  %e = extractelement <16 x i8> %v, i32 %idx
++  store i8 %e, ptr %dst
++  ret void
++}
++
++define void @extract_8xi16_idx(ptr %src, ptr %dst, i32 %idx) nounwind {
++; CHECK-LABEL: extract_8xi16_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    bstrpick.d $a2, $a2, 31, 0
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vreplve.h $vr0, $vr0, $a2
++; CHECK-NEXT:    movfr2gr.s $a0, $fa0
++; CHECK-NEXT:    srai.w $a0, $a0, 16
++; CHECK-NEXT:    st.h $a0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <8 x i16>, ptr %src
++  %e = extractelement <8 x i16> %v, i32 %idx
++  store i16 %e, ptr %dst
++  ret void
++}
++
++define void @extract_4xi32_idx(ptr %src, ptr %dst, i32 %idx) nounwind {
++; CHECK-LABEL: extract_4xi32_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    bstrpick.d $a2, $a2, 31, 0
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vreplve.w $vr0, $vr0, $a2
++; CHECK-NEXT:    movfr2gr.s $a0, $fa0
++; CHECK-NEXT:    st.w $a0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <4 x i32>, ptr %src
++  %e = extractelement <4 x i32> %v, i32 %idx
++  store i32 %e, ptr %dst
++  ret void
++}
++
++define void @extract_2xi64_idx(ptr %src, ptr %dst, i32 %idx) nounwind {
++; CHECK-LABEL: extract_2xi64_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    bstrpick.d $a2, $a2, 31, 0
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vreplve.d $vr0, $vr0, $a2
++; CHECK-NEXT:    movfr2gr.d $a0, $fa0
++; CHECK-NEXT:    st.d $a0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <2 x i64>, ptr %src
++  %e = extractelement <2 x i64> %v, i32 %idx
++  store i64 %e, ptr %dst
++  ret void
++}
++
++define void @extract_4xfloat_idx(ptr %src, ptr %dst, i32 %idx) nounwind {
++; CHECK-LABEL: extract_4xfloat_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    bstrpick.d $a2, $a2, 31, 0
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vreplve.w $vr0, $vr0, $a2
++; CHECK-NEXT:    fst.s $fa0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <4 x float>, ptr %src
++  %e = extractelement <4 x float> %v, i32 %idx
++  store float %e, ptr %dst
++  ret void
++}
++
++define void @extract_2xdouble_idx(ptr %src, ptr %dst, i32 %idx) nounwind {
++; CHECK-LABEL: extract_2xdouble_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    bstrpick.d $a2, $a2, 31, 0
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vreplve.d $vr0, $vr0, $a2
++; CHECK-NEXT:    fst.d $fa0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <2 x double>, ptr %src
++  %e = extractelement <2 x double> %v, i32 %idx
++  store double %e, ptr %dst
++  ret void
++}
+-- 
+2.20.1
+

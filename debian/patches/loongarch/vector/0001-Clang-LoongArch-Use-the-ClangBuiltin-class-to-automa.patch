@@ -1,0 +1,671 @@
+From e5c03f299c1761eec0ae325d995eab121f1dd3a3 Mon Sep 17 00:00:00 2001
+From: wanglei <wanglei@loongson.cn>
+Date: Wed, 9 Aug 2023 16:01:37 +0800
+Subject: [PATCH 01/42] [Clang][LoongArch] Use the ClangBuiltin class to
+ automatically generate support for CBE and CFE
+
+Fixed the type modifier (L->W), removed redundant feature checking code
+since the feature has already been checked in `EmitBuiltinExpr`. And
+Cleaned up unused diagnostic information.
+
+Reviewed By: SixWeining
+
+Differential Revision: https://reviews.llvm.org/D156866
+
+(cherry picked from commit ea8d3b1f9f2d7385d97fcd34d14db0eb2cb2795c)
+
+Change-Id: I058f02e311dd67dc2ec63e404e4bb58e852da1b8
+---
+ .../include/clang/Basic/BuiltinsLoongArch.def |  25 ++--
+ .../clang/Basic/DiagnosticSemaKinds.td        |   7 -
+ clang/lib/CodeGen/CGBuiltin.cpp               | 130 ----------------
+ clang/lib/CodeGen/CodeGenFunction.h           |   1 -
+ clang/lib/Sema/SemaChecking.cpp               |  50 +------
+ .../CodeGen/LoongArch/intrinsic-la32-error.c  | 118 +++++++--------
+ llvm/include/llvm/IR/IntrinsicsLoongArch.td   | 141 +++++++++---------
+ llvm/lib/IR/Function.cpp                      |   1 +
+ 8 files changed, 136 insertions(+), 337 deletions(-)
+
+diff --git a/clang/include/clang/Basic/BuiltinsLoongArch.def b/clang/include/clang/Basic/BuiltinsLoongArch.def
+index 7f2c8403410d..20510e18fe58 100644
+--- a/clang/include/clang/Basic/BuiltinsLoongArch.def
++++ b/clang/include/clang/Basic/BuiltinsLoongArch.def
+@@ -16,8 +16,7 @@
+ #endif
+ 
+ // TODO: Support more builtins.
+-// TODO: Added feature constraints.
+-TARGET_BUILTIN(__builtin_loongarch_cacop_d, "vLiULiLi", "nc", "64bit")
++TARGET_BUILTIN(__builtin_loongarch_cacop_d, "vWiUWiWi", "nc", "64bit")
+ TARGET_BUILTIN(__builtin_loongarch_cacop_w, "viUii", "nc", "32bit")
+ TARGET_BUILTIN(__builtin_loongarch_dbar, "vIUi", "nc", "")
+ TARGET_BUILTIN(__builtin_loongarch_ibar, "vIUi", "nc", "")
+@@ -26,36 +25,36 @@ TARGET_BUILTIN(__builtin_loongarch_movgr2fcsr, "vIUiUi", "nc", "f")
+ TARGET_BUILTIN(__builtin_loongarch_break, "vIUi", "nc", "")
+ TARGET_BUILTIN(__builtin_loongarch_syscall, "vIUi", "nc", "")
+ TARGET_BUILTIN(__builtin_loongarch_cpucfg, "UiUi", "nc", "")
+-TARGET_BUILTIN(__builtin_loongarch_asrtle_d, "vLiLi", "nc", "64bit")
+-TARGET_BUILTIN(__builtin_loongarch_asrtgt_d, "vLiLi", "nc", "64bit")
++TARGET_BUILTIN(__builtin_loongarch_asrtle_d, "vWiWi", "nc", "64bit")
++TARGET_BUILTIN(__builtin_loongarch_asrtgt_d, "vWiWi", "nc", "64bit")
+ 
+ TARGET_BUILTIN(__builtin_loongarch_crc_w_b_w, "iii", "nc", "64bit")
+ TARGET_BUILTIN(__builtin_loongarch_crc_w_h_w, "iii", "nc", "64bit")
+ TARGET_BUILTIN(__builtin_loongarch_crc_w_w_w, "iii", "nc", "64bit")
+-TARGET_BUILTIN(__builtin_loongarch_crc_w_d_w, "iLii", "nc", "64bit")
++TARGET_BUILTIN(__builtin_loongarch_crc_w_d_w, "iWii", "nc", "64bit")
+ TARGET_BUILTIN(__builtin_loongarch_crcc_w_b_w, "iii", "nc", "64bit")
+ TARGET_BUILTIN(__builtin_loongarch_crcc_w_h_w, "iii", "nc", "64bit")
+ TARGET_BUILTIN(__builtin_loongarch_crcc_w_w_w, "iii", "nc", "64bit")
+-TARGET_BUILTIN(__builtin_loongarch_crcc_w_d_w, "iLii", "nc", "64bit")
++TARGET_BUILTIN(__builtin_loongarch_crcc_w_d_w, "iWii", "nc", "64bit")
+ 
+ TARGET_BUILTIN(__builtin_loongarch_csrrd_w, "UiIUi", "nc", "")
+-TARGET_BUILTIN(__builtin_loongarch_csrrd_d, "ULiIUi", "nc", "64bit")
++TARGET_BUILTIN(__builtin_loongarch_csrrd_d, "UWiIUi", "nc", "64bit")
+ TARGET_BUILTIN(__builtin_loongarch_csrwr_w, "UiUiIUi", "nc", "")
+-TARGET_BUILTIN(__builtin_loongarch_csrwr_d, "ULiULiIUi", "nc", "64bit")
++TARGET_BUILTIN(__builtin_loongarch_csrwr_d, "UWiUWiIUi", "nc", "64bit")
+ TARGET_BUILTIN(__builtin_loongarch_csrxchg_w, "UiUiUiIUi", "nc", "")
+-TARGET_BUILTIN(__builtin_loongarch_csrxchg_d, "ULiULiULiIUi", "nc", "64bit")
++TARGET_BUILTIN(__builtin_loongarch_csrxchg_d, "UWiUWiUWiIUi", "nc", "64bit")
+ 
+ TARGET_BUILTIN(__builtin_loongarch_iocsrrd_b, "UiUi", "nc", "")
+ TARGET_BUILTIN(__builtin_loongarch_iocsrrd_h, "UiUi", "nc", "")
+ TARGET_BUILTIN(__builtin_loongarch_iocsrrd_w, "UiUi", "nc", "")
+-TARGET_BUILTIN(__builtin_loongarch_iocsrrd_d, "ULiUi", "nc", "64bit")
++TARGET_BUILTIN(__builtin_loongarch_iocsrrd_d, "UWiUi", "nc", "64bit")
+ TARGET_BUILTIN(__builtin_loongarch_iocsrwr_b, "vUiUi", "nc", "")
+ TARGET_BUILTIN(__builtin_loongarch_iocsrwr_h, "vUiUi", "nc", "")
+ TARGET_BUILTIN(__builtin_loongarch_iocsrwr_w, "vUiUi", "nc", "")
+-TARGET_BUILTIN(__builtin_loongarch_iocsrwr_d, "vULiUi", "nc", "64bit")
++TARGET_BUILTIN(__builtin_loongarch_iocsrwr_d, "vUWiUi", "nc", "64bit")
+ 
+-TARGET_BUILTIN(__builtin_loongarch_lddir_d, "LiLiIULi", "nc", "64bit")
+-TARGET_BUILTIN(__builtin_loongarch_ldpte_d, "vLiIULi", "nc", "64bit")
++TARGET_BUILTIN(__builtin_loongarch_lddir_d, "WiWiIUWi", "nc", "64bit")
++TARGET_BUILTIN(__builtin_loongarch_ldpte_d, "vWiIUWi", "nc", "64bit")
+ 
+ #undef BUILTIN
+ #undef TARGET_BUILTIN
+diff --git a/clang/include/clang/Basic/DiagnosticSemaKinds.td b/clang/include/clang/Basic/DiagnosticSemaKinds.td
+index c88f25209fc0..0e97620945af 100644
+--- a/clang/include/clang/Basic/DiagnosticSemaKinds.td
++++ b/clang/include/clang/Basic/DiagnosticSemaKinds.td
+@@ -11853,10 +11853,6 @@ def err_non_designated_init_used : Error<
+ def err_cast_from_randomized_struct : Error<
+   "casting from randomized structure pointer type %0 to %1">;
+ 
+-// LoongArch-specific Diagnostics
+-def err_loongarch_builtin_requires_la64 : Error<
+-  "this builtin requires target: loongarch64">;
+-
+ // Unsafe buffer usage diagnostics.
+ def warn_unsafe_buffer_variable : Warning<
+   "%0 is an %select{unsafe pointer used for buffer access|unsafe buffer that "
+@@ -11872,9 +11868,6 @@ def note_unsafe_buffer_variable_fixit_group : Note<
+   "change type of %0 to '%select{std::span|std::array|std::span::iterator}1' to preserve bounds information%select{|, and change %2 to '%select{std::span|std::array|std::span::iterator}1' to propagate bounds information between them}3">;
+ def note_safe_buffer_usage_suggestions_disabled : Note<
+   "pass -fsafe-buffer-usage-suggestions to receive code hardening suggestions">;
+-def err_loongarch_builtin_requires_la32 : Error<
+-  "this builtin requires target: loongarch32">;
+-
+ def err_builtin_pass_in_regs_non_class : Error<
+   "argument %0 is not an unqualified class type">;
+ 
+diff --git a/clang/lib/CodeGen/CGBuiltin.cpp b/clang/lib/CodeGen/CGBuiltin.cpp
+index 30f5f4e7061c..e512762fafaf 100644
+--- a/clang/lib/CodeGen/CGBuiltin.cpp
++++ b/clang/lib/CodeGen/CGBuiltin.cpp
+@@ -43,7 +43,6 @@
+ #include "llvm/IR/IntrinsicsARM.h"
+ #include "llvm/IR/IntrinsicsBPF.h"
+ #include "llvm/IR/IntrinsicsHexagon.h"
+-#include "llvm/IR/IntrinsicsLoongArch.h"
+ #include "llvm/IR/IntrinsicsNVPTX.h"
+ #include "llvm/IR/IntrinsicsPowerPC.h"
+ #include "llvm/IR/IntrinsicsR600.h"
+@@ -5588,9 +5587,6 @@ static Value *EmitTargetArchBuiltinExpr(CodeGenFunction *CGF,
+   case llvm::Triple::riscv32:
+   case llvm::Triple::riscv64:
+     return CGF->EmitRISCVBuiltinExpr(BuiltinID, E, ReturnValue);
+-  case llvm::Triple::loongarch32:
+-  case llvm::Triple::loongarch64:
+-    return CGF->EmitLoongArchBuiltinExpr(BuiltinID, E);
+   default:
+     return nullptr;
+   }
+@@ -20418,129 +20414,3 @@ Value *CodeGenFunction::EmitRISCVBuiltinExpr(unsigned BuiltinID,
+   llvm::Function *F = CGM.getIntrinsic(ID, IntrinsicTypes);
+   return Builder.CreateCall(F, Ops, "");
+ }
+-
+-Value *CodeGenFunction::EmitLoongArchBuiltinExpr(unsigned BuiltinID,
+-                                                 const CallExpr *E) {
+-  SmallVector<Value *, 4> Ops;
+-
+-  for (unsigned i = 0, e = E->getNumArgs(); i != e; i++)
+-    Ops.push_back(EmitScalarExpr(E->getArg(i)));
+-
+-  Intrinsic::ID ID = Intrinsic::not_intrinsic;
+-
+-  switch (BuiltinID) {
+-  default:
+-    llvm_unreachable("unexpected builtin ID.");
+-  case LoongArch::BI__builtin_loongarch_cacop_d:
+-    ID = Intrinsic::loongarch_cacop_d;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_cacop_w:
+-    ID = Intrinsic::loongarch_cacop_w;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_dbar:
+-    ID = Intrinsic::loongarch_dbar;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_break:
+-    ID = Intrinsic::loongarch_break;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_ibar:
+-    ID = Intrinsic::loongarch_ibar;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_movfcsr2gr:
+-    ID = Intrinsic::loongarch_movfcsr2gr;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_movgr2fcsr:
+-    ID = Intrinsic::loongarch_movgr2fcsr;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_syscall:
+-    ID = Intrinsic::loongarch_syscall;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_crc_w_b_w:
+-    ID = Intrinsic::loongarch_crc_w_b_w;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_crc_w_h_w:
+-    ID = Intrinsic::loongarch_crc_w_h_w;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_crc_w_w_w:
+-    ID = Intrinsic::loongarch_crc_w_w_w;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_crc_w_d_w:
+-    ID = Intrinsic::loongarch_crc_w_d_w;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_crcc_w_b_w:
+-    ID = Intrinsic::loongarch_crcc_w_b_w;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_crcc_w_h_w:
+-    ID = Intrinsic::loongarch_crcc_w_h_w;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_crcc_w_w_w:
+-    ID = Intrinsic::loongarch_crcc_w_w_w;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_crcc_w_d_w:
+-    ID = Intrinsic::loongarch_crcc_w_d_w;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_csrrd_w:
+-    ID = Intrinsic::loongarch_csrrd_w;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_csrwr_w:
+-    ID = Intrinsic::loongarch_csrwr_w;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_csrxchg_w:
+-    ID = Intrinsic::loongarch_csrxchg_w;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_csrrd_d:
+-    ID = Intrinsic::loongarch_csrrd_d;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_csrwr_d:
+-    ID = Intrinsic::loongarch_csrwr_d;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_csrxchg_d:
+-    ID = Intrinsic::loongarch_csrxchg_d;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_iocsrrd_b:
+-    ID = Intrinsic::loongarch_iocsrrd_b;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_iocsrrd_h:
+-    ID = Intrinsic::loongarch_iocsrrd_h;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_iocsrrd_w:
+-    ID = Intrinsic::loongarch_iocsrrd_w;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_iocsrrd_d:
+-    ID = Intrinsic::loongarch_iocsrrd_d;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_iocsrwr_b:
+-    ID = Intrinsic::loongarch_iocsrwr_b;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_iocsrwr_h:
+-    ID = Intrinsic::loongarch_iocsrwr_h;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_iocsrwr_w:
+-    ID = Intrinsic::loongarch_iocsrwr_w;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_iocsrwr_d:
+-    ID = Intrinsic::loongarch_iocsrwr_d;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_cpucfg:
+-    ID = Intrinsic::loongarch_cpucfg;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_asrtle_d:
+-    ID = Intrinsic::loongarch_asrtle_d;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_asrtgt_d:
+-    ID = Intrinsic::loongarch_asrtgt_d;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_lddir_d:
+-    ID = Intrinsic::loongarch_lddir_d;
+-    break;
+-  case LoongArch::BI__builtin_loongarch_ldpte_d:
+-    ID = Intrinsic::loongarch_ldpte_d;
+-    break;
+-    // TODO: Support more Intrinsics.
+-  }
+-
+-  assert(ID != Intrinsic::not_intrinsic);
+-
+-  llvm::Function *F = CGM.getIntrinsic(ID);
+-  return Builder.CreateCall(F, Ops);
+-}
+diff --git a/clang/lib/CodeGen/CodeGenFunction.h b/clang/lib/CodeGen/CodeGenFunction.h
+index 8722fd4550e4..143e0707b942 100644
+--- a/clang/lib/CodeGen/CodeGenFunction.h
++++ b/clang/lib/CodeGen/CodeGenFunction.h
+@@ -4316,7 +4316,6 @@ public:
+   llvm::Value *EmitHexagonBuiltinExpr(unsigned BuiltinID, const CallExpr *E);
+   llvm::Value *EmitRISCVBuiltinExpr(unsigned BuiltinID, const CallExpr *E,
+                                     ReturnValueSlot ReturnValue);
+-  llvm::Value *EmitLoongArchBuiltinExpr(unsigned BuiltinID, const CallExpr *E);
+   void ProcessOrderScopeAMDGCN(llvm::Value *Order, llvm::Value *Scope,
+                                llvm::AtomicOrdering &AO,
+                                llvm::SyncScope::ID &SSID);
+diff --git a/clang/lib/Sema/SemaChecking.cpp b/clang/lib/Sema/SemaChecking.cpp
+index a94f009f3fa6..a8416bf4de92 100644
+--- a/clang/lib/Sema/SemaChecking.cpp
++++ b/clang/lib/Sema/SemaChecking.cpp
+@@ -3827,39 +3827,12 @@ bool Sema::CheckLoongArchBuiltinFunctionCall(const TargetInfo &TI,
+   default:
+     break;
+   case LoongArch::BI__builtin_loongarch_cacop_d:
+-    if (!TI.hasFeature("64bit"))
+-      return Diag(TheCall->getBeginLoc(),
+-                  diag::err_loongarch_builtin_requires_la64)
+-             << TheCall->getSourceRange();
+-    [[fallthrough]];
+   case LoongArch::BI__builtin_loongarch_cacop_w: {
+-    if (BuiltinID == LoongArch::BI__builtin_loongarch_cacop_w &&
+-        !TI.hasFeature("32bit"))
+-      return Diag(TheCall->getBeginLoc(),
+-                  diag::err_loongarch_builtin_requires_la32)
+-             << TheCall->getSourceRange();
+     SemaBuiltinConstantArgRange(TheCall, 0, 0, llvm::maxUIntN(5));
+     SemaBuiltinConstantArgRange(TheCall, 2, llvm::minIntN(12),
+                                 llvm::maxIntN(12));
+     break;
+   }
+-  case LoongArch::BI__builtin_loongarch_crc_w_b_w:
+-  case LoongArch::BI__builtin_loongarch_crc_w_h_w:
+-  case LoongArch::BI__builtin_loongarch_crc_w_w_w:
+-  case LoongArch::BI__builtin_loongarch_crc_w_d_w:
+-  case LoongArch::BI__builtin_loongarch_crcc_w_b_w:
+-  case LoongArch::BI__builtin_loongarch_crcc_w_h_w:
+-  case LoongArch::BI__builtin_loongarch_crcc_w_w_w:
+-  case LoongArch::BI__builtin_loongarch_crcc_w_d_w:
+-  case LoongArch::BI__builtin_loongarch_iocsrrd_d:
+-  case LoongArch::BI__builtin_loongarch_iocsrwr_d:
+-  case LoongArch::BI__builtin_loongarch_asrtle_d:
+-  case LoongArch::BI__builtin_loongarch_asrtgt_d:
+-    if (!TI.hasFeature("64bit"))
+-      return Diag(TheCall->getBeginLoc(),
+-                  diag::err_loongarch_builtin_requires_la64)
+-             << TheCall->getSourceRange();
+-    break;
+   case LoongArch::BI__builtin_loongarch_break:
+   case LoongArch::BI__builtin_loongarch_dbar:
+   case LoongArch::BI__builtin_loongarch_ibar:
+@@ -3867,35 +3840,16 @@ bool Sema::CheckLoongArchBuiltinFunctionCall(const TargetInfo &TI,
+     // Check if immediate is in [0, 32767].
+     return SemaBuiltinConstantArgRange(TheCall, 0, 0, 32767);
+   case LoongArch::BI__builtin_loongarch_csrrd_w:
+-    return SemaBuiltinConstantArgRange(TheCall, 0, 0, 16383);
+-  case LoongArch::BI__builtin_loongarch_csrwr_w:
+-    return SemaBuiltinConstantArgRange(TheCall, 1, 0, 16383);
+-  case LoongArch::BI__builtin_loongarch_csrxchg_w:
+-    return SemaBuiltinConstantArgRange(TheCall, 2, 0, 16383);
+   case LoongArch::BI__builtin_loongarch_csrrd_d:
+-    if (!TI.hasFeature("64bit"))
+-      return Diag(TheCall->getBeginLoc(),
+-                  diag::err_loongarch_builtin_requires_la64)
+-             << TheCall->getSourceRange();
+     return SemaBuiltinConstantArgRange(TheCall, 0, 0, 16383);
++  case LoongArch::BI__builtin_loongarch_csrwr_w:
+   case LoongArch::BI__builtin_loongarch_csrwr_d:
+-    if (!TI.hasFeature("64bit"))
+-      return Diag(TheCall->getBeginLoc(),
+-                  diag::err_loongarch_builtin_requires_la64)
+-             << TheCall->getSourceRange();
+     return SemaBuiltinConstantArgRange(TheCall, 1, 0, 16383);
++  case LoongArch::BI__builtin_loongarch_csrxchg_w:
+   case LoongArch::BI__builtin_loongarch_csrxchg_d:
+-    if (!TI.hasFeature("64bit"))
+-      return Diag(TheCall->getBeginLoc(),
+-                  diag::err_loongarch_builtin_requires_la64)
+-             << TheCall->getSourceRange();
+     return SemaBuiltinConstantArgRange(TheCall, 2, 0, 16383);
+   case LoongArch::BI__builtin_loongarch_lddir_d:
+   case LoongArch::BI__builtin_loongarch_ldpte_d:
+-    if (!TI.hasFeature("64bit"))
+-      return Diag(TheCall->getBeginLoc(),
+-                  diag::err_loongarch_builtin_requires_la64)
+-             << TheCall->getSourceRange();
+     return SemaBuiltinConstantArgRange(TheCall, 1, 0, 31);
+   case LoongArch::BI__builtin_loongarch_movfcsr2gr:
+   case LoongArch::BI__builtin_loongarch_movgr2fcsr:
+diff --git a/clang/test/CodeGen/LoongArch/intrinsic-la32-error.c b/clang/test/CodeGen/LoongArch/intrinsic-la32-error.c
+index 0264c2948934..db113a13eb5a 100644
+--- a/clang/test/CodeGen/LoongArch/intrinsic-la32-error.c
++++ b/clang/test/CodeGen/LoongArch/intrinsic-la32-error.c
+@@ -1,9 +1,58 @@
+ // RUN: %clang_cc1 -triple loongarch32 -emit-llvm -S -verify %s -o /dev/null
++// RUN: not %clang_cc1 -triple loongarch32 -DFEATURE_CHECK -emit-llvm %s 2>&1 \
++// RUN:   | FileCheck %s
+ 
+ #include <larchintrin.h>
+ 
++#ifdef FEATURE_CHECK
++void test_feature(long *v_l, unsigned long *v_ul, int *v_i, unsigned ui, char c, short s) {
++// CHECK: error: '__builtin_loongarch_cacop_d' needs target feature 64bit
++  __builtin_loongarch_cacop_d(1, v_ul[0], 1024);
++
++// CHECK: error: '__builtin_loongarch_crc_w_b_w' needs target feature 64bit
++  v_i[0] = __builtin_loongarch_crc_w_b_w(c, v_i[0]);
++// CHECK: error: '__builtin_loongarch_crc_w_h_w' needs target feature 64bit
++  v_i[1] =  __builtin_loongarch_crc_w_h_w(c, v_i[0]);
++// CHECK: error: '__builtin_loongarch_crc_w_w_w' needs target feature 64bit
++  v_i[2] = __builtin_loongarch_crc_w_w_w(c, v_i[0]);
++// CHECK: error: '__builtin_loongarch_crc_w_d_w' needs target feature 64bit
++  v_i[3] = __builtin_loongarch_crc_w_d_w(c, v_i[0]);
++
++// CHECK: error: '__builtin_loongarch_crcc_w_b_w' needs target feature 64bit
++  v_i[4] = __builtin_loongarch_crcc_w_b_w(c, v_i[0]);
++// CHECK: error: '__builtin_loongarch_crcc_w_h_w' needs target feature 64bit
++  v_i[5] = __builtin_loongarch_crcc_w_h_w(s, v_i[0]);
++// CHECK: error: '__builtin_loongarch_crcc_w_w_w' needs target feature 64bit
++  v_i[6] = __builtin_loongarch_crcc_w_w_w(v_i[0], v_i[1]);
++// CHECK: error: '__builtin_loongarch_crcc_w_d_w' needs target feature 64bit
++  v_i[7] = __builtin_loongarch_crcc_w_d_w(v_l[0], v_i[0]);
++
++// CHECK: error: '__builtin_loongarch_csrrd_d' needs target feature 64bit
++  v_ul[0] = __builtin_loongarch_csrrd_d(1);
++// CHECK: error: '__builtin_loongarch_csrwr_d' needs target feature 64bit
++  v_ul[1] = __builtin_loongarch_csrwr_d(v_ul[0], 1);
++// CHECK: error: '__builtin_loongarch_csrxchg_d' needs target feature 64bit
++  v_ul[2] = __builtin_loongarch_csrxchg_d(v_ul[0], v_ul[1], 1);
++
++
++// CHECK: error: '__builtin_loongarch_iocsrrd_d' needs target feature 64bit
++  v_ul[3] = __builtin_loongarch_iocsrrd_d(ui);
++// CHECK: error: '__builtin_loongarch_iocsrwr_d' needs target feature 64bit
++  __builtin_loongarch_iocsrwr_d(v_ul[0], ui);
++
++// CHECK: error: '__builtin_loongarch_asrtle_d' needs target feature 64bit
++  __builtin_loongarch_asrtle_d(v_l[0], v_l[1]);
++// CHECK: error: '__builtin_loongarch_asrtgt_d' needs target feature 64bit
++  __builtin_loongarch_asrtgt_d(v_l[0], v_l[1]);
++
++// CHECK: error: '__builtin_loongarch_lddir_d' needs target feature 64bit
++  v_ul[4] = __builtin_loongarch_lddir_d(v_l[0], 1);
++// CHECK: error: '__builtin_loongarch_ldpte_d' needs target feature 64bit
++  __builtin_loongarch_ldpte_d(v_l[0], 1);
++}
++#endif
++
+ void cacop_d(unsigned long int a) {
+-  __builtin_loongarch_cacop_d(1, a, 1024); // expected-error {{this builtin requires target: loongarch64}}
+   __builtin_loongarch_cacop_w(-1, a, 1024); // expected-error {{argument value -1 is outside the valid range [0, 31]}}
+   __builtin_loongarch_cacop_w(32, a, 1024); // expected-error {{argument value 32 is outside the valid range [0, 31]}}
+   __builtin_loongarch_cacop_w(1, a, -4096); // expected-error {{argument value -4096 is outside the valid range [-2048, 2047]}}
+@@ -47,49 +96,6 @@ void syscall(int a) {
+   __builtin_loongarch_syscall(a); // expected-error {{argument to '__builtin_loongarch_syscall' must be a constant integer}}
+ }
+ 
+-int crc_w_b_w(char a, int b) {
+-  return __builtin_loongarch_crc_w_b_w(a, b); // expected-error {{this builtin requires target: loongarch64}}
+-}
+-
+-int crc_w_h_w(short a, int b) {
+-  return __builtin_loongarch_crc_w_h_w(a, b); // expected-error {{this builtin requires target: loongarch64}}
+-}
+-
+-int crc_w_w_w(int a, int b) {
+-  return __builtin_loongarch_crc_w_w_w(a, b); // expected-error {{this builtin requires target: loongarch64}}
+-}
+-
+-int crc_w_d_w(long int a, int b) {
+-  return __builtin_loongarch_crc_w_d_w(a, b); // expected-error {{this builtin requires target: loongarch64}}
+-}
+-int crcc_w_b_w(char a, int b) {
+-  return __builtin_loongarch_crcc_w_b_w(a, b); // expected-error {{this builtin requires target: loongarch64}}
+-}
+-
+-int crcc_w_h_w(short a, int b) {
+-  return __builtin_loongarch_crcc_w_h_w(a, b); // expected-error {{this builtin requires target: loongarch64}}
+-}
+-
+-int crcc_w_w_w(int a, int b) {
+-  return __builtin_loongarch_crcc_w_w_w(a, b); // expected-error {{this builtin requires target: loongarch64}}
+-}
+-
+-int crcc_w_d_w(long int a, int b) {
+-  return __builtin_loongarch_crcc_w_d_w(a, b); // expected-error {{this builtin requires target: loongarch64}}
+-}
+-
+-unsigned long int csrrd_d() {
+-  return __builtin_loongarch_csrrd_d(1); // expected-error {{this builtin requires target: loongarch64}}
+-}
+-
+-unsigned long int csrwr_d(unsigned long int a) {
+-  return __builtin_loongarch_csrwr_d(a, 1); // expected-error {{this builtin requires target: loongarch64}}
+-}
+-
+-unsigned long int csrxchg_d(unsigned long int a, unsigned long int b) {
+-  return __builtin_loongarch_csrxchg_d(a, b, 1); // expected-error {{this builtin requires target: loongarch64}}
+-}
+-
+ void csrrd_w(int a) {
+     __builtin_loongarch_csrrd_w(16384); // expected-error {{argument value 16384 is outside the valid range [0, 16383]}}
+     __builtin_loongarch_csrrd_w(-1); // expected-error {{argument value 4294967295 is outside the valid range [0, 16383]}}
+@@ -108,30 +114,6 @@ void csrxchg_w(unsigned int a, unsigned int b) {
+     __builtin_loongarch_csrxchg_w(a, b, b); // expected-error {{argument to '__builtin_loongarch_csrxchg_w' must be a constant integer}}
+ }
+ 
+-unsigned long int iocsrrd_d(unsigned int a) {
+-  return __builtin_loongarch_iocsrrd_d(a); // expected-error {{this builtin requires target: loongarch64}}
+-}
+-
+-void iocsrwr_d(unsigned long int a, unsigned int b) {
+-  __builtin_loongarch_iocsrwr_d(a, b); // expected-error {{this builtin requires target: loongarch64}}
+-}
+-
+-void asrtle_d(long int a, long int b) {
+-  __builtin_loongarch_asrtle_d(a, b); // expected-error {{this builtin requires target: loongarch64}}
+-}
+-
+-void asrtgt_d(long int a, long int b) {
+-  __builtin_loongarch_asrtgt_d(a, b); // expected-error {{this builtin requires target: loongarch64}}
+-}
+-
+-void lddir_d(long int a, int b) {
+-  __builtin_loongarch_lddir_d(a, 1); // expected-error {{this builtin requires target: loongarch64}}
+-}
+-
+-void ldpte_d(long int a, int b) {
+-  __builtin_loongarch_ldpte_d(a, 1); // expected-error {{this builtin requires target: loongarch64}}
+-}
+-
+ void rdtime_d() {
+   __rdtime_d(); // expected-error {{call to undeclared function '__rdtime_d'}}
+ }
+diff --git a/llvm/include/llvm/IR/IntrinsicsLoongArch.td b/llvm/include/llvm/IR/IntrinsicsLoongArch.td
+index 5edce3c529e1..4219b2f55346 100644
+--- a/llvm/include/llvm/IR/IntrinsicsLoongArch.td
++++ b/llvm/include/llvm/IR/IntrinsicsLoongArch.td
+@@ -51,74 +51,75 @@ defm int_loongarch_masked_cmpxchg : MaskedAtomicRMWFiveOpIntrinsics;
+ //===----------------------------------------------------------------------===//
+ // LoongArch BASE
+ 
+-def int_loongarch_break : Intrinsic<[], [llvm_i32_ty], [ImmArg<ArgIndex<0>>]>;
+-def int_loongarch_cacop_d : Intrinsic<[], [llvm_i64_ty, llvm_i64_ty, llvm_i64_ty],
+-    [ImmArg<ArgIndex<0>>, ImmArg<ArgIndex<2>>]>;
+-def int_loongarch_cacop_w : Intrinsic<[], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty],
+-    [ImmArg<ArgIndex<0>>, ImmArg<ArgIndex<2>>]>;
+-def int_loongarch_dbar : Intrinsic<[], [llvm_i32_ty], [ImmArg<ArgIndex<0>>]>;
+-def int_loongarch_ibar : Intrinsic<[], [llvm_i32_ty], [ImmArg<ArgIndex<0>>]>;
+-def int_loongarch_movfcsr2gr : Intrinsic<[llvm_i32_ty], [llvm_i32_ty],
+-                               [ImmArg<ArgIndex<0>>]>;
+-def int_loongarch_movgr2fcsr : Intrinsic<[], [llvm_i32_ty, llvm_i32_ty],
+-                               [ImmArg<ArgIndex<0>>]>;
+-def int_loongarch_syscall : Intrinsic<[], [llvm_i32_ty], [ImmArg<ArgIndex<0>>]>;
+-
+-def int_loongarch_crc_w_b_w : Intrinsic<[llvm_i32_ty],
+-                                        [llvm_i32_ty, llvm_i32_ty]>;
+-def int_loongarch_crc_w_h_w : Intrinsic<[llvm_i32_ty],
+-                                        [llvm_i32_ty, llvm_i32_ty]>;
+-def int_loongarch_crc_w_w_w : Intrinsic<[llvm_i32_ty],
+-                                        [llvm_i32_ty, llvm_i32_ty]>;
+-def int_loongarch_crc_w_d_w : Intrinsic<[llvm_i32_ty],
+-                                        [llvm_i64_ty, llvm_i32_ty]>;
+-
+-def int_loongarch_crcc_w_b_w : Intrinsic<[llvm_i32_ty],
+-                                         [llvm_i32_ty, llvm_i32_ty]>;
+-def int_loongarch_crcc_w_h_w : Intrinsic<[llvm_i32_ty],
+-                                         [llvm_i32_ty, llvm_i32_ty]>;
+-def int_loongarch_crcc_w_w_w : Intrinsic<[llvm_i32_ty],
+-                                         [llvm_i32_ty, llvm_i32_ty]>;
+-def int_loongarch_crcc_w_d_w : Intrinsic<[llvm_i32_ty],
+-                                         [llvm_i64_ty, llvm_i32_ty]>;
+-
+-def int_loongarch_csrrd_w : Intrinsic<[llvm_i32_ty], [llvm_i32_ty],
+-                                      [ImmArg<ArgIndex<0>>]>;
+-def int_loongarch_csrrd_d : Intrinsic<[llvm_i64_ty], [llvm_i32_ty],
+-                                      [ImmArg<ArgIndex<0>>]>;
+-def int_loongarch_csrwr_w : Intrinsic<[llvm_i32_ty],
+-                                      [llvm_i32_ty, llvm_i32_ty],
+-                                      [ImmArg<ArgIndex<1>>]>;
+-def int_loongarch_csrwr_d : Intrinsic<[llvm_i64_ty],
+-                                      [llvm_i64_ty, llvm_i32_ty],
+-                                      [ImmArg<ArgIndex<1>>]>;
+-def int_loongarch_csrxchg_w : Intrinsic<[llvm_i32_ty],
+-                                        [llvm_i32_ty, llvm_i32_ty,
+-                                         llvm_i32_ty],
+-                                        [ImmArg<ArgIndex<2>>]>;
+-def int_loongarch_csrxchg_d : Intrinsic<[llvm_i64_ty],
+-                                        [llvm_i64_ty, llvm_i64_ty,
+-                                         llvm_i32_ty],
+-                                        [ImmArg<ArgIndex<2>>]>;
+-
+-def int_loongarch_iocsrrd_b : Intrinsic<[llvm_i32_ty], [llvm_i32_ty]>;
+-def int_loongarch_iocsrrd_h : Intrinsic<[llvm_i32_ty], [llvm_i32_ty]>;
+-def int_loongarch_iocsrrd_w : Intrinsic<[llvm_i32_ty], [llvm_i32_ty]>;
+-def int_loongarch_iocsrrd_d : Intrinsic<[llvm_i64_ty], [llvm_i32_ty]>;
+-
+-def int_loongarch_iocsrwr_b : Intrinsic<[], [llvm_i32_ty, llvm_i32_ty]>;
+-def int_loongarch_iocsrwr_h : Intrinsic<[], [llvm_i32_ty, llvm_i32_ty]>;
+-def int_loongarch_iocsrwr_w : Intrinsic<[], [llvm_i32_ty, llvm_i32_ty]>;
+-def int_loongarch_iocsrwr_d : Intrinsic<[], [llvm_i64_ty, llvm_i32_ty]>;
+-
+-def int_loongarch_cpucfg : Intrinsic<[llvm_i32_ty], [llvm_i32_ty]>;
+-
+-def int_loongarch_asrtle_d : Intrinsic<[], [llvm_i64_ty, llvm_i64_ty]>;
+-def int_loongarch_asrtgt_d : Intrinsic<[], [llvm_i64_ty, llvm_i64_ty]>;
+-
+-def int_loongarch_lddir_d : Intrinsic<[llvm_i64_ty],
+-                                      [llvm_i64_ty, llvm_i64_ty],
+-                                      [ImmArg<ArgIndex<1>>]>;
+-def int_loongarch_ldpte_d : Intrinsic<[], [llvm_i64_ty, llvm_i64_ty],
+-                                          [ImmArg<ArgIndex<1>>]>;
++class BaseInt<list<LLVMType> ret_types, list<LLVMType> param_types,
++              list<IntrinsicProperty> intr_properties = []>
++    : Intrinsic<ret_types, param_types, intr_properties>,
++      ClangBuiltin<!subst("int_loongarch", "__builtin_loongarch", NAME)>;
++
++def int_loongarch_break : BaseInt<[], [llvm_i32_ty], [ImmArg<ArgIndex<0>>]>;
++def int_loongarch_cacop_d : BaseInt<[], [llvm_i64_ty, llvm_i64_ty, llvm_i64_ty],
++                                    [ImmArg<ArgIndex<0>>, ImmArg<ArgIndex<2>>]>;
++def int_loongarch_cacop_w : BaseInt<[], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty],
++                                    [ImmArg<ArgIndex<0>>, ImmArg<ArgIndex<2>>]>;
++def int_loongarch_dbar : BaseInt<[], [llvm_i32_ty], [ImmArg<ArgIndex<0>>]>;
++
++def int_loongarch_ibar : BaseInt<[], [llvm_i32_ty], [ImmArg<ArgIndex<0>>]>;
++def int_loongarch_movfcsr2gr : BaseInt<[llvm_i32_ty], [llvm_i32_ty],
++                                       [ImmArg<ArgIndex<0>>]>;
++def int_loongarch_movgr2fcsr : BaseInt<[], [llvm_i32_ty, llvm_i32_ty],
++                                       [ImmArg<ArgIndex<0>>]>;
++def int_loongarch_syscall : BaseInt<[], [llvm_i32_ty], [ImmArg<ArgIndex<0>>]>;
++
++def int_loongarch_crc_w_b_w : BaseInt<[llvm_i32_ty],
++                                      [llvm_i32_ty, llvm_i32_ty]>;
++def int_loongarch_crc_w_h_w : BaseInt<[llvm_i32_ty],
++                                      [llvm_i32_ty, llvm_i32_ty]>;
++def int_loongarch_crc_w_w_w : BaseInt<[llvm_i32_ty],
++                                      [llvm_i32_ty, llvm_i32_ty]>;
++def int_loongarch_crc_w_d_w : BaseInt<[llvm_i32_ty],
++                                      [llvm_i64_ty, llvm_i32_ty]>;
++
++def int_loongarch_crcc_w_b_w : BaseInt<[llvm_i32_ty],
++                                       [llvm_i32_ty, llvm_i32_ty]>;
++def int_loongarch_crcc_w_h_w : BaseInt<[llvm_i32_ty],
++                                       [llvm_i32_ty, llvm_i32_ty]>;
++def int_loongarch_crcc_w_w_w : BaseInt<[llvm_i32_ty],
++                                       [llvm_i32_ty, llvm_i32_ty]>;
++def int_loongarch_crcc_w_d_w : BaseInt<[llvm_i32_ty],
++                                       [llvm_i64_ty, llvm_i32_ty]>;
++
++def int_loongarch_csrrd_w : BaseInt<[llvm_i32_ty], [llvm_i32_ty],
++                                    [ImmArg<ArgIndex<0>>]>;
++def int_loongarch_csrrd_d : BaseInt<[llvm_i64_ty], [llvm_i32_ty],
++                                    [ImmArg<ArgIndex<0>>]>;
++def int_loongarch_csrwr_w : BaseInt<[llvm_i32_ty], [llvm_i32_ty, llvm_i32_ty],
++                                    [ImmArg<ArgIndex<1>>]>;
++def int_loongarch_csrwr_d : BaseInt<[llvm_i64_ty], [llvm_i64_ty, llvm_i32_ty],
++                                    [ImmArg<ArgIndex<1>>]>;
++def int_loongarch_csrxchg_w : BaseInt<[llvm_i32_ty],
++                                      [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty],
++                                      [ImmArg<ArgIndex<2>>]>;
++def int_loongarch_csrxchg_d : BaseInt<[llvm_i64_ty],
++                                      [llvm_i64_ty, llvm_i64_ty, llvm_i32_ty],
++                                      [ImmArg<ArgIndex<2>>]>;
++
++def int_loongarch_iocsrrd_b : BaseInt<[llvm_i32_ty], [llvm_i32_ty]>;
++def int_loongarch_iocsrrd_h : BaseInt<[llvm_i32_ty], [llvm_i32_ty]>;
++def int_loongarch_iocsrrd_w : BaseInt<[llvm_i32_ty], [llvm_i32_ty]>;
++def int_loongarch_iocsrrd_d : BaseInt<[llvm_i64_ty], [llvm_i32_ty]>;
++
++def int_loongarch_iocsrwr_b : BaseInt<[], [llvm_i32_ty, llvm_i32_ty]>;
++def int_loongarch_iocsrwr_h : BaseInt<[], [llvm_i32_ty, llvm_i32_ty]>;
++def int_loongarch_iocsrwr_w : BaseInt<[], [llvm_i32_ty, llvm_i32_ty]>;
++def int_loongarch_iocsrwr_d : BaseInt<[], [llvm_i64_ty, llvm_i32_ty]>;
++
++def int_loongarch_cpucfg : BaseInt<[llvm_i32_ty], [llvm_i32_ty]>;
++
++def int_loongarch_asrtle_d : BaseInt<[], [llvm_i64_ty, llvm_i64_ty]>;
++def int_loongarch_asrtgt_d : BaseInt<[], [llvm_i64_ty, llvm_i64_ty]>;
++
++def int_loongarch_lddir_d : BaseInt<[llvm_i64_ty], [llvm_i64_ty, llvm_i64_ty],
++                                    [ImmArg<ArgIndex<1>>]>;
++def int_loongarch_ldpte_d : BaseInt<[], [llvm_i64_ty, llvm_i64_ty],
++                                    [ImmArg<ArgIndex<1>>]>;
+ } // TargetPrefix = "loongarch"
+diff --git a/llvm/lib/IR/Function.cpp b/llvm/lib/IR/Function.cpp
+index 27219e89dc5f..435800d9e5f9 100644
+--- a/llvm/lib/IR/Function.cpp
++++ b/llvm/lib/IR/Function.cpp
+@@ -37,6 +37,7 @@
+ #include "llvm/IR/IntrinsicsBPF.h"
+ #include "llvm/IR/IntrinsicsDirectX.h"
+ #include "llvm/IR/IntrinsicsHexagon.h"
++#include "llvm/IR/IntrinsicsLoongArch.h"
+ #include "llvm/IR/IntrinsicsMips.h"
+ #include "llvm/IR/IntrinsicsNVPTX.h"
+ #include "llvm/IR/IntrinsicsPowerPC.h"
+-- 
+2.20.1
+

@@ -1,0 +1,3597 @@
+From f82f71d8a0e678db830c4f00f4cb27e824d2a536 Mon Sep 17 00:00:00 2001
+From: wanglei <wanglei@loongson.cn>
+Date: Thu, 7 Dec 2023 20:11:43 +0800
+Subject: [PATCH 29/42] [LoongArch] Add codegen support for icmp/fcmp with
+ lsx/lasx fetaures (#74700)
+
+Mark ISD::SETCC node as legal, and add handling for the vector types
+condition codes.
+
+(cherry picked from commit 9ff7d0ebeb54347f9006405a6d08ed2b713bc411)
+
+Change-Id: I5a6229f7c730c7ae4c3ba3a348e4a0f78e670f26
+---
+ .../LoongArch/LoongArchISelLowering.cpp       |  14 +
+ .../LoongArch/LoongArchLASXInstrInfo.td       |  95 ++
+ .../Target/LoongArch/LoongArchLSXInstrInfo.td |  95 ++
+ .../LoongArch/lasx/ir-instruction/fcmp.ll     | 692 +++++++++++++
+ .../LoongArch/lasx/ir-instruction/icmp.ll     | 939 ++++++++++++++++++
+ .../LoongArch/lsx/ir-instruction/fcmp.ll      | 692 +++++++++++++
+ .../LoongArch/lsx/ir-instruction/icmp.ll      | 939 ++++++++++++++++++
+ 7 files changed, 3466 insertions(+)
+ create mode 100644 llvm/test/CodeGen/LoongArch/lasx/ir-instruction/fcmp.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lasx/ir-instruction/icmp.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lsx/ir-instruction/fcmp.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lsx/ir-instruction/icmp.ll
+
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+index 229251987ae4..3d5ae6d3deda 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+@@ -238,6 +238,7 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+       setOperationAction(ISD::EXTRACT_VECTOR_ELT, VT, Legal);
+       setOperationAction(ISD::BUILD_VECTOR, VT, Custom);
+ 
++      setOperationAction(ISD::SETCC, VT, Legal);
+       setOperationAction(ISD::VSELECT, VT, Legal);
+     }
+     for (MVT VT : {MVT::v16i8, MVT::v8i16, MVT::v4i32, MVT::v2i64}) {
+@@ -251,11 +252,17 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+       setOperationAction({ISD::SHL, ISD::SRA, ISD::SRL}, VT, Legal);
+       setOperationAction({ISD::CTPOP, ISD::CTLZ}, VT, Legal);
+       setOperationAction({ISD::MULHS, ISD::MULHU}, VT, Legal);
++      setCondCodeAction(
++          {ISD::SETNE, ISD::SETGE, ISD::SETGT, ISD::SETUGE, ISD::SETUGT}, VT,
++          Expand);
+     }
+     for (MVT VT : {MVT::v4f32, MVT::v2f64}) {
+       setOperationAction({ISD::FADD, ISD::FSUB}, VT, Legal);
+       setOperationAction({ISD::FMUL, ISD::FDIV}, VT, Legal);
+       setOperationAction(ISD::FMA, VT, Legal);
++      setCondCodeAction({ISD::SETGE, ISD::SETGT, ISD::SETOGE, ISD::SETOGT,
++                         ISD::SETUGE, ISD::SETUGT},
++                        VT, Expand);
+     }
+   }
+ 
+@@ -271,6 +278,7 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+       setOperationAction(ISD::EXTRACT_VECTOR_ELT, VT, Legal);
+       setOperationAction(ISD::BUILD_VECTOR, VT, Custom);
+ 
++      setOperationAction(ISD::SETCC, VT, Legal);
+       setOperationAction(ISD::VSELECT, VT, Legal);
+     }
+     for (MVT VT : {MVT::v4i64, MVT::v8i32, MVT::v16i16, MVT::v32i8}) {
+@@ -284,11 +292,17 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+       setOperationAction({ISD::SHL, ISD::SRA, ISD::SRL}, VT, Legal);
+       setOperationAction({ISD::CTPOP, ISD::CTLZ}, VT, Legal);
+       setOperationAction({ISD::MULHS, ISD::MULHU}, VT, Legal);
++      setCondCodeAction(
++          {ISD::SETNE, ISD::SETGE, ISD::SETGT, ISD::SETUGE, ISD::SETUGT}, VT,
++          Expand);
+     }
+     for (MVT VT : {MVT::v8f32, MVT::v4f64}) {
+       setOperationAction({ISD::FADD, ISD::FSUB}, VT, Legal);
+       setOperationAction({ISD::FMUL, ISD::FDIV}, VT, Legal);
+       setOperationAction(ISD::FMA, VT, Legal);
++      setCondCodeAction({ISD::SETGE, ISD::SETGT, ISD::SETOGE, ISD::SETOGT,
++                         ISD::SETUGE, ISD::SETUGT},
++                        VT, Expand);
+     }
+   }
+ 
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+index 0bd8db1bfdf0..a9bf65c6840d 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+@@ -1184,6 +1184,65 @@ multiclass PatShiftXrUimm<SDPatternOperator OpNode, string Inst> {
+             (!cast<LAInst>(Inst#"_D") LASX256:$xj, uimm6:$imm)>;
+ }
+ 
++multiclass PatCCXrSimm5<CondCode CC, string Inst> {
++  def : Pat<(v32i8 (setcc (v32i8 LASX256:$xj),
++                          (v32i8 (SplatPat_simm5 simm5:$imm)), CC)),
++            (!cast<LAInst>(Inst#"_B") LASX256:$xj, simm5:$imm)>;
++  def : Pat<(v16i16 (setcc (v16i16 LASX256:$xj),
++                           (v16i16 (SplatPat_simm5 simm5:$imm)), CC)),
++            (!cast<LAInst>(Inst#"_H") LASX256:$xj, simm5:$imm)>;
++  def : Pat<(v8i32 (setcc (v8i32 LASX256:$xj),
++                          (v8i32 (SplatPat_simm5 simm5:$imm)), CC)),
++            (!cast<LAInst>(Inst#"_W") LASX256:$xj, simm5:$imm)>;
++  def : Pat<(v4i64 (setcc (v4i64 LASX256:$xj),
++                          (v4i64 (SplatPat_simm5 simm5:$imm)), CC)),
++            (!cast<LAInst>(Inst#"_D") LASX256:$xj, simm5:$imm)>;
++}
++
++multiclass PatCCXrUimm5<CondCode CC, string Inst> {
++  def : Pat<(v32i8 (setcc (v32i8 LASX256:$xj),
++                          (v32i8 (SplatPat_uimm5 uimm5:$imm)), CC)),
++            (!cast<LAInst>(Inst#"_BU") LASX256:$xj, uimm5:$imm)>;
++  def : Pat<(v16i16 (setcc (v16i16 LASX256:$xj),
++                           (v16i16 (SplatPat_uimm5 uimm5:$imm)), CC)),
++            (!cast<LAInst>(Inst#"_HU") LASX256:$xj, uimm5:$imm)>;
++  def : Pat<(v8i32 (setcc (v8i32 LASX256:$xj),
++                          (v8i32 (SplatPat_uimm5 uimm5:$imm)), CC)),
++            (!cast<LAInst>(Inst#"_WU") LASX256:$xj, uimm5:$imm)>;
++  def : Pat<(v4i64 (setcc (v4i64 LASX256:$xj),
++                          (v4i64 (SplatPat_uimm5 uimm5:$imm)), CC)),
++            (!cast<LAInst>(Inst#"_DU") LASX256:$xj, uimm5:$imm)>;
++}
++
++multiclass PatCCXrXr<CondCode CC, string Inst> {
++  def : Pat<(v32i8 (setcc (v32i8 LASX256:$xj), (v32i8 LASX256:$xk), CC)),
++            (!cast<LAInst>(Inst#"_B") LASX256:$xj, LASX256:$xk)>;
++  def : Pat<(v16i16 (setcc (v16i16 LASX256:$xj), (v16i16 LASX256:$xk), CC)),
++            (!cast<LAInst>(Inst#"_H") LASX256:$xj, LASX256:$xk)>;
++  def : Pat<(v8i32 (setcc (v8i32 LASX256:$xj), (v8i32 LASX256:$xk), CC)),
++            (!cast<LAInst>(Inst#"_W") LASX256:$xj, LASX256:$xk)>;
++  def : Pat<(v4i64 (setcc (v4i64 LASX256:$xj), (v4i64 LASX256:$xk), CC)),
++            (!cast<LAInst>(Inst#"_D") LASX256:$xj, LASX256:$xk)>;
++}
++
++multiclass PatCCXrXrU<CondCode CC, string Inst> {
++  def : Pat<(v32i8 (setcc (v32i8 LASX256:$xj), (v32i8 LASX256:$xk), CC)),
++            (!cast<LAInst>(Inst#"_BU") LASX256:$xj, LASX256:$xk)>;
++  def : Pat<(v16i16 (setcc (v16i16 LASX256:$xj), (v16i16 LASX256:$xk), CC)),
++            (!cast<LAInst>(Inst#"_HU") LASX256:$xj, LASX256:$xk)>;
++  def : Pat<(v8i32 (setcc (v8i32 LASX256:$xj), (v8i32 LASX256:$xk), CC)),
++            (!cast<LAInst>(Inst#"_WU") LASX256:$xj, LASX256:$xk)>;
++  def : Pat<(v4i64 (setcc (v4i64 LASX256:$xj), (v4i64 LASX256:$xk), CC)),
++            (!cast<LAInst>(Inst#"_DU") LASX256:$xj, LASX256:$xk)>;
++}
++
++multiclass PatCCXrXrF<CondCode CC, string Inst> {
++  def : Pat<(v8i32 (setcc (v8f32 LASX256:$xj), (v8f32 LASX256:$xk), CC)),
++            (!cast<LAInst>(Inst#"_S") LASX256:$xj, LASX256:$xk)>;
++  def : Pat<(v4i64 (setcc (v4f64 LASX256:$xj), (v4f64 LASX256:$xk), CC)),
++            (!cast<LAInst>(Inst#"_D") LASX256:$xj, LASX256:$xk)>;
++}
++
+ let Predicates = [HasExtLASX] in {
+ 
+ // XVADD_{B/H/W/D}
+@@ -1389,6 +1448,42 @@ def : Pat<(fma v8f32:$xj, v8f32:$xk, v8f32:$xa),
+ def : Pat<(fma v4f64:$xj, v4f64:$xk, v4f64:$xa),
+           (XVFMADD_D v4f64:$xj, v4f64:$xk, v4f64:$xa)>;
+ 
++// XVSEQ[I]_{B/H/W/D}
++defm : PatCCXrSimm5<SETEQ, "XVSEQI">;
++defm : PatCCXrXr<SETEQ, "XVSEQ">;
++
++// XVSLE[I]_{B/H/W/D}[U]
++defm : PatCCXrSimm5<SETLE, "XVSLEI">;
++defm : PatCCXrUimm5<SETULE, "XVSLEI">;
++defm : PatCCXrXr<SETLE, "XVSLE">;
++defm : PatCCXrXrU<SETULE, "XVSLE">;
++
++// XVSLT[I]_{B/H/W/D}[U]
++defm : PatCCXrSimm5<SETLT, "XVSLTI">;
++defm : PatCCXrUimm5<SETULT, "XVSLTI">;
++defm : PatCCXrXr<SETLT, "XVSLT">;
++defm : PatCCXrXrU<SETULT, "XVSLT">;
++
++// XVFCMP.cond.{S/D}
++defm : PatCCXrXrF<SETEQ, "XVFCMP_CEQ">;
++defm : PatCCXrXrF<SETOEQ, "XVFCMP_CEQ">;
++defm : PatCCXrXrF<SETUEQ, "XVFCMP_CUEQ">;
++
++defm : PatCCXrXrF<SETLE, "XVFCMP_CLE">;
++defm : PatCCXrXrF<SETOLE, "XVFCMP_CLE">;
++defm : PatCCXrXrF<SETULE, "XVFCMP_CULE">;
++
++defm : PatCCXrXrF<SETLT, "XVFCMP_CLT">;
++defm : PatCCXrXrF<SETOLT, "XVFCMP_CLT">;
++defm : PatCCXrXrF<SETULT, "XVFCMP_CULT">;
++
++defm : PatCCXrXrF<SETNE, "XVFCMP_CNE">;
++defm : PatCCXrXrF<SETONE, "XVFCMP_CNE">;
++defm : PatCCXrXrF<SETUNE, "XVFCMP_CUNE">;
++
++defm : PatCCXrXrF<SETO, "XVFCMP_COR">;
++defm : PatCCXrXrF<SETUO, "XVFCMP_CUN">;
++
+ // PseudoXVINSGR2VR_{B/H}
+ def : Pat<(vector_insert v32i8:$xd, GRLenVT:$rj, uimm5:$imm),
+           (PseudoXVINSGR2VR_B v32i8:$xd, GRLenVT:$rj, uimm5:$imm)>;
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+index 5800ff6f6266..ff21c6681271 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+@@ -1261,6 +1261,65 @@ multiclass PatShiftVrUimm<SDPatternOperator OpNode, string Inst> {
+             (!cast<LAInst>(Inst#"_D") LSX128:$vj, uimm6:$imm)>;
+ }
+ 
++multiclass PatCCVrSimm5<CondCode CC, string Inst> {
++  def : Pat<(v16i8 (setcc (v16i8 LSX128:$vj),
++                          (v16i8 (SplatPat_simm5 simm5:$imm)), CC)),
++            (!cast<LAInst>(Inst#"_B") LSX128:$vj, simm5:$imm)>;
++  def : Pat<(v8i16 (setcc (v8i16 LSX128:$vj),
++                          (v8i16 (SplatPat_simm5 simm5:$imm)), CC)),
++            (!cast<LAInst>(Inst#"_H") LSX128:$vj, simm5:$imm)>;
++  def : Pat<(v4i32 (setcc (v4i32 LSX128:$vj),
++                          (v4i32 (SplatPat_simm5 simm5:$imm)), CC)),
++            (!cast<LAInst>(Inst#"_W") LSX128:$vj, simm5:$imm)>;
++  def : Pat<(v2i64 (setcc (v2i64 LSX128:$vj),
++                          (v2i64 (SplatPat_simm5 simm5:$imm)), CC)),
++            (!cast<LAInst>(Inst#"_D") LSX128:$vj, simm5:$imm)>;
++}
++
++multiclass PatCCVrUimm5<CondCode CC, string Inst> {
++  def : Pat<(v16i8 (setcc (v16i8 LSX128:$vj),
++                          (v16i8 (SplatPat_uimm5 uimm5:$imm)), CC)),
++            (!cast<LAInst>(Inst#"_BU") LSX128:$vj, uimm5:$imm)>;
++  def : Pat<(v8i16 (setcc (v8i16 LSX128:$vj),
++                          (v8i16 (SplatPat_uimm5 uimm5:$imm)), CC)),
++            (!cast<LAInst>(Inst#"_HU") LSX128:$vj, uimm5:$imm)>;
++  def : Pat<(v4i32 (setcc (v4i32 LSX128:$vj),
++                          (v4i32 (SplatPat_uimm5 uimm5:$imm)), CC)),
++            (!cast<LAInst>(Inst#"_WU") LSX128:$vj, uimm5:$imm)>;
++  def : Pat<(v2i64 (setcc (v2i64 LSX128:$vj),
++                          (v2i64 (SplatPat_uimm5 uimm5:$imm)), CC)),
++            (!cast<LAInst>(Inst#"_DU") LSX128:$vj, uimm5:$imm)>;
++}
++
++multiclass PatCCVrVr<CondCode CC, string Inst> {
++  def : Pat<(v16i8 (setcc (v16i8 LSX128:$vj), (v16i8 LSX128:$vk), CC)),
++            (!cast<LAInst>(Inst#"_B") LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(v8i16 (setcc (v8i16 LSX128:$vj), (v8i16 LSX128:$vk), CC)),
++            (!cast<LAInst>(Inst#"_H") LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(v4i32 (setcc (v4i32 LSX128:$vj), (v4i32 LSX128:$vk), CC)),
++            (!cast<LAInst>(Inst#"_W") LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(v2i64 (setcc (v2i64 LSX128:$vj), (v2i64 LSX128:$vk), CC)),
++            (!cast<LAInst>(Inst#"_D") LSX128:$vj, LSX128:$vk)>;
++}
++
++multiclass PatCCVrVrU<CondCode CC, string Inst> {
++  def : Pat<(v16i8 (setcc (v16i8 LSX128:$vj), (v16i8 LSX128:$vk), CC)),
++            (!cast<LAInst>(Inst#"_BU") LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(v8i16 (setcc (v8i16 LSX128:$vj), (v8i16 LSX128:$vk), CC)),
++            (!cast<LAInst>(Inst#"_HU") LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(v4i32 (setcc (v4i32 LSX128:$vj), (v4i32 LSX128:$vk), CC)),
++            (!cast<LAInst>(Inst#"_WU") LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(v2i64 (setcc (v2i64 LSX128:$vj), (v2i64 LSX128:$vk), CC)),
++            (!cast<LAInst>(Inst#"_DU") LSX128:$vj, LSX128:$vk)>;
++}
++
++multiclass PatCCVrVrF<CondCode CC, string Inst> {
++  def : Pat<(v4i32 (setcc (v4f32 LSX128:$vj), (v4f32 LSX128:$vk), CC)),
++            (!cast<LAInst>(Inst#"_S") LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(v2i64 (setcc (v2f64 LSX128:$vj), (v2f64 LSX128:$vk), CC)),
++            (!cast<LAInst>(Inst#"_D") LSX128:$vj, LSX128:$vk)>;
++}
++
+ let Predicates = [HasExtLSX] in {
+ 
+ // VADD_{B/H/W/D}
+@@ -1466,6 +1525,42 @@ def : Pat<(fma v4f32:$vj, v4f32:$vk, v4f32:$va),
+ def : Pat<(fma v2f64:$vj, v2f64:$vk, v2f64:$va),
+           (VFMADD_D v2f64:$vj, v2f64:$vk, v2f64:$va)>;
+ 
++// VSEQ[I]_{B/H/W/D}
++defm : PatCCVrSimm5<SETEQ, "VSEQI">;
++defm : PatCCVrVr<SETEQ, "VSEQ">;
++
++// VSLE[I]_{B/H/W/D}[U]
++defm : PatCCVrSimm5<SETLE, "VSLEI">;
++defm : PatCCVrUimm5<SETULE, "VSLEI">;
++defm : PatCCVrVr<SETLE, "VSLE">;
++defm : PatCCVrVrU<SETULE, "VSLE">;
++
++// VSLT[I]_{B/H/W/D}[U]
++defm : PatCCVrSimm5<SETLT, "VSLTI">;
++defm : PatCCVrUimm5<SETULT, "VSLTI">;
++defm : PatCCVrVr<SETLT, "VSLT">;
++defm : PatCCVrVrU<SETULT, "VSLT">;
++
++// VFCMP.cond.{S/D}
++defm : PatCCVrVrF<SETEQ, "VFCMP_CEQ">;
++defm : PatCCVrVrF<SETOEQ, "VFCMP_CEQ">;
++defm : PatCCVrVrF<SETUEQ, "VFCMP_CUEQ">;
++
++defm : PatCCVrVrF<SETLE, "VFCMP_CLE">;
++defm : PatCCVrVrF<SETOLE, "VFCMP_CLE">;
++defm : PatCCVrVrF<SETULE, "VFCMP_CULE">;
++
++defm : PatCCVrVrF<SETLT, "VFCMP_CLT">;
++defm : PatCCVrVrF<SETOLT, "VFCMP_CLT">;
++defm : PatCCVrVrF<SETULT, "VFCMP_CULT">;
++
++defm : PatCCVrVrF<SETNE, "VFCMP_CNE">;
++defm : PatCCVrVrF<SETONE, "VFCMP_CNE">;
++defm : PatCCVrVrF<SETUNE, "VFCMP_CUNE">;
++
++defm : PatCCVrVrF<SETO, "VFCMP_COR">;
++defm : PatCCVrVrF<SETUO, "VFCMP_CUN">;
++
+ // VINSGR2VR_{B/H/W/D}
+ def : Pat<(vector_insert v16i8:$vd, GRLenVT:$rj, uimm4:$imm),
+           (VINSGR2VR_B v16i8:$vd, GRLenVT:$rj, uimm4:$imm)>;
+diff --git a/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/fcmp.ll b/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/fcmp.ll
+new file mode 100644
+index 000000000000..ef67dbc100c0
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/fcmp.ll
+@@ -0,0 +1,692 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py
++; RUN: llc --mtriple=loongarch64 --mattr=+lasx < %s | FileCheck %s
++
++;; TREU
++define void @v8f32_fcmp_true(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_true:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvrepli.b $xr0, -1
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp true <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++;; FALSE
++define void @v4f64_fcmp_false(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_false:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvrepli.b $xr0, 0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp false <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETOEQ
++define void @v8f32_fcmp_oeq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_oeq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.ceq.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp oeq <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_oeq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_oeq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.ceq.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp oeq <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETUEQ
++define void @v8f32_fcmp_ueq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_ueq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cueq.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp ueq <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_ueq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_ueq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cueq.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp ueq <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETEQ
++define void @v8f32_fcmp_eq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_eq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.ceq.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp fast oeq <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_eq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_eq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.ceq.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp fast ueq <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETOLE
++define void @v8f32_fcmp_ole(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_ole:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cle.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp ole <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_ole(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_ole:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cle.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp ole <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETULE
++define void @v8f32_fcmp_ule(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_ule:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cule.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp ule <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_ule(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_ule:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cule.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp ule <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETLE
++define void @v8f32_fcmp_le(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_le:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cle.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp fast ole <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_le(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_le:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cle.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp fast ule <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETOLT
++define void @v8f32_fcmp_olt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_olt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.clt.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp olt <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_olt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_olt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.clt.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp olt <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETULT
++define void @v8f32_fcmp_ult(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_ult:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cult.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp ult <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_ult(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_ult:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cult.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp ult <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETLT
++define void @v8f32_fcmp_lt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_lt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.clt.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp fast olt <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_lt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_lt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.clt.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp fast ult <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETONE
++define void @v8f32_fcmp_one(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_one:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cne.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp one <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_one(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_one:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cne.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp one <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETUNE
++define void @v8f32_fcmp_une(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_une:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cune.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp une <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_une(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_une:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cune.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp une <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETNE
++define void @v8f32_fcmp_ne(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_ne:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cne.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp fast one <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_ne(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_ne:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cne.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp fast une <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETO
++define void @v8f32_fcmp_ord(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_ord:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cor.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp ord <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_ord(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_ord:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cor.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp ord <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETUO
++define void @v8f32_fcmp_uno(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_uno:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cun.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp uno <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_uno(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_uno:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvfcmp.cun.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp uno <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETOGT
++define void @v8f32_fcmp_ogt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_ogt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvfcmp.clt.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp ogt <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_ogt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_ogt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvfcmp.clt.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp ogt <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETUGT
++define void @v8f32_fcmp_ugt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_ugt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvfcmp.cult.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp ugt <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_ugt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_ugt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvfcmp.cult.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp ugt <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETGT
++define void @v8f32_fcmp_gt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_gt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvfcmp.clt.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp fast ogt <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_gt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_gt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvfcmp.clt.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp fast ugt <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETOGE
++define void @v8f32_fcmp_oge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_oge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvfcmp.cle.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp oge <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_oge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_oge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvfcmp.cle.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp oge <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETUGE
++define void @v8f32_fcmp_uge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_uge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvfcmp.cule.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp uge <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_uge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_uge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvfcmp.cule.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp uge <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETGE
++define void @v8f32_fcmp_ge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8f32_fcmp_ge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvfcmp.cle.s $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %cmp = fcmp fast oge <8 x float> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4f64_fcmp_ge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f64_fcmp_ge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvfcmp.cle.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %cmp = fcmp fast uge <4 x double> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
+diff --git a/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/icmp.ll b/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/icmp.ll
+new file mode 100644
+index 000000000000..6693fe0f6ec7
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/icmp.ll
+@@ -0,0 +1,939 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py
++; RUN: llc --mtriple=loongarch64 --mattr=+lasx < %s | FileCheck %s
++
++;; SETEQ
++define void @v32i8_icmp_eq_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v32i8_icmp_eq_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvseqi.b $xr0, $xr0, 15
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <32 x i8>, ptr %a0
++  %cmp = icmp eq <32 x i8> %v0, <i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15>
++  %ext = sext <32 x i1> %cmp to <32 x i8>
++  store <32 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v32i8_icmp_eq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v32i8_icmp_eq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvseq.b $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <32 x i8>, ptr %a0
++  %v1 = load <32 x i8>, ptr %a1
++  %cmp = icmp eq <32 x i8> %v0, %v1
++  %ext = sext <32 x i1> %cmp to <32 x i8>
++  store <32 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v16i16_icmp_eq_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v16i16_icmp_eq_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvseqi.h $xr0, $xr0, 15
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i16>, ptr %a0
++  %cmp = icmp eq <16 x i16> %v0, <i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15>
++  %ext = sext <16 x i1> %cmp to <16 x i16>
++  store <16 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v16i16_icmp_eq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i16_icmp_eq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvseq.h $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i16>, ptr %a0
++  %v1 = load <16 x i16>, ptr %a1
++  %cmp = icmp eq <16 x i16> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i16>
++  store <16 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v8i32_icmp_eq_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v8i32_icmp_eq_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvseqi.w $xr0, $xr0, 15
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i32>, ptr %a0
++  %cmp = icmp eq <8 x i32> %v0, <i32 15, i32 15, i32 15, i32 15, i32 15, i32 15, i32 15, i32 15>
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v8i32_icmp_eq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i32_icmp_eq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvseq.w $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i32>, ptr %a0
++  %v1 = load <8 x i32>, ptr %a1
++  %cmp = icmp eq <8 x i32> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4i64_icmp_eq_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v4i64_icmp_eq_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvseqi.d $xr0, $xr0, 15
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %a0
++  %cmp = icmp eq <4 x i64> %v0, <i64 15, i64 15, i64 15, i64 15>
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++define void @v4i64_icmp_eq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i64_icmp_eq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvseq.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %a0
++  %v1 = load <4 x i64>, ptr %a1
++  %cmp = icmp eq <4 x i64> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETLE
++define void @v32i8_icmp_sle_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v32i8_icmp_sle_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvslei.b $xr0, $xr0, 15
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <32 x i8>, ptr %a0
++  %cmp = icmp sle <32 x i8> %v0, <i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15>
++  %ext = sext <32 x i1> %cmp to <32 x i8>
++  store <32 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v32i8_icmp_sle(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v32i8_icmp_sle:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvsle.b $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <32 x i8>, ptr %a0
++  %v1 = load <32 x i8>, ptr %a1
++  %cmp = icmp sle <32 x i8> %v0, %v1
++  %ext = sext <32 x i1> %cmp to <32 x i8>
++  store <32 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v16i16_icmp_sle_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v16i16_icmp_sle_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvslei.h $xr0, $xr0, 15
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i16>, ptr %a0
++  %cmp = icmp sle <16 x i16> %v0, <i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15>
++  %ext = sext <16 x i1> %cmp to <16 x i16>
++  store <16 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v16i16_icmp_sle(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i16_icmp_sle:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvsle.h $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i16>, ptr %a0
++  %v1 = load <16 x i16>, ptr %a1
++  %cmp = icmp sle <16 x i16> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i16>
++  store <16 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v8i32_icmp_sle_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v8i32_icmp_sle_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvslei.w $xr0, $xr0, 15
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i32>, ptr %a0
++  %cmp = icmp sle <8 x i32> %v0, <i32 15, i32 15, i32 15, i32 15, i32 15, i32 15, i32 15, i32 15>
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v8i32_icmp_sle(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i32_icmp_sle:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvsle.w $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i32>, ptr %a0
++  %v1 = load <8 x i32>, ptr %a1
++  %cmp = icmp sle <8 x i32> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4i64_icmp_sle_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v4i64_icmp_sle_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvslei.d $xr0, $xr0, 15
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %a0
++  %cmp = icmp sle <4 x i64> %v0, <i64 15, i64 15, i64 15, i64 15>
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++define void @v4i64_icmp_sle(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i64_icmp_sle:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvsle.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %a0
++  %v1 = load <4 x i64>, ptr %a1
++  %cmp = icmp sle <4 x i64> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETULE
++define void @v32i8_icmp_ule_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v32i8_icmp_ule_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvslei.bu $xr0, $xr0, 31
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <32 x i8>, ptr %a0
++  %cmp = icmp ule <32 x i8> %v0, <i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31>
++  %ext = sext <32 x i1> %cmp to <32 x i8>
++  store <32 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v32i8_icmp_ule(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v32i8_icmp_ule:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvsle.bu $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <32 x i8>, ptr %a0
++  %v1 = load <32 x i8>, ptr %a1
++  %cmp = icmp ule <32 x i8> %v0, %v1
++  %ext = sext <32 x i1> %cmp to <32 x i8>
++  store <32 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v16i16_icmp_ule_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v16i16_icmp_ule_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvslei.hu $xr0, $xr0, 31
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i16>, ptr %a0
++  %cmp = icmp ule <16 x i16> %v0, <i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31>
++  %ext = sext <16 x i1> %cmp to <16 x i16>
++  store <16 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v16i16_icmp_ule(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i16_icmp_ule:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvsle.hu $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i16>, ptr %a0
++  %v1 = load <16 x i16>, ptr %a1
++  %cmp = icmp ule <16 x i16> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i16>
++  store <16 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v8i32_icmp_ule_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v8i32_icmp_ule_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvslei.wu $xr0, $xr0, 31
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i32>, ptr %a0
++  %cmp = icmp ule <8 x i32> %v0, <i32 31, i32 31, i32 31, i32 31, i32 31, i32 31, i32 31, i32 31>
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v8i32_icmp_ule(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i32_icmp_ule:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvsle.wu $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i32>, ptr %a0
++  %v1 = load <8 x i32>, ptr %a1
++  %cmp = icmp ule <8 x i32> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4i64_icmp_ule_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v4i64_icmp_ule_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvslei.du $xr0, $xr0, 31
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %a0
++  %cmp = icmp ule <4 x i64> %v0, <i64 31, i64 31, i64 31, i64 31>
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++define void @v4i64_icmp_ule(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i64_icmp_ule:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvsle.du $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %a0
++  %v1 = load <4 x i64>, ptr %a1
++  %cmp = icmp ule <4 x i64> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETLT
++define void @v32i8_icmp_slt_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v32i8_icmp_slt_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvslti.b $xr0, $xr0, 15
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <32 x i8>, ptr %a0
++  %cmp = icmp slt <32 x i8> %v0, <i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15>
++  %ext = sext <32 x i1> %cmp to <32 x i8>
++  store <32 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v32i8_icmp_slt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v32i8_icmp_slt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvslt.b $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <32 x i8>, ptr %a0
++  %v1 = load <32 x i8>, ptr %a1
++  %cmp = icmp slt <32 x i8> %v0, %v1
++  %ext = sext <32 x i1> %cmp to <32 x i8>
++  store <32 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v16i16_icmp_slt_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v16i16_icmp_slt_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvslti.h $xr0, $xr0, 15
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i16>, ptr %a0
++  %cmp = icmp slt <16 x i16> %v0, <i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15>
++  %ext = sext <16 x i1> %cmp to <16 x i16>
++  store <16 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v16i16_icmp_slt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i16_icmp_slt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvslt.h $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i16>, ptr %a0
++  %v1 = load <16 x i16>, ptr %a1
++  %cmp = icmp slt <16 x i16> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i16>
++  store <16 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v8i32_icmp_slt_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v8i32_icmp_slt_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvslti.w $xr0, $xr0, 15
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i32>, ptr %a0
++  %cmp = icmp slt <8 x i32> %v0, <i32 15, i32 15, i32 15, i32 15, i32 15, i32 15, i32 15, i32 15>
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v8i32_icmp_slt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i32_icmp_slt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvslt.w $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i32>, ptr %a0
++  %v1 = load <8 x i32>, ptr %a1
++  %cmp = icmp slt <8 x i32> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4i64_icmp_slt_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v4i64_icmp_slt_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvslti.d $xr0, $xr0, 15
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %a0
++  %cmp = icmp slt <4 x i64> %v0, <i64 15, i64 15, i64 15, i64 15>
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++define void @v4i64_icmp_slt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i64_icmp_slt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvslt.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %a0
++  %v1 = load <4 x i64>, ptr %a1
++  %cmp = icmp slt <4 x i64> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETULT
++define void @v32i8_icmp_ult_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v32i8_icmp_ult_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvslti.bu $xr0, $xr0, 31
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <32 x i8>, ptr %a0
++  %cmp = icmp ult <32 x i8> %v0, <i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31>
++  %ext = sext <32 x i1> %cmp to <32 x i8>
++  store <32 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v32i8_icmp_ult(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v32i8_icmp_ult:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvslt.bu $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <32 x i8>, ptr %a0
++  %v1 = load <32 x i8>, ptr %a1
++  %cmp = icmp ult <32 x i8> %v0, %v1
++  %ext = sext <32 x i1> %cmp to <32 x i8>
++  store <32 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v16i16_icmp_ult_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v16i16_icmp_ult_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvslti.hu $xr0, $xr0, 31
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i16>, ptr %a0
++  %cmp = icmp ult <16 x i16> %v0, <i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31>
++  %ext = sext <16 x i1> %cmp to <16 x i16>
++  store <16 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v16i16_icmp_ult(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i16_icmp_ult:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvslt.hu $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i16>, ptr %a0
++  %v1 = load <16 x i16>, ptr %a1
++  %cmp = icmp ult <16 x i16> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i16>
++  store <16 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v8i32_icmp_ult_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v8i32_icmp_ult_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvslti.wu $xr0, $xr0, 31
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i32>, ptr %a0
++  %cmp = icmp ult <8 x i32> %v0, <i32 31, i32 31, i32 31, i32 31, i32 31, i32 31, i32 31, i32 31>
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v8i32_icmp_ult(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i32_icmp_ult:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvslt.wu $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i32>, ptr %a0
++  %v1 = load <8 x i32>, ptr %a1
++  %cmp = icmp ult <8 x i32> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4i64_icmp_ult_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v4i64_icmp_ult_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvslti.du $xr0, $xr0, 31
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %a0
++  %cmp = icmp ult <4 x i64> %v0, <i64 31, i64 31, i64 31, i64 31>
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++define void @v4i64_icmp_ult(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i64_icmp_ult:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvslt.du $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %a0
++  %v1 = load <4 x i64>, ptr %a1
++  %cmp = icmp ult <4 x i64> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETNE
++define void @v32i8_icmp_ne(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v32i8_icmp_ne:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvseq.b $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvxori.b $xr0, $xr0, 255
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <32 x i8>, ptr %a0
++  %v1 = load <32 x i8>, ptr %a1
++  %cmp = icmp ne <32 x i8> %v0, %v1
++  %ext = sext <32 x i1> %cmp to <32 x i8>
++  store <32 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v16i16_icmp_ne(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i16_icmp_ne:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvseq.h $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvrepli.b $xr1, -1
++; CHECK-NEXT:    xvxor.v $xr0, $xr0, $xr1
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i16>, ptr %a0
++  %v1 = load <16 x i16>, ptr %a1
++  %cmp = icmp ne <16 x i16> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i16>
++  store <16 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v8i32_icmp_ne(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i32_icmp_ne:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvseq.w $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvrepli.b $xr1, -1
++; CHECK-NEXT:    xvxor.v $xr0, $xr0, $xr1
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i32>, ptr %a0
++  %v1 = load <8 x i32>, ptr %a1
++  %cmp = icmp ne <8 x i32> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4i64_icmp_ne(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i64_icmp_ne:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a2, 0
++; CHECK-NEXT:    xvld $xr1, $a1, 0
++; CHECK-NEXT:    xvseq.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvrepli.b $xr1, -1
++; CHECK-NEXT:    xvxor.v $xr0, $xr0, $xr1
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %a0
++  %v1 = load <4 x i64>, ptr %a1
++  %cmp = icmp ne <4 x i64> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETGE
++define void @v32i8_icmp_sge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v32i8_icmp_sge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvsle.b $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <32 x i8>, ptr %a0
++  %v1 = load <32 x i8>, ptr %a1
++  %cmp = icmp sge <32 x i8> %v0, %v1
++  %ext = sext <32 x i1> %cmp to <32 x i8>
++  store <32 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v16i16_icmp_sge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i16_icmp_sge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvsle.h $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i16>, ptr %a0
++  %v1 = load <16 x i16>, ptr %a1
++  %cmp = icmp sge <16 x i16> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i16>
++  store <16 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v8i32_icmp_sge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i32_icmp_sge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvsle.w $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i32>, ptr %a0
++  %v1 = load <8 x i32>, ptr %a1
++  %cmp = icmp sge <8 x i32> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4i64_icmp_sge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i64_icmp_sge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvsle.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %a0
++  %v1 = load <4 x i64>, ptr %a1
++  %cmp = icmp sge <4 x i64> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETUGE
++define void @v32i8_icmp_uge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v32i8_icmp_uge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvsle.bu $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <32 x i8>, ptr %a0
++  %v1 = load <32 x i8>, ptr %a1
++  %cmp = icmp uge <32 x i8> %v0, %v1
++  %ext = sext <32 x i1> %cmp to <32 x i8>
++  store <32 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v16i16_icmp_uge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i16_icmp_uge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvsle.hu $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i16>, ptr %a0
++  %v1 = load <16 x i16>, ptr %a1
++  %cmp = icmp uge <16 x i16> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i16>
++  store <16 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v8i32_icmp_uge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i32_icmp_uge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvsle.wu $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i32>, ptr %a0
++  %v1 = load <8 x i32>, ptr %a1
++  %cmp = icmp uge <8 x i32> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4i64_icmp_uge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i64_icmp_uge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvsle.du $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %a0
++  %v1 = load <4 x i64>, ptr %a1
++  %cmp = icmp uge <4 x i64> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETGT
++define void @v32i8_icmp_sgt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v32i8_icmp_sgt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvslt.b $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <32 x i8>, ptr %a0
++  %v1 = load <32 x i8>, ptr %a1
++  %cmp = icmp sgt <32 x i8> %v0, %v1
++  %ext = sext <32 x i1> %cmp to <32 x i8>
++  store <32 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v16i16_icmp_sgt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i16_icmp_sgt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvslt.h $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i16>, ptr %a0
++  %v1 = load <16 x i16>, ptr %a1
++  %cmp = icmp sgt <16 x i16> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i16>
++  store <16 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v8i32_icmp_sgt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i32_icmp_sgt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvslt.w $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i32>, ptr %a0
++  %v1 = load <8 x i32>, ptr %a1
++  %cmp = icmp sgt <8 x i32> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4i64_icmp_sgt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i64_icmp_sgt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvslt.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %a0
++  %v1 = load <4 x i64>, ptr %a1
++  %cmp = icmp sgt <4 x i64> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETUGT
++define void @v32i8_icmp_ugt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v32i8_icmp_ugt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvslt.bu $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <32 x i8>, ptr %a0
++  %v1 = load <32 x i8>, ptr %a1
++  %cmp = icmp ugt <32 x i8> %v0, %v1
++  %ext = sext <32 x i1> %cmp to <32 x i8>
++  store <32 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v16i16_icmp_ugt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i16_icmp_ugt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvslt.hu $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i16>, ptr %a0
++  %v1 = load <16 x i16>, ptr %a1
++  %cmp = icmp ugt <16 x i16> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i16>
++  store <16 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v8i32_icmp_ugt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i32_icmp_ugt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvslt.wu $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i32>, ptr %a0
++  %v1 = load <8 x i32>, ptr %a1
++  %cmp = icmp ugt <8 x i32> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i32>
++  store <8 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4i64_icmp_ugt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i64_icmp_ugt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvld $xr1, $a2, 0
++; CHECK-NEXT:    xvslt.du $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %a0
++  %v1 = load <4 x i64>, ptr %a1
++  %cmp = icmp ugt <4 x i64> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i64>
++  store <4 x i64> %ext, ptr %res
++  ret void
++}
+diff --git a/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/fcmp.ll b/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/fcmp.ll
+new file mode 100644
+index 000000000000..53fbf0b2f86f
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/fcmp.ll
+@@ -0,0 +1,692 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py
++; RUN: llc --mtriple=loongarch64 --mattr=+lsx < %s | FileCheck %s
++
++;; TREU
++define void @v4f32_fcmp_true(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_true:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vrepli.b $vr0, -1
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp true <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++;; FALSE
++define void @v2f64_fcmp_false(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_false:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vrepli.b $vr0, 0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp false <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETOEQ
++define void @v4f32_fcmp_oeq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_oeq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.ceq.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp oeq <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_oeq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_oeq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.ceq.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp oeq <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETUEQ
++define void @v4f32_fcmp_ueq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_ueq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cueq.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp ueq <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_ueq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_ueq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cueq.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp ueq <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETEQ
++define void @v4f32_fcmp_eq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_eq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.ceq.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp fast oeq <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_eq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_eq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.ceq.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp fast ueq <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETOLE
++define void @v4f32_fcmp_ole(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_ole:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cle.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp ole <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_ole(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_ole:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cle.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp ole <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETULE
++define void @v4f32_fcmp_ule(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_ule:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cule.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp ule <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_ule(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_ule:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cule.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp ule <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETLE
++define void @v4f32_fcmp_le(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_le:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cle.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp fast ole <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_le(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_le:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cle.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp fast ule <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETOLT
++define void @v4f32_fcmp_olt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_olt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.clt.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp olt <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_olt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_olt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.clt.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp olt <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETULT
++define void @v4f32_fcmp_ult(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_ult:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cult.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp ult <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_ult(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_ult:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cult.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp ult <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETLT
++define void @v4f32_fcmp_lt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_lt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.clt.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp fast olt <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_lt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_lt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.clt.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp fast ult <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETONE
++define void @v4f32_fcmp_one(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_one:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cne.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp one <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_one(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_one:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cne.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp one <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETUNE
++define void @v4f32_fcmp_une(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_une:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cune.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp une <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_une(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_une:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cune.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp une <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETNE
++define void @v4f32_fcmp_ne(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_ne:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cne.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp fast one <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_ne(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_ne:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cne.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp fast une <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETO
++define void @v4f32_fcmp_ord(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_ord:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cor.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp ord <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_ord(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_ord:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cor.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp ord <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETUO
++define void @v4f32_fcmp_uno(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_uno:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cun.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp uno <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_uno(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_uno:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vfcmp.cun.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp uno <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETOGT
++define void @v4f32_fcmp_ogt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_ogt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vfcmp.clt.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp ogt <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_ogt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_ogt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vfcmp.clt.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp ogt <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETUGT
++define void @v4f32_fcmp_ugt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_ugt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vfcmp.cult.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp ugt <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_ugt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_ugt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vfcmp.cult.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp ugt <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETGT
++define void @v4f32_fcmp_gt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_gt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vfcmp.clt.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp fast ogt <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_gt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_gt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vfcmp.clt.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp fast ugt <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETOGE
++define void @v4f32_fcmp_oge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_oge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vfcmp.cle.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp oge <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_oge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_oge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vfcmp.cle.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp oge <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETUGE
++define void @v4f32_fcmp_uge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_uge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vfcmp.cule.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp uge <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_uge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_uge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vfcmp.cule.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp uge <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETGE
++define void @v4f32_fcmp_ge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4f32_fcmp_ge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vfcmp.cle.s $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %cmp = fcmp fast oge <4 x float> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2f64_fcmp_ge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2f64_fcmp_ge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vfcmp.cle.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %cmp = fcmp fast uge <2 x double> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
+diff --git a/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/icmp.ll b/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/icmp.ll
+new file mode 100644
+index 000000000000..448f3fa6c6e0
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/icmp.ll
+@@ -0,0 +1,939 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py
++; RUN: llc --mtriple=loongarch64 --mattr=+lsx < %s | FileCheck %s
++
++;; SETEQ
++define void @v16i8_icmp_eq_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v16i8_icmp_eq_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vseqi.b $vr0, $vr0, 15
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i8>, ptr %a0
++  %cmp = icmp eq <16 x i8> %v0, <i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15>
++  %ext = sext <16 x i1> %cmp to <16 x i8>
++  store <16 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v16i8_icmp_eq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i8_icmp_eq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vseq.b $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i8>, ptr %a0
++  %v1 = load <16 x i8>, ptr %a1
++  %cmp = icmp eq <16 x i8> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i8>
++  store <16 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v8i16_icmp_eq_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v8i16_icmp_eq_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vseqi.h $vr0, $vr0, 15
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i16>, ptr %a0
++  %cmp = icmp eq <8 x i16> %v0, <i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15>
++  %ext = sext <8 x i1> %cmp to <8 x i16>
++  store <8 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v8i16_icmp_eq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i16_icmp_eq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vseq.h $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i16>, ptr %a0
++  %v1 = load <8 x i16>, ptr %a1
++  %cmp = icmp eq <8 x i16> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i16>
++  store <8 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v4i32_icmp_eq_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v4i32_icmp_eq_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vseqi.w $vr0, $vr0, 15
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %a0
++  %cmp = icmp eq <4 x i32> %v0, <i32 15, i32 15, i32 15, i32 15>
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4i32_icmp_eq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i32_icmp_eq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vseq.w $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %a0
++  %v1 = load <4 x i32>, ptr %a1
++  %cmp = icmp eq <4 x i32> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2i64_icmp_eq_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v2i64_icmp_eq_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vseqi.d $vr0, $vr0, 15
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x i64>, ptr %a0
++  %cmp = icmp eq <2 x i64> %v0, <i64 15, i64 15>
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++define void @v2i64_icmp_eq(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2i64_icmp_eq:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vseq.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x i64>, ptr %a0
++  %v1 = load <2 x i64>, ptr %a1
++  %cmp = icmp eq <2 x i64> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETLE
++define void @v16i8_icmp_sle_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v16i8_icmp_sle_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vslei.b $vr0, $vr0, 15
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i8>, ptr %a0
++  %cmp = icmp sle <16 x i8> %v0, <i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15>
++  %ext = sext <16 x i1> %cmp to <16 x i8>
++  store <16 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v16i8_icmp_sle(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i8_icmp_sle:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vsle.b $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i8>, ptr %a0
++  %v1 = load <16 x i8>, ptr %a1
++  %cmp = icmp sle <16 x i8> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i8>
++  store <16 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v8i16_icmp_sle_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v8i16_icmp_sle_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vslei.h $vr0, $vr0, 15
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i16>, ptr %a0
++  %cmp = icmp sle <8 x i16> %v0, <i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15>
++  %ext = sext <8 x i1> %cmp to <8 x i16>
++  store <8 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v8i16_icmp_sle(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i16_icmp_sle:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vsle.h $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i16>, ptr %a0
++  %v1 = load <8 x i16>, ptr %a1
++  %cmp = icmp sle <8 x i16> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i16>
++  store <8 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v4i32_icmp_sle_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v4i32_icmp_sle_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vslei.w $vr0, $vr0, 15
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %a0
++  %cmp = icmp sle <4 x i32> %v0, <i32 15, i32 15, i32 15, i32 15>
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4i32_icmp_sle(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i32_icmp_sle:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vsle.w $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %a0
++  %v1 = load <4 x i32>, ptr %a1
++  %cmp = icmp sle <4 x i32> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2i64_icmp_sle_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v2i64_icmp_sle_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vslei.d $vr0, $vr0, 15
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x i64>, ptr %a0
++  %cmp = icmp sle <2 x i64> %v0, <i64 15, i64 15>
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++define void @v2i64_icmp_sle(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2i64_icmp_sle:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vsle.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x i64>, ptr %a0
++  %v1 = load <2 x i64>, ptr %a1
++  %cmp = icmp sle <2 x i64> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETULE
++define void @v16i8_icmp_ule_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v16i8_icmp_ule_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vslei.bu $vr0, $vr0, 31
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i8>, ptr %a0
++  %cmp = icmp ule <16 x i8> %v0, <i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31>
++  %ext = sext <16 x i1> %cmp to <16 x i8>
++  store <16 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v16i8_icmp_ule(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i8_icmp_ule:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vsle.bu $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i8>, ptr %a0
++  %v1 = load <16 x i8>, ptr %a1
++  %cmp = icmp ule <16 x i8> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i8>
++  store <16 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v8i16_icmp_ule_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v8i16_icmp_ule_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vslei.hu $vr0, $vr0, 31
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i16>, ptr %a0
++  %cmp = icmp ule <8 x i16> %v0, <i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31>
++  %ext = sext <8 x i1> %cmp to <8 x i16>
++  store <8 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v8i16_icmp_ule(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i16_icmp_ule:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vsle.hu $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i16>, ptr %a0
++  %v1 = load <8 x i16>, ptr %a1
++  %cmp = icmp ule <8 x i16> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i16>
++  store <8 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v4i32_icmp_ule_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v4i32_icmp_ule_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vslei.wu $vr0, $vr0, 31
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %a0
++  %cmp = icmp ule <4 x i32> %v0, <i32 31, i32 31, i32 31, i32 31>
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4i32_icmp_ule(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i32_icmp_ule:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vsle.wu $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %a0
++  %v1 = load <4 x i32>, ptr %a1
++  %cmp = icmp ule <4 x i32> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2i64_icmp_ule_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v2i64_icmp_ule_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vslei.du $vr0, $vr0, 31
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x i64>, ptr %a0
++  %cmp = icmp ule <2 x i64> %v0, <i64 31, i64 31>
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++define void @v2i64_icmp_ule(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2i64_icmp_ule:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vsle.du $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x i64>, ptr %a0
++  %v1 = load <2 x i64>, ptr %a1
++  %cmp = icmp ule <2 x i64> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETLT
++define void @v16i8_icmp_slt_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v16i8_icmp_slt_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vslti.b $vr0, $vr0, 15
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i8>, ptr %a0
++  %cmp = icmp slt <16 x i8> %v0, <i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15, i8 15>
++  %ext = sext <16 x i1> %cmp to <16 x i8>
++  store <16 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v16i8_icmp_slt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i8_icmp_slt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vslt.b $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i8>, ptr %a0
++  %v1 = load <16 x i8>, ptr %a1
++  %cmp = icmp slt <16 x i8> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i8>
++  store <16 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v8i16_icmp_slt_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v8i16_icmp_slt_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vslti.h $vr0, $vr0, 15
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i16>, ptr %a0
++  %cmp = icmp slt <8 x i16> %v0, <i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15, i16 15>
++  %ext = sext <8 x i1> %cmp to <8 x i16>
++  store <8 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v8i16_icmp_slt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i16_icmp_slt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vslt.h $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i16>, ptr %a0
++  %v1 = load <8 x i16>, ptr %a1
++  %cmp = icmp slt <8 x i16> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i16>
++  store <8 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v4i32_icmp_slt_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v4i32_icmp_slt_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vslti.w $vr0, $vr0, 15
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %a0
++  %cmp = icmp slt <4 x i32> %v0, <i32 15, i32 15, i32 15, i32 15>
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4i32_icmp_slt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i32_icmp_slt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vslt.w $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %a0
++  %v1 = load <4 x i32>, ptr %a1
++  %cmp = icmp slt <4 x i32> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2i64_icmp_slt_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v2i64_icmp_slt_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vslti.d $vr0, $vr0, 15
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x i64>, ptr %a0
++  %cmp = icmp slt <2 x i64> %v0, <i64 15, i64 15>
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++define void @v2i64_icmp_slt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2i64_icmp_slt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vslt.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x i64>, ptr %a0
++  %v1 = load <2 x i64>, ptr %a1
++  %cmp = icmp slt <2 x i64> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; SETULT
++define void @v16i8_icmp_ult_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v16i8_icmp_ult_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vslti.bu $vr0, $vr0, 31
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i8>, ptr %a0
++  %cmp = icmp ult <16 x i8> %v0, <i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31, i8 31>
++  %ext = sext <16 x i1> %cmp to <16 x i8>
++  store <16 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v16i8_icmp_ult(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i8_icmp_ult:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vslt.bu $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i8>, ptr %a0
++  %v1 = load <16 x i8>, ptr %a1
++  %cmp = icmp ult <16 x i8> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i8>
++  store <16 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v8i16_icmp_ult_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v8i16_icmp_ult_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vslti.hu $vr0, $vr0, 31
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i16>, ptr %a0
++  %cmp = icmp ult <8 x i16> %v0, <i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31, i16 31>
++  %ext = sext <8 x i1> %cmp to <8 x i16>
++  store <8 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v8i16_icmp_ult(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i16_icmp_ult:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vslt.hu $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i16>, ptr %a0
++  %v1 = load <8 x i16>, ptr %a1
++  %cmp = icmp ult <8 x i16> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i16>
++  store <8 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v4i32_icmp_ult_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v4i32_icmp_ult_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vslti.wu $vr0, $vr0, 31
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %a0
++  %cmp = icmp ult <4 x i32> %v0, <i32 31, i32 31, i32 31, i32 31>
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v4i32_icmp_ult(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i32_icmp_ult:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vslt.wu $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %a0
++  %v1 = load <4 x i32>, ptr %a1
++  %cmp = icmp ult <4 x i32> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2i64_icmp_ult_imm(ptr %res, ptr %a0) nounwind {
++; CHECK-LABEL: v2i64_icmp_ult_imm:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vslti.du $vr0, $vr0, 31
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x i64>, ptr %a0
++  %cmp = icmp ult <2 x i64> %v0, <i64 31, i64 31>
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++define void @v2i64_icmp_ult(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2i64_icmp_ult:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vslt.du $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x i64>, ptr %a0
++  %v1 = load <2 x i64>, ptr %a1
++  %cmp = icmp ult <2 x i64> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETNE
++define void @v16i8_icmp_ne(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i8_icmp_ne:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vseq.b $vr0, $vr1, $vr0
++; CHECK-NEXT:    vxori.b $vr0, $vr0, 255
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i8>, ptr %a0
++  %v1 = load <16 x i8>, ptr %a1
++  %cmp = icmp ne <16 x i8> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i8>
++  store <16 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v8i16_icmp_ne(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i16_icmp_ne:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vseq.h $vr0, $vr1, $vr0
++; CHECK-NEXT:    vrepli.b $vr1, -1
++; CHECK-NEXT:    vxor.v $vr0, $vr0, $vr1
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i16>, ptr %a0
++  %v1 = load <8 x i16>, ptr %a1
++  %cmp = icmp ne <8 x i16> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i16>
++  store <8 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v4i32_icmp_ne(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i32_icmp_ne:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vseq.w $vr0, $vr1, $vr0
++; CHECK-NEXT:    vrepli.b $vr1, -1
++; CHECK-NEXT:    vxor.v $vr0, $vr0, $vr1
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %a0
++  %v1 = load <4 x i32>, ptr %a1
++  %cmp = icmp ne <4 x i32> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2i64_icmp_ne(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2i64_icmp_ne:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a2, 0
++; CHECK-NEXT:    vld $vr1, $a1, 0
++; CHECK-NEXT:    vseq.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vrepli.b $vr1, -1
++; CHECK-NEXT:    vxor.v $vr0, $vr0, $vr1
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x i64>, ptr %a0
++  %v1 = load <2 x i64>, ptr %a1
++  %cmp = icmp ne <2 x i64> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETGE
++define void @v16i8_icmp_sge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i8_icmp_sge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vsle.b $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i8>, ptr %a0
++  %v1 = load <16 x i8>, ptr %a1
++  %cmp = icmp sge <16 x i8> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i8>
++  store <16 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v8i16_icmp_sge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i16_icmp_sge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vsle.h $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i16>, ptr %a0
++  %v1 = load <8 x i16>, ptr %a1
++  %cmp = icmp sge <8 x i16> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i16>
++  store <8 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v4i32_icmp_sge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i32_icmp_sge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vsle.w $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %a0
++  %v1 = load <4 x i32>, ptr %a1
++  %cmp = icmp sge <4 x i32> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2i64_icmp_sge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2i64_icmp_sge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vsle.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x i64>, ptr %a0
++  %v1 = load <2 x i64>, ptr %a1
++  %cmp = icmp sge <2 x i64> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETUGE
++define void @v16i8_icmp_uge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i8_icmp_uge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vsle.bu $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i8>, ptr %a0
++  %v1 = load <16 x i8>, ptr %a1
++  %cmp = icmp uge <16 x i8> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i8>
++  store <16 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v8i16_icmp_uge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i16_icmp_uge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vsle.hu $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i16>, ptr %a0
++  %v1 = load <8 x i16>, ptr %a1
++  %cmp = icmp uge <8 x i16> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i16>
++  store <8 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v4i32_icmp_uge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i32_icmp_uge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vsle.wu $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %a0
++  %v1 = load <4 x i32>, ptr %a1
++  %cmp = icmp uge <4 x i32> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2i64_icmp_uge(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2i64_icmp_uge:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vsle.du $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x i64>, ptr %a0
++  %v1 = load <2 x i64>, ptr %a1
++  %cmp = icmp uge <2 x i64> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETGT
++define void @v16i8_icmp_sgt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i8_icmp_sgt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vslt.b $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i8>, ptr %a0
++  %v1 = load <16 x i8>, ptr %a1
++  %cmp = icmp sgt <16 x i8> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i8>
++  store <16 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v8i16_icmp_sgt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i16_icmp_sgt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vslt.h $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i16>, ptr %a0
++  %v1 = load <8 x i16>, ptr %a1
++  %cmp = icmp sgt <8 x i16> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i16>
++  store <8 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v4i32_icmp_sgt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i32_icmp_sgt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vslt.w $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %a0
++  %v1 = load <4 x i32>, ptr %a1
++  %cmp = icmp sgt <4 x i32> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2i64_icmp_sgt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2i64_icmp_sgt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vslt.d $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x i64>, ptr %a0
++  %v1 = load <2 x i64>, ptr %a1
++  %cmp = icmp sgt <2 x i64> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
++
++;; Expand SETUGT
++define void @v16i8_icmp_ugt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v16i8_icmp_ugt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vslt.bu $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <16 x i8>, ptr %a0
++  %v1 = load <16 x i8>, ptr %a1
++  %cmp = icmp ugt <16 x i8> %v0, %v1
++  %ext = sext <16 x i1> %cmp to <16 x i8>
++  store <16 x i8> %ext, ptr %res
++  ret void
++}
++
++define void @v8i16_icmp_ugt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v8i16_icmp_ugt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vslt.hu $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i16>, ptr %a0
++  %v1 = load <8 x i16>, ptr %a1
++  %cmp = icmp ugt <8 x i16> %v0, %v1
++  %ext = sext <8 x i1> %cmp to <8 x i16>
++  store <8 x i16> %ext, ptr %res
++  ret void
++}
++
++define void @v4i32_icmp_ugt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v4i32_icmp_ugt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vslt.wu $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %a0
++  %v1 = load <4 x i32>, ptr %a1
++  %cmp = icmp ugt <4 x i32> %v0, %v1
++  %ext = sext <4 x i1> %cmp to <4 x i32>
++  store <4 x i32> %ext, ptr %res
++  ret void
++}
++
++define void @v2i64_icmp_ugt(ptr %res, ptr %a0, ptr %a1) nounwind {
++; CHECK-LABEL: v2i64_icmp_ugt:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vld $vr1, $a2, 0
++; CHECK-NEXT:    vslt.du $vr0, $vr1, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x i64>, ptr %a0
++  %v1 = load <2 x i64>, ptr %a1
++  %cmp = icmp ugt <2 x i64> %v0, %v1
++  %ext = sext <2 x i1> %cmp to <2 x i64>
++  store <2 x i64> %ext, ptr %res
++  ret void
++}
+-- 
+2.20.1
+

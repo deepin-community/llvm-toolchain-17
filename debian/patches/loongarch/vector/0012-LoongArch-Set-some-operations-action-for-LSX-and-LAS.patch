@@ -1,0 +1,139 @@
+From c847fcdb11c17aa60940258c6d70c69c3f133c28 Mon Sep 17 00:00:00 2001
+From: wanglei <wanglei@loongson.cn>
+Date: Tue, 24 Oct 2023 15:46:56 +0800
+Subject: [PATCH 12/42] [LoongArch] Set some operations action for LSX and LASX
+
+First, expand all truncationg stores and extending loads. Second,
+expand everything for `fixedlen_vector_valuetypes`.  Finally, we
+selectively turn on ones that can be effectively codegen'd.
+
+Simultaneously, this patch adds floating-point vector types to
+load/store patterns. Additional test cases will be included in the IR
+instruction test patchs.
+
+(cherry picked from commit f2441a06c609cedbb7e11303907f07bf0ca5cb2f)
+
+Change-Id: I473c19a718f4582c166609fda5d1fa3fe0e602dc
+---
+ .../LoongArch/LoongArchISelLowering.cpp       | 74 +++++++++++++++++--
+ .../LoongArch/LoongArchLASXInstrInfo.td       |  2 +-
+ .../Target/LoongArch/LoongArchLSXInstrInfo.td |  2 +-
+ 3 files changed, 69 insertions(+), 9 deletions(-)
+
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+index 2f8ce57d3f5f..d3627cec2e8c 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+@@ -214,16 +214,76 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+ 
+   // Set operations for 'LSX' feature.
+ 
+-  if (Subtarget.hasExtLSX())
+-    setOperationAction({ISD::UMAX, ISD::UMIN, ISD::SMAX, ISD::SMIN},
+-                       {MVT::v2i64, MVT::v4i32, MVT::v8i16, MVT::v16i8}, Legal);
++  if (Subtarget.hasExtLSX()) {
++    for (MVT VT : MVT::fixedlen_vector_valuetypes()) {
++      // Expand all truncating stores and extending loads.
++      for (MVT InnerVT : MVT::fixedlen_vector_valuetypes()) {
++        setTruncStoreAction(VT, InnerVT, Expand);
++        setLoadExtAction(ISD::SEXTLOAD, VT, InnerVT, Expand);
++        setLoadExtAction(ISD::ZEXTLOAD, VT, InnerVT, Expand);
++        setLoadExtAction(ISD::EXTLOAD, VT, InnerVT, Expand);
++      }
++      // By default everything must be expanded. Then we will selectively turn
++      // on ones that can be effectively codegen'd.
++      for (unsigned Op = 0; Op < ISD::BUILTIN_OP_END; ++Op)
++        setOperationAction(Op, VT, Expand);
++    }
++
++    for (MVT VT : LSXVTs) {
++      setOperationAction({ISD::LOAD, ISD::STORE}, VT, Legal);
++      setOperationAction(ISD::BITCAST, VT, Legal);
++      setOperationAction(ISD::UNDEF, VT, Legal);
++
++      // FIXME: For BUILD_VECTOR, it is temporarily set to `Legal` here, and it
++      // will be `Custom` handled in the future.
++      setOperationAction(ISD::BUILD_VECTOR, VT, Legal);
++      setOperationAction(ISD::INSERT_VECTOR_ELT, VT, Legal);
++    }
++    for (MVT VT : {MVT::v16i8, MVT::v8i16, MVT::v4i32, MVT::v2i64}) {
++      setOperationAction({ISD::ADD, ISD::SUB}, VT, Legal);
++      setOperationAction({ISD::UMAX, ISD::UMIN, ISD::SMAX, ISD::SMIN}, VT,
++                         Legal);
++      setOperationAction({ISD::MUL, ISD::SDIV, ISD::SREM, ISD::UDIV, ISD::UREM},
++                         VT, Legal);
++      setOperationAction({ISD::AND, ISD::OR, ISD::XOR}, VT, Legal);
++      setOperationAction({ISD::SHL, ISD::SRA, ISD::SRL}, VT, Legal);
++      setOperationAction(ISD::CTPOP, VT, Legal);
++    }
++    for (MVT VT : {MVT::v4f32, MVT::v2f64}) {
++      setOperationAction({ISD::FADD, ISD::FSUB}, VT, Legal);
++      setOperationAction({ISD::FMUL, ISD::FDIV}, VT, Legal);
++      setOperationAction(ISD::FMA, VT, Legal);
++    }
++  }
+ 
+   // Set operations for 'LASX' feature.
+ 
+-  if (Subtarget.hasExtLASX())
+-    setOperationAction({ISD::UMAX, ISD::UMIN, ISD::SMAX, ISD::SMIN},
+-                       {MVT::v4i64, MVT::v8i32, MVT::v16i16, MVT::v32i8},
+-                       Legal);
++  if (Subtarget.hasExtLASX()) {
++    for (MVT VT : LASXVTs) {
++      setOperationAction({ISD::LOAD, ISD::STORE}, VT, Legal);
++      setOperationAction(ISD::BITCAST, VT, Legal);
++      setOperationAction(ISD::UNDEF, VT, Legal);
++
++      // FIXME: Same as above.
++      setOperationAction(ISD::BUILD_VECTOR, VT, Legal);
++      setOperationAction(ISD::INSERT_VECTOR_ELT, VT, Legal);
++    }
++    for (MVT VT : {MVT::v4i64, MVT::v8i32, MVT::v16i16, MVT::v32i8}) {
++      setOperationAction({ISD::ADD, ISD::SUB}, VT, Legal);
++      setOperationAction({ISD::UMAX, ISD::UMIN, ISD::SMAX, ISD::SMIN}, VT,
++                         Legal);
++      setOperationAction({ISD::MUL, ISD::SDIV, ISD::SREM, ISD::UDIV, ISD::UREM},
++                         VT, Legal);
++      setOperationAction({ISD::AND, ISD::OR, ISD::XOR}, VT, Legal);
++      setOperationAction({ISD::SHL, ISD::SRA, ISD::SRL}, VT, Legal);
++      setOperationAction(ISD::CTPOP, VT, Legal);
++    }
++    for (MVT VT : {MVT::v8f32, MVT::v4f64}) {
++      setOperationAction({ISD::FADD, ISD::FSUB}, VT, Legal);
++      setOperationAction({ISD::FMUL, ISD::FDIV}, VT, Legal);
++      setOperationAction(ISD::FMA, VT, Legal);
++    }
++  }
+ 
+   // Set DAG combine for LA32 and LA64.
+ 
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+index 947950be2b8f..e19aa92266b1 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+@@ -1394,7 +1394,7 @@ def : Pat<(loongarch_vreplve v4i64:$xj, GRLenVT:$rk),
+           (XVREPLVE_D v4i64:$xj, GRLenVT:$rk)>;
+ 
+ // Loads/Stores
+-foreach vt = [v32i8, v16i16, v8i32, v4i64] in {
++foreach vt = [v32i8, v16i16, v8i32, v4i64, v8f32, v4f64] in {
+   defm : LdPat<load, XVLD, vt>;
+   def  : RegRegLdPat<load, XVLDX, vt>;
+   defm : StPat<store, XVST, LASX256, vt>;
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+index e021adcecf4d..9391b1a8a20c 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+@@ -1494,7 +1494,7 @@ def : Pat<(loongarch_vreplve v2i64:$vj, GRLenVT:$rk),
+           (VREPLVE_D v2i64:$vj, GRLenVT:$rk)>;
+ 
+ // Loads/Stores
+-foreach vt = [v16i8, v8i16, v4i32, v2i64] in {
++foreach vt = [v16i8, v8i16, v4i32, v2i64, v4f32, v2f64] in {
+   defm : LdPat<load, VLD, vt>;
+   def  : RegRegLdPat<load, VLDX, vt>;
+   defm : StPat<store, VST, LSX128, vt>;
+-- 
+2.20.1
+

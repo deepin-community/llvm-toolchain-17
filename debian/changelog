@@ -1,3 +1,13 @@
+llvm-toolchain-17 (1:17.0.6-5deepin3) unstable; urgency=medium
+
+  [ wanglei licongtian ]
+  * Add the support for vector on LoongArch
+
+  [ chenli ]
+  * Add some test cases for vector
+
+ -- Ami-zhang <zhanglimin@loongson.cn>  Mon, 26 Aug 2024 11:29:20 +0800
+
 llvm-toolchain-17 (1:17.0.6-5deepin2) unstable; urgency=medium
 
   [ Jinyang He ]

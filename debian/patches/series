@@ -153,7 +153,6 @@ libclang-major-version-only.diff
 D148945-revert.diff
 arm32-defaults.diff
 mips/D154390-pre-R6.diff
-D154931-revert-loong64.patch
 
 # These patches{0001~0014}, which add support for `relax` feature on LoongArch
 # in LLVM 18, are backported to LLVM 17.
@@ -171,3 +170,48 @@ loongarch/relax/0011-test-Update-dwarf-loongarch-relocs.ll.patch
 loongarch/relax/0012-lld-LoongArch-Support-the-R_LARCH_-ADD-SUB-_ULEB128-.patch
 loongarch/relax/0013-MC-test-Change-ELF-uleb-ehtable.s-Mach-O-to-use-priv.patch
 loongarch/relax/0014-Mips-MC-AttemptToFoldSymbolOffsetDifference-revert-i.patch
+
+# These patches{0001~0042}, which add support for vector on LoongArch in LLVM 18,
+# are backported to LLVM 17.
+loongarch/vector/0001-Clang-LoongArch-Use-the-ClangBuiltin-class-to-automa.patch
+loongarch/vector/0002-LoongArch-Add-LSX-intrinsic-support.patch
+loongarch/vector/0003-LoongArch-Add-LASX-intrinsic-support.patch
+loongarch/vector/0004-LoongArch-Add-LSX-intrinsic-testcases.patch
+loongarch/vector/0005-LoongArch-Add-LASX-intrinsic-testcases.patch
+loongarch/vector/0006-LoongArch-Add-testcases-of-LASX-intrinsics-with-imme.patch
+loongarch/vector/0007-LoongArch-MC-Add-invalid-immediate-testcases-for-LSX.patch
+loongarch/vector/0008-LoongArch-MC-Add-invalid-immediate-testcases-for-LAS.patch
+loongarch/vector/0009-LoongArch-Add-testcases-of-LSX-intrinsics-with-immed.patch
+loongarch/vector/0010-LoongArch-Reorder-LoongArchTargetLowering-.-NFC.patch
+loongarch/vector/0011-LoongArch-Fix-typos.-NFC.patch
+loongarch/vector/0012-LoongArch-Set-some-operations-action-for-LSX-and-LAS.patch
+loongarch/vector/0013-Clang-LoongArch-Support-compiler-options-mlsx-mlasx-.patch
+loongarch/vector/0014-Clang-LoongArch-Add-ABI-implementation-of-passing-ve.patch
+loongarch/vector/0015-Clang-LoongArch-Support-the-builtin-functions-for-LS.patch
+loongarch/vector/0016-Clang-LoongArch-Support-the-builtin-functions-for-LA.patch
+loongarch/vector/0017-LoongArch-CodeGen-Add-LSX-builtin-testcases.patch
+loongarch/vector/0018-LoongArch-CodeGen-Add-LASX-builtin-testcases.patch
+loongarch/vector/0019-LoongArch-Add-codegen-support-for-extractelement-737.patch
+loongarch/vector/0020-LoongArch-Add-some-binary-IR-instructions-testcases-.patch
+loongarch/vector/0021-LoongArch-Add-codegen-support-for-insertelement.patch
+loongarch/vector/0022-LoongArch-Custom-lowering-ISD-BUILD_VECTOR.patch
+loongarch/vector/0023-LoongArch-Add-more-and-or-xor-patterns-for-vector-ty.patch
+loongarch/vector/0024-LoongArch-Add-some-binary-IR-instructions-testcases-.patch
+loongarch/vector/0025-LoongArch-Override-TargetLowering-isShuffleMaskLegal.patch
+loongarch/vector/0026-Reland-LoongArch-Support-CTLZ-with-lsx-lasx.patch
+loongarch/vector/0027-LoongArch-Support-MULHS-MULHU-with-lsx-lasx.patch
+loongarch/vector/0028-LoongArch-Make-ISD-VSELECT-a-legal-operation-with-ls.patch
+loongarch/vector/0029-LoongArch-Add-codegen-support-for-icmp-fcmp-with-lsx.patch
+loongarch/vector/0030-LoongArch-Make-ISD-FSQRT-a-legal-operation-with-lsx-.patch
+loongarch/vector/0031-LoongArch-Mark-ISD-FNEG-as-legal.patch
+loongarch/vector/0032-LoongArch-Add-codegen-support-for-X-VF-MSUB-NMADD-NM.patch
+loongarch/vector/0033-LoongArch-Fix-LASX-vector_extract-codegen.patch
+loongarch/vector/0034-LoongArch-Fix-incorrect-pattern-XVREPL128VEI_-W-D-in.patch
+loongarch/vector/0035-LoongArch-Fix-incorrect-pattern-X-VBITSELI_B-instruc.patch
+loongarch/vector/0036-Clang-LoongArch-Do-not-pass-vector-arguments-via-vec.patch
+loongarch/vector/0037-LoongArch-Permit-auto-vectorization-using-LSX-LASX-w.patch
+loongarch/vector/0038-CodeGen-LoongArch-Set-SINT_TO_FP-UINT_TO_FP-to-legal.patch
+loongarch/vector/0039-CodeGen-LoongArch-Set-FP_TO_SINT-FP_TO_UINT-to-legal.patch
+loongarch/vector/0040-LoongArch-Fixing-the-incorrect-return-value-of-Loong.patch
+loongarch/vector/0041-LoongArch-Pre-commit-test-for-76913.-NFC.patch
+loongarch/vector/0042-LoongArch-Implement-LoongArchRegisterInfo-canRealign.patch
