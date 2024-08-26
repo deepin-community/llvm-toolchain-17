@@ -1,0 +1,307 @@
+From 8f6d308508cd7e8568df5268230cf60d47cd9dbe Mon Sep 17 00:00:00 2001
+From: yjijd <licongtian@loongson.cn>
+Date: Tue, 23 Jan 2024 15:57:06 +0800
+Subject: [PATCH 39/42] [CodeGen][LoongArch] Set FP_TO_SINT/FP_TO_UINT to legal
+ for vector types (#79107)
+
+Support the following conversions:
+v4f32->v4i32, v2f64->v2i64(LSX)
+v8f32->v8i32, v4f64->v4i64(LASX)
+v4f32->v4i64, v4f64->v4i32(LASX)
+
+(cherry picked from commit 44ba6ebc999d6e9b27bedfe04a993adfd204dc6a)
+
+Change-Id: I879a480fb9afa730144edf2a3ce4304793ef60ec
+---
+ .../LoongArch/LoongArchISelLowering.cpp       | 12 ++--
+ .../LoongArch/LoongArchLASXInstrInfo.td       | 22 +++++++
+ .../Target/LoongArch/LoongArchLSXInstrInfo.td |  8 +++
+ .../LoongArch/lasx/ir-instruction/fptosi.ll   | 57 +++++++++++++++++++
+ .../LoongArch/lasx/ir-instruction/fptoui.ll   | 57 +++++++++++++++++++
+ .../LoongArch/lsx/ir-instruction/fptosi.ll    | 28 +++++++++
+ .../LoongArch/lsx/ir-instruction/fptoui.ll    | 28 +++++++++
+ 7 files changed, 208 insertions(+), 4 deletions(-)
+ create mode 100644 llvm/test/CodeGen/LoongArch/lasx/ir-instruction/fptosi.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lasx/ir-instruction/fptoui.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lsx/ir-instruction/fptosi.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lsx/ir-instruction/fptoui.ll
+
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+index 7a360b42e15d..f7eacd56c542 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+@@ -256,8 +256,10 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+           {ISD::SETNE, ISD::SETGE, ISD::SETGT, ISD::SETUGE, ISD::SETUGT}, VT,
+           Expand);
+     }
+-    setOperationAction({ISD::SINT_TO_FP, ISD::UINT_TO_FP},
+-                       {MVT::v4i32, MVT::v2i64}, Legal);
++    for (MVT VT : {MVT::v4i32, MVT::v2i64}) {
++      setOperationAction({ISD::SINT_TO_FP, ISD::UINT_TO_FP}, VT, Legal);
++      setOperationAction({ISD::FP_TO_SINT, ISD::FP_TO_UINT}, VT, Legal);
++    }
+     for (MVT VT : {MVT::v4f32, MVT::v2f64}) {
+       setOperationAction({ISD::FADD, ISD::FSUB}, VT, Legal);
+       setOperationAction({ISD::FMUL, ISD::FDIV}, VT, Legal);
+@@ -300,8 +302,10 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+           {ISD::SETNE, ISD::SETGE, ISD::SETGT, ISD::SETUGE, ISD::SETUGT}, VT,
+           Expand);
+     }
+-    setOperationAction({ISD::SINT_TO_FP, ISD::UINT_TO_FP},
+-                       {MVT::v8i32, MVT::v4i32, MVT::v4i64}, Legal);
++    for (MVT VT : {MVT::v8i32, MVT::v4i32, MVT::v4i64}) {
++      setOperationAction({ISD::SINT_TO_FP, ISD::UINT_TO_FP}, VT, Legal);
++      setOperationAction({ISD::FP_TO_SINT, ISD::FP_TO_UINT}, VT, Legal);
++    }
+     for (MVT VT : {MVT::v8f32, MVT::v4f64}) {
+       setOperationAction({ISD::FADD, ISD::FSUB}, VT, Legal);
+       setOperationAction({ISD::FMUL, ISD::FDIV}, VT, Legal);
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+index b3e74b480922..492b62da6ce7 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+@@ -1633,6 +1633,28 @@ def : Pat<(v4f32 (uint_to_fp v4i64:$vj)),
+                                        (XVFFINT_D_LU v4i64:$vj)),
+                           sub_128)>;
+ 
++// XVFTINTRZ_{W_S/L_D}
++def : Pat<(v8i32 (fp_to_sint v8f32:$vj)), (XVFTINTRZ_W_S v8f32:$vj)>;
++def : Pat<(v4i64 (fp_to_sint v4f64:$vj)), (XVFTINTRZ_L_D v4f64:$vj)>;
++def : Pat<(v4i64 (fp_to_sint v4f32:$vj)),
++          (VEXT2XV_D_W (SUBREG_TO_REG (i64 0), (VFTINTRZ_W_S v4f32:$vj),
++                                      sub_128))>;
++def : Pat<(v4i32 (fp_to_sint (v4f64 LASX256:$vj))),
++          (EXTRACT_SUBREG (XVFTINTRZ_W_S (XVFCVT_S_D (XVPERMI_D v4f64:$vj, 238),
++                                                     v4f64:$vj)),
++                          sub_128)>;
++
++// XVFTINTRZ_{W_SU/L_DU}
++def : Pat<(v8i32 (fp_to_uint v8f32:$vj)), (XVFTINTRZ_WU_S v8f32:$vj)>;
++def : Pat<(v4i64 (fp_to_uint v4f64:$vj)), (XVFTINTRZ_LU_D v4f64:$vj)>;
++def : Pat<(v4i64 (fp_to_uint v4f32:$vj)),
++          (VEXT2XV_DU_WU (SUBREG_TO_REG (i64 0), (VFTINTRZ_WU_S v4f32:$vj),
++                                        sub_128))>;
++def : Pat<(v4i32 (fp_to_uint (v4f64 LASX256:$vj))),
++          (EXTRACT_SUBREG (XVFTINTRZ_W_S (XVFCVT_S_D (XVPERMI_D v4f64:$vj, 238),
++                                                     v4f64:$vj)),
++                          sub_128)>;
++
+ } // Predicates = [HasExtLASX]
+ 
+ /// Intrinsic pattern
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+index 63eac4d1aeb7..99ac2f3c162f 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+@@ -1750,6 +1750,14 @@ def : Pat<(v2f64 (sint_to_fp v2i64:$vj)), (VFFINT_D_L v2i64:$vj)>;
+ def : Pat<(v4f32 (uint_to_fp v4i32:$vj)), (VFFINT_S_WU v4i32:$vj)>;
+ def : Pat<(v2f64 (uint_to_fp v2i64:$vj)), (VFFINT_D_LU v2i64:$vj)>;
+ 
++// VFTINTRZ_{W_S/L_D}
++def : Pat<(v4i32 (fp_to_sint v4f32:$vj)), (VFTINTRZ_W_S v4f32:$vj)>;
++def : Pat<(v2i64 (fp_to_sint v2f64:$vj)), (VFTINTRZ_L_D v2f64:$vj)>;
++
++// VFTINTRZ_{W_SU/L_DU}
++def : Pat<(v4i32 (fp_to_uint v4f32:$vj)), (VFTINTRZ_WU_S v4f32:$vj)>;
++def : Pat<(v2i64 (fp_to_uint v2f64:$vj)), (VFTINTRZ_LU_D v2f64:$vj)>;
++
+ } // Predicates = [HasExtLSX]
+ 
+ /// Intrinsic pattern
+diff --git a/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/fptosi.ll b/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/fptosi.ll
+new file mode 100644
+index 000000000000..0d9f57b57ffa
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/fptosi.ll
+@@ -0,0 +1,57 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py UTC_ARGS: --version 3
++; RUN: llc --mtriple=loongarch64 --mattr=+lasx < %s | FileCheck %s
++
++define void @fptosi_v8f32_v8i32(ptr %res, ptr %in){
++; CHECK-LABEL: fptosi_v8f32_v8i32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvftintrz.w.s $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %in
++  %v1 = fptosi <8 x float> %v0 to <8 x i32>
++  store <8 x i32> %v1, ptr %res
++  ret void
++}
++
++define void @fptosi_v4f64_v4i64(ptr %res, ptr %in){
++; CHECK-LABEL: fptosi_v4f64_v4i64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvftintrz.l.d $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %in
++  %v1 = fptosi <4 x double> %v0 to <4 x i64>
++  store <4 x i64> %v1, ptr %res
++  ret void
++}
++
++define void @fptosi_v4f64_v4i32(ptr %res, ptr %in){
++; CHECK-LABEL: fptosi_v4f64_v4i32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvpermi.d $xr1, $xr0, 238
++; CHECK-NEXT:    xvfcvt.s.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvftintrz.w.s $xr0, $xr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %in
++  %v1 = fptosi <4 x double> %v0 to <4 x i32>
++  store <4 x i32> %v1, ptr %res
++  ret void
++}
++
++define void @fptosi_v4f32_v4i64(ptr %res, ptr %in){
++; CHECK-LABEL: fptosi_v4f32_v4i64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vftintrz.w.s $vr0, $vr0
++; CHECK-NEXT:    vext2xv.d.w $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %in
++  %v1 = fptosi <4 x float> %v0 to <4 x i64>
++  store <4 x i64> %v1, ptr %res
++  ret void
++}
+diff --git a/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/fptoui.ll b/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/fptoui.ll
+new file mode 100644
+index 000000000000..27d70f33cd34
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/fptoui.ll
+@@ -0,0 +1,57 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py UTC_ARGS: --version 3
++; RUN: llc --mtriple=loongarch64 --mattr=+lasx < %s | FileCheck %s
++
++define void @fptoui_v8f32_v8i32(ptr %res, ptr %in){
++; CHECK-LABEL: fptoui_v8f32_v8i32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvftintrz.wu.s $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x float>, ptr %in
++  %v1 = fptoui <8 x float> %v0 to <8 x i32>
++  store <8 x i32> %v1, ptr %res
++  ret void
++}
++
++define void @fptoui_v4f64_v4i64(ptr %res, ptr %in){
++; CHECK-LABEL: fptoui_v4f64_v4i64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvftintrz.lu.d $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %in
++  %v1 = fptoui <4 x double> %v0 to <4 x i64>
++  store <4 x i64> %v1, ptr %res
++  ret void
++}
++
++define void @fptoui_v4f64_v4i32(ptr %res, ptr %in){
++; CHECK-LABEL: fptoui_v4f64_v4i32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvpermi.d $xr1, $xr0, 238
++; CHECK-NEXT:    xvfcvt.s.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    xvftintrz.w.s $xr0, $xr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x double>, ptr %in
++  %v1 = fptoui <4 x double> %v0 to <4 x i32>
++  store <4 x i32> %v1, ptr %res
++  ret void
++}
++
++define void @fptoui_v4f32_v4i64(ptr %res, ptr %in){
++; CHECK-LABEL: fptoui_v4f32_v4i64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vftintrz.wu.s $vr0, $vr0
++; CHECK-NEXT:    vext2xv.du.wu $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %in
++  %v1 = fptoui <4 x float> %v0 to <4 x i64>
++  store <4 x i64> %v1, ptr %res
++  ret void
++}
+diff --git a/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/fptosi.ll b/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/fptosi.ll
+new file mode 100644
+index 000000000000..c3008fe96e47
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/fptosi.ll
+@@ -0,0 +1,28 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py UTC_ARGS: --version 3
++; RUN: llc --mtriple=loongarch64 --mattr=+lsx < %s | FileCheck %s
++
++define void @fptosi_v4f32_v4i32(ptr %res, ptr %in){
++; CHECK-LABEL: fptosi_v4f32_v4i32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vftintrz.w.s $vr0, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %in
++  %v1 = fptosi <4 x float> %v0 to <4 x i32>
++  store <4 x i32> %v1, ptr %res
++  ret void
++}
++
++define void @fptosi_v2f64_v2i64(ptr %res, ptr %in){
++; CHECK-LABEL: fptosi_v2f64_v2i64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vftintrz.l.d $vr0, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %in
++  %v1 = fptosi <2 x double> %v0 to <2 x i64>
++  store <2 x i64> %v1, ptr %res
++  ret void
++}
+diff --git a/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/fptoui.ll b/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/fptoui.ll
+new file mode 100644
+index 000000000000..f0aeb0bd14e7
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/fptoui.ll
+@@ -0,0 +1,28 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py UTC_ARGS: --version 3
++; RUN: llc --mtriple=loongarch64 --mattr=+lsx < %s | FileCheck %s
++
++define void @fptoui_v4f32_v4i32(ptr %res, ptr %in){
++; CHECK-LABEL: fptoui_v4f32_v4i32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vftintrz.wu.s $vr0, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x float>, ptr %in
++  %v1 = fptoui <4 x float> %v0 to <4 x i32>
++  store <4 x i32> %v1, ptr %res
++  ret void
++}
++
++define void @fptoui_v2f64_v2i64(ptr %res, ptr %in){
++; CHECK-LABEL: fptoui_v2f64_v2i64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vftintrz.lu.d $vr0, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x double>, ptr %in
++  %v1 = fptoui <2 x double> %v0 to <2 x i64>
++  store <2 x i64> %v1, ptr %res
++  ret void
++}
+-- 
+2.20.1
+

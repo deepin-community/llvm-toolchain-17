@@ -1,0 +1,34 @@
+From 9df32c3cc1929b8d09f3e5fc07819f2fdef3ae6d Mon Sep 17 00:00:00 2001
+From: licongtian <licongtian@loongson.cn>
+Date: Wed, 25 Oct 2023 17:35:32 +0800
+Subject: [PATCH 14/42] [Clang][LoongArch] Add ABI implementation of passing
+ vectors
+
+(cherry picked from commit eb49b86f5a9b54b0e3c37024334a3c6f6ca88e14)
+
+Change-Id: I1ba073095a55433fdb9387d2ef433160ac800375
+---
+ clang/lib/CodeGen/Targets/LoongArch.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/clang/lib/CodeGen/Targets/LoongArch.cpp b/clang/lib/CodeGen/Targets/LoongArch.cpp
+index 7483bf6d6d1e..26c68c3583b2 100644
+--- a/clang/lib/CodeGen/Targets/LoongArch.cpp
++++ b/clang/lib/CodeGen/Targets/LoongArch.cpp
+@@ -321,6 +321,13 @@ ABIArgInfo LoongArchABIInfo::classifyArgumentType(QualType Ty, bool IsFixed,
+     return ABIArgInfo::getDirect();
+   }
+ 
++  // Pass 128-bit/256-bit vector values via vector registers directly.
++  if (Ty->isVectorType() && (((getContext().getTypeSize(Ty) == 128) &&
++                              (getTarget().hasFeature("lsx"))) ||
++                             ((getContext().getTypeSize(Ty) == 256) &&
++                              getTarget().hasFeature("lasx"))))
++    return ABIArgInfo::getDirect();
++
+   // Complex types for the *f or *d ABI must be passed directly rather than
+   // using CoerceAndExpand.
+   if (IsFixed && Ty->isComplexType() && FRLen && FARsLeft >= 2) {
+-- 
+2.20.1
+

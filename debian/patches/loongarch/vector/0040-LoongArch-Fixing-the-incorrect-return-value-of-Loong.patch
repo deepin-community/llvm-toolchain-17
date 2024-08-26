@@ -1,0 +1,53 @@
+From 8da55d54445ddecf8a751368828d46425afc4ce6 Mon Sep 17 00:00:00 2001
+From: wanglei <wanglei@loongson.cn>
+Date: Fri, 26 Jan 2024 10:24:07 +0800
+Subject: [PATCH 40/42] [LoongArch] Fixing the incorrect return value of
+ LoongArchTTIImpl::getRegisterBitWidth (#79441)
+
+When we do not enable vector features, we should return the default
+value (`TargetTransformInfoImplBase::getRegisterBitWidth`) instead of
+zero.
+
+This should fix the LoongArch [buildbot
+breakage](https://lab.llvm.org/staging/#/builders/5/builds/486) from
+
+(cherry picked from commit 1e9924c1f248bbddcb95d82a59708d617297dad3)
+(cherry picked from commit 900e7cbfdee09c94d022e4dae923b3c7827f95e3)
+
+Change-Id: I6e6a5cd987e1129872980c09441f5ca176069ddd
+---
+ .../Target/LoongArch/LoongArchTargetTransformInfo.cpp | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/llvm/lib/Target/LoongArch/LoongArchTargetTransformInfo.cpp b/llvm/lib/Target/LoongArch/LoongArchTargetTransformInfo.cpp
+index 04349aa52b54..d47dded9ea6e 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchTargetTransformInfo.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchTargetTransformInfo.cpp
+@@ -21,17 +21,20 @@ using namespace llvm;
+ 
+ TypeSize LoongArchTTIImpl::getRegisterBitWidth(
+     TargetTransformInfo::RegisterKind K) const {
++  TypeSize DefSize = TargetTransformInfoImplBase::getRegisterBitWidth(K);
+   switch (K) {
+   case TargetTransformInfo::RGK_Scalar:
+     return TypeSize::getFixed(ST->is64Bit() ? 64 : 32);
+   case TargetTransformInfo::RGK_FixedWidthVector:
+-    if (ST->hasExtLASX() && ST->hasExpAutoVec())
++    if (!ST->hasExpAutoVec())
++      return DefSize;
++    if (ST->hasExtLASX())
+       return TypeSize::getFixed(256);
+-    if (ST->hasExtLSX() && ST->hasExpAutoVec())
++    if (ST->hasExtLSX())
+       return TypeSize::getFixed(128);
+-    return TypeSize::getFixed(0);
++    [[fallthrough]];
+   case TargetTransformInfo::RGK_ScalableVector:
+-    return TypeSize::getScalable(0);
++    return DefSize;
+   }
+ 
+   llvm_unreachable("Unsupported register kind");
+-- 
+2.20.1
+

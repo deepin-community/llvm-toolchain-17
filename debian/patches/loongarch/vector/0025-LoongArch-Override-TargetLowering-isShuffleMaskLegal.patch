@@ -1,0 +1,116 @@
+From b18f81359a267958fef5c9e6f203fca6e891cce6 Mon Sep 17 00:00:00 2001
+From: wanglei <wanglei@loongson.cn>
+Date: Sat, 2 Dec 2023 14:25:17 +0800
+Subject: [PATCH 25/42] [LoongArch] Override TargetLowering::isShuffleMaskLegal
+
+ By default, `isShuffleMaskLegal` always returns true, which can result
+ in the expansion of `BUILD_VECTOR` into a `VECTOR_SHUFFLE` node in
+ certain situations. Subsequently, the `VECTOR_SHUFFLE` node is expanded
+ again into a `BUILD_VECTOR`, leading to an infinite loop.
+ To address this, we always return false, allowing the expansion of
+ `BUILD_VECTOR` through the stack.
+
+(cherry picked from commit 66a3e4fafb6eae19764f8a192ca3a116c0554211)
+
+Change-Id: Idb8d366a812d3e2b258023a60a1625b9e7ce7735
+---
+ .../LoongArch/LoongArchISelLowering.cpp       | 10 +++++++++
+ .../Target/LoongArch/LoongArchISelLowering.h  |  5 +++++
+ .../CodeGen/LoongArch/lsx/build-vector.ll     | 22 +++++++++++++++++++
+ 3 files changed, 37 insertions(+)
+
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+index 1b60bfc3bddb..e45f21265d7b 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+@@ -239,6 +239,7 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+       setOperationAction(ISD::BUILD_VECTOR, VT, Custom);
+     }
+     for (MVT VT : {MVT::v16i8, MVT::v8i16, MVT::v4i32, MVT::v2i64}) {
++      setOperationAction(ISD::VECTOR_SHUFFLE, VT, Custom);
+       setOperationAction({ISD::ADD, ISD::SUB}, VT, Legal);
+       setOperationAction({ISD::UMAX, ISD::UMIN, ISD::SMAX, ISD::SMIN}, VT,
+                          Legal);
+@@ -268,6 +269,7 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+       setOperationAction(ISD::BUILD_VECTOR, VT, Custom);
+     }
+     for (MVT VT : {MVT::v4i64, MVT::v8i32, MVT::v16i16, MVT::v32i8}) {
++      setOperationAction(ISD::VECTOR_SHUFFLE, VT, Custom);
+       setOperationAction({ISD::ADD, ISD::SUB}, VT, Legal);
+       setOperationAction({ISD::UMAX, ISD::UMIN, ISD::SMAX, ISD::SMIN}, VT,
+                          Legal);
+@@ -370,10 +372,18 @@ SDValue LoongArchTargetLowering::LowerOperation(SDValue Op,
+     return lowerINSERT_VECTOR_ELT(Op, DAG);
+   case ISD::BUILD_VECTOR:
+     return lowerBUILD_VECTOR(Op, DAG);
++  case ISD::VECTOR_SHUFFLE:
++    return lowerVECTOR_SHUFFLE(Op, DAG);
+   }
+   return SDValue();
+ }
+ 
++SDValue LoongArchTargetLowering::lowerVECTOR_SHUFFLE(SDValue Op,
++                                                     SelectionDAG &DAG) const {
++  // TODO: custom shuffle.
++  return SDValue();
++}
++
+ static bool isConstantOrUndef(const SDValue Op) {
+   if (Op->isUndef())
+     return true;
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelLowering.h b/llvm/lib/Target/LoongArch/LoongArchISelLowering.h
+index 111376306374..2c35f9e5d378 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelLowering.h
++++ b/llvm/lib/Target/LoongArch/LoongArchISelLowering.h
+@@ -230,6 +230,10 @@ public:
+       MachineMemOperand::Flags Flags = MachineMemOperand::MONone,
+       unsigned *Fast = nullptr) const override;
+ 
++  bool isShuffleMaskLegal(ArrayRef<int> Mask, EVT VT) const override {
++    return false;
++  }
++
+ private:
+   /// Target-specific function used to lower LoongArch calling conventions.
+   typedef bool LoongArchCCAssignFn(const DataLayout &DL, LoongArchABI::ABI ABI,
+@@ -277,6 +281,7 @@ private:
+   SDValue lowerWRITE_REGISTER(SDValue Op, SelectionDAG &DAG) const;
+   SDValue lowerINSERT_VECTOR_ELT(SDValue Op, SelectionDAG &DAG) const;
+   SDValue lowerBUILD_VECTOR(SDValue Op, SelectionDAG &DAG) const;
++  SDValue lowerVECTOR_SHUFFLE(SDValue Op, SelectionDAG &DAG) const;
+ 
+   bool isFPImmLegal(const APFloat &Imm, EVT VT,
+                     bool ForCodeSize) const override;
+diff --git a/llvm/test/CodeGen/LoongArch/lsx/build-vector.ll b/llvm/test/CodeGen/LoongArch/lsx/build-vector.ll
+index 3a74db5e1acb..ed1f610a5fa6 100644
+--- a/llvm/test/CodeGen/LoongArch/lsx/build-vector.ll
++++ b/llvm/test/CodeGen/LoongArch/lsx/build-vector.ll
+@@ -374,3 +374,25 @@ entry:
+   store <2 x double> %ins1, ptr %dst
+   ret void
+ }
++
++;; BUILD_VECTOR through stack.
++;; If `isShuffleMaskLegal` returns true, it will lead to an infinite loop.
++define void @extract1_i32_zext_insert0_i64_undef(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: extract1_i32_zext_insert0_i64_undef:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    addi.d $sp, $sp, -16
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vpickve2gr.w $a0, $vr0, 1
++; CHECK-NEXT:    bstrpick.d $a0, $a0, 31, 0
++; CHECK-NEXT:    st.d $a0, $sp, 0
++; CHECK-NEXT:    vld $vr0, $sp, 0
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    addi.d $sp, $sp, 16
++; CHECK-NEXT:    ret
++  %v = load volatile <4 x i32>, ptr %src
++  %e = extractelement <4 x i32> %v, i32 1
++  %z = zext i32 %e to i64
++  %r = insertelement <2 x i64> undef, i64 %z, i32 0
++  store <2 x i64> %r, ptr %dst
++  ret void
++}
+-- 
+2.20.1
+

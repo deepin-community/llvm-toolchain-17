@@ -1,0 +1,3342 @@
+From 3cfbf955ff5b4a50785d3e8e29abcb73fed7e747 Mon Sep 17 00:00:00 2001
+From: wanglei <wanglei@loongson.cn>
+Date: Mon, 11 Dec 2023 10:37:22 +0800
+Subject: [PATCH 32/42] [LoongArch] Add codegen support for
+ [X]VF{MSUB/NMADD/NMSUB}.{S/D} instructions (#74819)
+
+This is similar to single and double-precision floating-point
+instructions.
+
+(cherry picked from commit af999c4be9f5643724c6f379690ecee4346b2b48)
+
+Change-Id: I4b946a4a4e6e0869aec43e6b085025a06a11e012
+---
+ .../LoongArch/LoongArchLASXInstrInfo.td       |  26 +
+ .../Target/LoongArch/LoongArchLSXInstrInfo.td |  26 +
+ llvm/test/CodeGen/LoongArch/lasx/fma-v4f64.ll | 804 ++++++++++++++++++
+ llvm/test/CodeGen/LoongArch/lasx/fma-v8f32.ll | 804 ++++++++++++++++++
+ llvm/test/CodeGen/LoongArch/lsx/fma-v2f64.ll  | 804 ++++++++++++++++++
+ llvm/test/CodeGen/LoongArch/lsx/fma-v4f32.ll  | 804 ++++++++++++++++++
+ 6 files changed, 3268 insertions(+)
+ create mode 100644 llvm/test/CodeGen/LoongArch/lasx/fma-v4f64.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lasx/fma-v8f32.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lsx/fma-v2f64.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lsx/fma-v4f32.ll
+
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+index 8559baa0e525..ec6983d0f487 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+@@ -1455,6 +1455,32 @@ def : Pat<(fma v8f32:$xj, v8f32:$xk, v8f32:$xa),
+ def : Pat<(fma v4f64:$xj, v4f64:$xk, v4f64:$xa),
+           (XVFMADD_D v4f64:$xj, v4f64:$xk, v4f64:$xa)>;
+ 
++// XVFMSUB_{S/D}
++def : Pat<(fma v8f32:$xj, v8f32:$xk, (fneg v8f32:$xa)),
++          (XVFMSUB_S v8f32:$xj, v8f32:$xk, v8f32:$xa)>;
++def : Pat<(fma v4f64:$xj, v4f64:$xk, (fneg v4f64:$xa)),
++          (XVFMSUB_D v4f64:$xj, v4f64:$xk, v4f64:$xa)>;
++
++// XVFNMADD_{S/D}
++def : Pat<(fneg (fma v8f32:$xj, v8f32:$xk, v8f32:$xa)),
++          (XVFNMADD_S v8f32:$xj, v8f32:$xk, v8f32:$xa)>;
++def : Pat<(fneg (fma v4f64:$xj, v4f64:$xk, v4f64:$xa)),
++          (XVFNMADD_D v4f64:$xj, v4f64:$xk, v4f64:$xa)>;
++def : Pat<(fma_nsz (fneg v8f32:$xj), v8f32:$xk, (fneg v8f32:$xa)),
++          (XVFNMADD_S v8f32:$xj, v8f32:$xk, v8f32:$xa)>;
++def : Pat<(fma_nsz (fneg v4f64:$xj), v4f64:$xk, (fneg v4f64:$xa)),
++          (XVFNMADD_D v4f64:$xj, v4f64:$xk, v4f64:$xa)>;
++
++// XVFNMSUB_{S/D}
++def : Pat<(fneg (fma v8f32:$xj, v8f32:$xk, (fneg v8f32:$xa))),
++          (XVFNMSUB_S v8f32:$xj, v8f32:$xk, v8f32:$xa)>;
++def : Pat<(fneg (fma v4f64:$xj, v4f64:$xk, (fneg v4f64:$xa))),
++          (XVFNMSUB_D v4f64:$xj, v4f64:$xk, v4f64:$xa)>;
++def : Pat<(fma_nsz (fneg v8f32:$xj), v8f32:$xk, v8f32:$xa),
++          (XVFNMSUB_S v8f32:$xj, v8f32:$xk, v8f32:$xa)>;
++def : Pat<(fma_nsz (fneg v4f64:$xj), v4f64:$xk, v4f64:$xa),
++          (XVFNMSUB_D v4f64:$xj, v4f64:$xk, v4f64:$xa)>;
++
+ // XVFSQRT_{S/D}
+ defm : PatXrF<fsqrt, "XVFSQRT">;
+ 
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+index 5947f241bb59..e468176885d7 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+@@ -1555,6 +1555,32 @@ def : Pat<(fma v4f32:$vj, v4f32:$vk, v4f32:$va),
+ def : Pat<(fma v2f64:$vj, v2f64:$vk, v2f64:$va),
+           (VFMADD_D v2f64:$vj, v2f64:$vk, v2f64:$va)>;
+ 
++// VFMSUB_{S/D}
++def : Pat<(fma v4f32:$vj, v4f32:$vk, (fneg v4f32:$va)),
++          (VFMSUB_S v4f32:$vj, v4f32:$vk, v4f32:$va)>;
++def : Pat<(fma v2f64:$vj, v2f64:$vk, (fneg v2f64:$va)),
++          (VFMSUB_D v2f64:$vj, v2f64:$vk, v2f64:$va)>;
++
++// VFNMADD_{S/D}
++def : Pat<(fneg (fma v4f32:$vj, v4f32:$vk, v4f32:$va)),
++          (VFNMADD_S v4f32:$vj, v4f32:$vk, v4f32:$va)>;
++def : Pat<(fneg (fma v2f64:$vj, v2f64:$vk, v2f64:$va)),
++          (VFNMADD_D v2f64:$vj, v2f64:$vk, v2f64:$va)>;
++def : Pat<(fma_nsz (fneg v4f32:$vj), v4f32:$vk, (fneg v4f32:$va)),
++          (VFNMADD_S v4f32:$vj, v4f32:$vk, v4f32:$va)>;
++def : Pat<(fma_nsz (fneg v2f64:$vj), v2f64:$vk, (fneg v2f64:$va)),
++          (VFNMADD_D v2f64:$vj, v2f64:$vk, v2f64:$va)>;
++
++// VFNMSUB_{S/D}
++def : Pat<(fneg (fma v4f32:$vj, v4f32:$vk, (fneg v4f32:$va))),
++          (VFNMSUB_S v4f32:$vj, v4f32:$vk, v4f32:$va)>;
++def : Pat<(fneg (fma v2f64:$vj, v2f64:$vk, (fneg v2f64:$va))),
++          (VFNMSUB_D v2f64:$vj, v2f64:$vk, v2f64:$va)>;
++def : Pat<(fma_nsz (fneg v4f32:$vj), v4f32:$vk, v4f32:$va),
++          (VFNMSUB_S v4f32:$vj, v4f32:$vk, v4f32:$va)>;
++def : Pat<(fma_nsz (fneg v2f64:$vj), v2f64:$vk, v2f64:$va),
++          (VFNMSUB_D v2f64:$vj, v2f64:$vk, v2f64:$va)>;
++
+ // VFSQRT_{S/D}
+ defm : PatVrF<fsqrt, "VFSQRT">;
+ 
+diff --git a/llvm/test/CodeGen/LoongArch/lasx/fma-v4f64.ll b/llvm/test/CodeGen/LoongArch/lasx/fma-v4f64.ll
+new file mode 100644
+index 000000000000..af18c52b096c
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lasx/fma-v4f64.ll
+@@ -0,0 +1,804 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py
++; RUN: llc --mtriple=loongarch64 --mattr=+lasx --fp-contract=fast < %s \
++; RUN:   | FileCheck %s --check-prefix=CONTRACT-FAST
++; RUN: llc --mtriple=loongarch64 --mattr=+lasx --fp-contract=on < %s \
++; RUN:   | FileCheck %s --check-prefix=CONTRACT-ON
++; RUN: llc --mtriple=loongarch64 --mattr=+lasx --fp-contract=off < %s \
++; RUN:   | FileCheck %s --check-prefix=CONTRACT-OFF
++
++define void @xvfmadd_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfmadd_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfmadd_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmul.d $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-ON-NEXT:    xvfadd.d $xr0, $xr0, $xr1
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfmadd_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmul.d $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-OFF-NEXT:    xvfadd.d $xr0, $xr0, $xr1
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %mul = fmul<4 x double> %v0, %v1
++  %add = fadd<4 x double> %mul, %v2
++  store <4 x double> %add, ptr %res
++  ret void
++}
++
++define void @xvfmsub_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfmsub_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfmsub_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmul.d $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-ON-NEXT:    xvfsub.d $xr0, $xr0, $xr1
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfmsub_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmul.d $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-OFF-NEXT:    xvfsub.d $xr0, $xr0, $xr1
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %mul = fmul<4 x double> %v0, %v1
++  %sub = fsub<4 x double> %mul, %v2
++  store <4 x double> %sub, ptr %res
++  ret void
++}
++
++define void @xvfnmadd_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfnmadd_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfnmadd_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmul.d $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-ON-NEXT:    xvfadd.d $xr0, $xr0, $xr1
++; CONTRACT-ON-NEXT:    xvbitrevi.d $xr0, $xr0, 63
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfnmadd_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmul.d $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-OFF-NEXT:    xvfadd.d $xr0, $xr0, $xr1
++; CONTRACT-OFF-NEXT:    xvbitrevi.d $xr0, $xr0, 63
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %mul = fmul<4 x double> %v0, %v1
++  %add = fadd<4 x double> %mul, %v2
++  %negadd = fneg<4 x double> %add
++  store <4 x double> %negadd, ptr %res
++  ret void
++}
++
++define void @xvfnmadd_d_nsz(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfnmadd_d_nsz:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfnmadd_d_nsz:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-ON-NEXT:    xvbitrevi.d $xr1, $xr1, 63
++; CONTRACT-ON-NEXT:    xvfmul.d $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-ON-NEXT:    xvfsub.d $xr0, $xr0, $xr1
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfnmadd_d_nsz:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-OFF-NEXT:    xvbitrevi.d $xr1, $xr1, 63
++; CONTRACT-OFF-NEXT:    xvfmul.d $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-OFF-NEXT:    xvfsub.d $xr0, $xr0, $xr1
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %negv0 = fneg nsz<4 x double> %v0
++  %negv2 = fneg nsz<4 x double> %v2
++  %mul = fmul nsz<4 x double> %negv0, %v1
++  %add = fadd nsz<4 x double> %mul, %negv2
++  store <4 x double> %add, ptr %res
++  ret void
++}
++
++;; Check that xvfnmadd.d is not emitted.
++define void @not_xvfnmadd_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: not_xvfnmadd_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvbitrevi.d $xr2, $xr2, 63
++; CONTRACT-FAST-NEXT:    xvfmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: not_xvfnmadd_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-ON-NEXT:    xvbitrevi.d $xr1, $xr1, 63
++; CONTRACT-ON-NEXT:    xvfmul.d $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-ON-NEXT:    xvfsub.d $xr0, $xr0, $xr1
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: not_xvfnmadd_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-OFF-NEXT:    xvbitrevi.d $xr1, $xr1, 63
++; CONTRACT-OFF-NEXT:    xvfmul.d $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-OFF-NEXT:    xvfsub.d $xr0, $xr0, $xr1
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %negv0 = fneg<4 x double> %v0
++  %negv2 = fneg<4 x double> %v2
++  %mul = fmul<4 x double> %negv0, %v1
++  %add = fadd<4 x double> %mul, %negv2
++  store <4 x double> %add, ptr %res
++  ret void
++}
++
++define void @xvfnmsub_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfnmsub_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfnmsub_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmul.d $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-ON-NEXT:    xvfsub.d $xr0, $xr0, $xr1
++; CONTRACT-ON-NEXT:    xvbitrevi.d $xr0, $xr0, 63
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfnmsub_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmul.d $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-OFF-NEXT:    xvfsub.d $xr0, $xr0, $xr1
++; CONTRACT-OFF-NEXT:    xvbitrevi.d $xr0, $xr0, 63
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %negv2 = fneg<4 x double> %v2
++  %mul = fmul<4 x double> %v0, %v1
++  %add = fadd<4 x double> %mul, %negv2
++  %neg = fneg<4 x double> %add
++  store <4 x double> %neg, ptr %res
++  ret void
++}
++
++define void @xvfnmsub_d_nsz(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfnmsub_d_nsz:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfnmsub_d_nsz:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmul.d $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-ON-NEXT:    xvfsub.d $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfnmsub_d_nsz:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmul.d $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-OFF-NEXT:    xvfsub.d $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %negv0 = fneg nsz<4 x double> %v0
++  %mul = fmul nsz<4 x double> %negv0, %v1
++  %add = fadd nsz<4 x double> %mul, %v2
++  store <4 x double> %add, ptr %res
++  ret void
++}
++
++;; Check that xvfnmsub.d is not emitted.
++define void @not_xvfnmsub_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: not_xvfnmsub_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvbitrevi.d $xr2, $xr2, 63
++; CONTRACT-FAST-NEXT:    xvfmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: not_xvfnmsub_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmul.d $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-ON-NEXT:    xvfsub.d $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: not_xvfnmsub_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmul.d $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-OFF-NEXT:    xvfsub.d $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %negv0 = fneg<4 x double> %v0
++  %mul = fmul<4 x double> %negv0, %v1
++  %add = fadd<4 x double> %mul, %v2
++  store <4 x double> %add, ptr %res
++  ret void
++}
++
++define void @contract_xvfmadd_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_xvfmadd_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_xvfmadd_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_xvfmadd_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %mul = fmul contract <4 x double> %v0, %v1
++  %add = fadd contract <4 x double> %mul, %v2
++  store <4 x double> %add, ptr %res
++  ret void
++}
++
++define void @contract_xvfmsub_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_xvfmsub_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_xvfmsub_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_xvfmsub_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %mul = fmul contract <4 x double> %v0, %v1
++  %sub = fsub contract <4 x double> %mul, %v2
++  store <4 x double> %sub, ptr %res
++  ret void
++}
++
++define void @contract_xvfnmadd_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_xvfnmadd_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_xvfnmadd_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfnmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_xvfnmadd_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfnmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %mul = fmul contract <4 x double> %v0, %v1
++  %add = fadd contract <4 x double> %mul, %v2
++  %negadd = fneg contract <4 x double> %add
++  store <4 x double> %negadd, ptr %res
++  ret void
++}
++
++define void @contract_xvfnmadd_d_nsz(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_xvfnmadd_d_nsz:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_xvfnmadd_d_nsz:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfnmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_xvfnmadd_d_nsz:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfnmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %negv0 = fneg contract nsz<4 x double> %v0
++  %negv2 = fneg contract nsz<4 x double> %v2
++  %mul = fmul contract nsz<4 x double> %negv0, %v1
++  %add = fadd contract nsz<4 x double> %mul, %negv2
++  store <4 x double> %add, ptr %res
++  ret void
++}
++
++;; Check that xvfnmadd.d is not emitted.
++define void @not_contract_xvfnmadd_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: not_contract_xvfnmadd_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvbitrevi.d $xr2, $xr2, 63
++; CONTRACT-FAST-NEXT:    xvfmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: not_contract_xvfnmadd_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvbitrevi.d $xr2, $xr2, 63
++; CONTRACT-ON-NEXT:    xvfmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: not_contract_xvfnmadd_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvbitrevi.d $xr2, $xr2, 63
++; CONTRACT-OFF-NEXT:    xvfmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %negv0 = fneg contract <4 x double> %v0
++  %negv2 = fneg contract <4 x double> %v2
++  %mul = fmul contract <4 x double> %negv0, %v1
++  %add = fadd contract <4 x double> %mul, %negv2
++  store <4 x double> %add, ptr %res
++  ret void
++}
++
++define void @contract_xvfnmsub_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_xvfnmsub_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_xvfnmsub_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfnmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_xvfnmsub_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfnmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %negv2 = fneg contract <4 x double> %v2
++  %mul = fmul contract <4 x double> %v0, %v1
++  %add = fadd contract <4 x double> %mul, %negv2
++  %neg = fneg contract <4 x double> %add
++  store <4 x double> %neg, ptr %res
++  ret void
++}
++
++define void @contract_xvfnmsub_d_nsz(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_xvfnmsub_d_nsz:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_xvfnmsub_d_nsz:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfnmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_xvfnmsub_d_nsz:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfnmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %negv0 = fneg contract nsz<4 x double> %v0
++  %mul = fmul contract nsz<4 x double> %negv0, %v1
++  %add = fadd contract nsz<4 x double> %mul, %v2
++  store <4 x double> %add, ptr %res
++  ret void
++}
++
++;; Check that xvfnmsub.d is not emitted.
++define void @not_contract_xvfnmsub_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: not_contract_xvfnmsub_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvbitrevi.d $xr2, $xr2, 63
++; CONTRACT-FAST-NEXT:    xvfmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: not_contract_xvfnmsub_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvbitrevi.d $xr2, $xr2, 63
++; CONTRACT-ON-NEXT:    xvfmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: not_contract_xvfnmsub_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvbitrevi.d $xr2, $xr2, 63
++; CONTRACT-OFF-NEXT:    xvfmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %negv0 = fneg contract <4 x double> %v0
++  %mul = fmul contract <4 x double> %negv0, %v1
++  %add = fadd contract <4 x double> %mul, %v2
++  store <4 x double> %add, ptr %res
++  ret void
++}
++
++define void @xvfmadd_d_contract(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfmadd_d_contract:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfmadd_d_contract:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfmadd_d_contract:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %mul = fmul contract <4 x double> %v0, %v1
++  %add = fadd contract <4 x double> %mul, %v2
++  store <4 x double> %add, ptr %res
++  ret void
++}
++
++define void @xvfmsub_d_contract(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfmsub_d_contract:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfmsub_d_contract:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfmsub_d_contract:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %mul = fmul contract <4 x double> %v0, %v1
++  %sub = fsub contract <4 x double> %mul, %v2
++  store <4 x double> %sub, ptr %res
++  ret void
++}
++
++define void @xvfnmadd_d_contract(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfnmadd_d_contract:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfnmadd_d_contract:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfnmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfnmadd_d_contract:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfnmadd.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %mul = fmul contract <4 x double> %v0, %v1
++  %add = fadd contract <4 x double> %mul, %v2
++  %negadd = fneg contract <4 x double> %add
++  store <4 x double> %negadd, ptr %res
++  ret void
++}
++
++define void @xvfnmsub_d_contract(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfnmsub_d_contract:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfnmsub_d_contract:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfnmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfnmsub_d_contract:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfnmsub.d $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x double>, ptr %a0
++  %v1 = load <4 x double>, ptr %a1
++  %v2 = load <4 x double>, ptr %a2
++  %mul = fmul contract <4 x double> %v0, %v1
++  %negv2 = fneg contract <4 x double> %v2
++  %add = fadd contract <4 x double> %negv2, %mul
++  %negadd = fneg contract <4 x double> %add
++  store <4 x double> %negadd, ptr %res
++  ret void
++}
+diff --git a/llvm/test/CodeGen/LoongArch/lasx/fma-v8f32.ll b/llvm/test/CodeGen/LoongArch/lasx/fma-v8f32.ll
+new file mode 100644
+index 000000000000..b7b3cb3a2e66
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lasx/fma-v8f32.ll
+@@ -0,0 +1,804 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py
++; RUN: llc --mtriple=loongarch64 --mattr=+lasx --fp-contract=fast < %s \
++; RUN:   | FileCheck %s --check-prefix=CONTRACT-FAST
++; RUN: llc --mtriple=loongarch64 --mattr=+lasx --fp-contract=on < %s \
++; RUN:   | FileCheck %s --check-prefix=CONTRACT-ON
++; RUN: llc --mtriple=loongarch64 --mattr=+lasx --fp-contract=off < %s \
++; RUN:   | FileCheck %s --check-prefix=CONTRACT-OFF
++
++define void @xvfmadd_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfmadd_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfmadd_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmul.s $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-ON-NEXT:    xvfadd.s $xr0, $xr0, $xr1
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfmadd_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmul.s $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-OFF-NEXT:    xvfadd.s $xr0, $xr0, $xr1
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %mul = fmul<8 x float> %v0, %v1
++  %add = fadd<8 x float> %mul, %v2
++  store <8 x float> %add, ptr %res
++  ret void
++}
++
++define void @xvfmsub_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfmsub_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfmsub_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmul.s $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-ON-NEXT:    xvfsub.s $xr0, $xr0, $xr1
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfmsub_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmul.s $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-OFF-NEXT:    xvfsub.s $xr0, $xr0, $xr1
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %mul = fmul<8 x float> %v0, %v1
++  %sub = fsub<8 x float> %mul, %v2
++  store <8 x float> %sub, ptr %res
++  ret void
++}
++
++define void @xvfnmadd_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfnmadd_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfnmadd_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmul.s $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-ON-NEXT:    xvfadd.s $xr0, $xr0, $xr1
++; CONTRACT-ON-NEXT:    xvbitrevi.w $xr0, $xr0, 31
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfnmadd_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmul.s $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-OFF-NEXT:    xvfadd.s $xr0, $xr0, $xr1
++; CONTRACT-OFF-NEXT:    xvbitrevi.w $xr0, $xr0, 31
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %mul = fmul<8 x float> %v0, %v1
++  %add = fadd<8 x float> %mul, %v2
++  %negadd = fneg<8 x float> %add
++  store <8 x float> %negadd, ptr %res
++  ret void
++}
++
++define void @xvfnmadd_s_nsz(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfnmadd_s_nsz:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfnmadd_s_nsz:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-ON-NEXT:    xvbitrevi.w $xr1, $xr1, 31
++; CONTRACT-ON-NEXT:    xvfmul.s $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-ON-NEXT:    xvfsub.s $xr0, $xr0, $xr1
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfnmadd_s_nsz:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-OFF-NEXT:    xvbitrevi.w $xr1, $xr1, 31
++; CONTRACT-OFF-NEXT:    xvfmul.s $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-OFF-NEXT:    xvfsub.s $xr0, $xr0, $xr1
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %negv0 = fneg nsz<8 x float> %v0
++  %negv2 = fneg nsz<8 x float> %v2
++  %mul = fmul nsz<8 x float> %negv0, %v1
++  %add = fadd nsz<8 x float> %mul, %negv2
++  store <8 x float> %add, ptr %res
++  ret void
++}
++
++;; Check that fnmadd.s is not emitted.
++define void @not_xvfnmadd_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: not_xvfnmadd_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvbitrevi.w $xr2, $xr2, 31
++; CONTRACT-FAST-NEXT:    xvfmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: not_xvfnmadd_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-ON-NEXT:    xvbitrevi.w $xr1, $xr1, 31
++; CONTRACT-ON-NEXT:    xvfmul.s $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-ON-NEXT:    xvfsub.s $xr0, $xr0, $xr1
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: not_xvfnmadd_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-OFF-NEXT:    xvbitrevi.w $xr1, $xr1, 31
++; CONTRACT-OFF-NEXT:    xvfmul.s $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-OFF-NEXT:    xvfsub.s $xr0, $xr0, $xr1
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %negv0 = fneg<8 x float> %v0
++  %negv2 = fneg<8 x float> %v2
++  %mul = fmul<8 x float> %negv0, %v1
++  %add = fadd<8 x float> %mul, %negv2
++  store <8 x float> %add, ptr %res
++  ret void
++}
++
++define void @xvfnmsub_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfnmsub_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfnmsub_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmul.s $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-ON-NEXT:    xvfsub.s $xr0, $xr0, $xr1
++; CONTRACT-ON-NEXT:    xvbitrevi.w $xr0, $xr0, 31
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfnmsub_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmul.s $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-OFF-NEXT:    xvfsub.s $xr0, $xr0, $xr1
++; CONTRACT-OFF-NEXT:    xvbitrevi.w $xr0, $xr0, 31
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %negv2 = fneg<8 x float> %v2
++  %mul = fmul<8 x float> %v0, %v1
++  %add = fadd<8 x float> %mul, %negv2
++  %neg = fneg<8 x float> %add
++  store <8 x float> %neg, ptr %res
++  ret void
++}
++
++define void @xvfnmsub_s_nsz(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfnmsub_s_nsz:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfnmsub_s_nsz:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmul.s $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-ON-NEXT:    xvfsub.s $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfnmsub_s_nsz:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmul.s $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-OFF-NEXT:    xvfsub.s $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %negv0 = fneg nsz<8 x float> %v0
++  %mul = fmul nsz<8 x float> %negv0, %v1
++  %add = fadd nsz<8 x float> %mul, %v2
++  store <8 x float> %add, ptr %res
++  ret void
++}
++
++;; Check that fnmsub.s is not emitted.
++define void @not_xvfnmsub_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: not_xvfnmsub_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvbitrevi.w $xr2, $xr2, 31
++; CONTRACT-FAST-NEXT:    xvfmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: not_xvfnmsub_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmul.s $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-ON-NEXT:    xvfsub.s $xr0, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: not_xvfnmsub_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmul.s $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a3, 0
++; CONTRACT-OFF-NEXT:    xvfsub.s $xr0, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %negv0 = fneg<8 x float> %v0
++  %mul = fmul<8 x float> %negv0, %v1
++  %add = fadd<8 x float> %mul, %v2
++  store <8 x float> %add, ptr %res
++  ret void
++}
++
++define void @contract_xvfmadd_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_xvfmadd_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_xvfmadd_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_xvfmadd_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %mul = fmul contract <8 x float> %v0, %v1
++  %add = fadd contract <8 x float> %mul, %v2
++  store <8 x float> %add, ptr %res
++  ret void
++}
++
++define void @contract_xvfmsub_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_xvfmsub_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_xvfmsub_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_xvfmsub_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %mul = fmul contract <8 x float> %v0, %v1
++  %sub = fsub contract <8 x float> %mul, %v2
++  store <8 x float> %sub, ptr %res
++  ret void
++}
++
++define void @contract_xvfnmadd_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_xvfnmadd_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_xvfnmadd_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfnmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_xvfnmadd_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfnmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %mul = fmul contract <8 x float> %v0, %v1
++  %add = fadd contract <8 x float> %mul, %v2
++  %negadd = fneg contract <8 x float> %add
++  store <8 x float> %negadd, ptr %res
++  ret void
++}
++
++define void @contract_xvfnmadd_s_nsz(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_xvfnmadd_s_nsz:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_xvfnmadd_s_nsz:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfnmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_xvfnmadd_s_nsz:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfnmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %negv0 = fneg contract nsz<8 x float> %v0
++  %negv2 = fneg contract nsz<8 x float> %v2
++  %mul = fmul contract nsz<8 x float> %negv0, %v1
++  %add = fadd contract nsz<8 x float> %mul, %negv2
++  store <8 x float> %add, ptr %res
++  ret void
++}
++
++;; Check that fnmadd.s is not emitted.
++define void @not_contract_xvfnmadd_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: not_contract_xvfnmadd_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvbitrevi.w $xr2, $xr2, 31
++; CONTRACT-FAST-NEXT:    xvfmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: not_contract_xvfnmadd_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvbitrevi.w $xr2, $xr2, 31
++; CONTRACT-ON-NEXT:    xvfmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: not_contract_xvfnmadd_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvbitrevi.w $xr2, $xr2, 31
++; CONTRACT-OFF-NEXT:    xvfmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %negv0 = fneg contract <8 x float> %v0
++  %negv2 = fneg contract <8 x float> %v2
++  %mul = fmul contract <8 x float> %negv0, %v1
++  %add = fadd contract <8 x float> %mul, %negv2
++  store <8 x float> %add, ptr %res
++  ret void
++}
++
++define void @contract_xvfnmsub_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_xvfnmsub_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_xvfnmsub_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfnmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_xvfnmsub_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfnmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %negv2 = fneg contract <8 x float> %v2
++  %mul = fmul contract <8 x float> %v0, %v1
++  %add = fadd contract <8 x float> %mul, %negv2
++  %neg = fneg contract <8 x float> %add
++  store <8 x float> %neg, ptr %res
++  ret void
++}
++
++define void @contract_xvfnmsub_s_nsz(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_xvfnmsub_s_nsz:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_xvfnmsub_s_nsz:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfnmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_xvfnmsub_s_nsz:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfnmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %negv0 = fneg contract nsz<8 x float> %v0
++  %mul = fmul contract nsz<8 x float> %negv0, %v1
++  %add = fadd contract nsz<8 x float> %mul, %v2
++  store <8 x float> %add, ptr %res
++  ret void
++}
++
++;; Check that fnmsub.s is not emitted.
++define void @not_contract_xvfnmsub_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: not_contract_xvfnmsub_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvbitrevi.w $xr2, $xr2, 31
++; CONTRACT-FAST-NEXT:    xvfmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: not_contract_xvfnmsub_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvbitrevi.w $xr2, $xr2, 31
++; CONTRACT-ON-NEXT:    xvfmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: not_contract_xvfnmsub_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvbitrevi.w $xr2, $xr2, 31
++; CONTRACT-OFF-NEXT:    xvfmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %negv0 = fneg contract <8 x float> %v0
++  %mul = fmul contract <8 x float> %negv0, %v1
++  %add = fadd contract <8 x float> %mul, %v2
++  store <8 x float> %add, ptr %res
++  ret void
++}
++
++define void @xvfmadd_s_contract(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfmadd_s_contract:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfmadd_s_contract:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfmadd_s_contract:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %mul = fmul contract <8 x float> %v0, %v1
++  %add = fadd contract <8 x float> %mul, %v2
++  store <8 x float> %add, ptr %res
++  ret void
++}
++
++define void @xvfmsub_s_contract(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfmsub_s_contract:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfmsub_s_contract:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfmsub_s_contract:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %mul = fmul contract <8 x float> %v0, %v1
++  %sub = fsub contract <8 x float> %mul, %v2
++  store <8 x float> %sub, ptr %res
++  ret void
++}
++
++define void @xvfnmadd_s_contract(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfnmadd_s_contract:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfnmadd_s_contract:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfnmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfnmadd_s_contract:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfnmadd.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %mul = fmul contract <8 x float> %v0, %v1
++  %add = fadd contract <8 x float> %mul, %v2
++  %negadd = fneg contract <8 x float> %add
++  store <8 x float> %negadd, ptr %res
++  ret void
++}
++
++define void @xvfnmsub_s_contract(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: xvfnmsub_s_contract:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-FAST-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-FAST-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-FAST-NEXT:    xvfnmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-FAST-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: xvfnmsub_s_contract:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-ON-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-ON-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-ON-NEXT:    xvfnmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-ON-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: xvfnmsub_s_contract:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    xvld $xr0, $a3, 0
++; CONTRACT-OFF-NEXT:    xvld $xr1, $a2, 0
++; CONTRACT-OFF-NEXT:    xvld $xr2, $a1, 0
++; CONTRACT-OFF-NEXT:    xvfnmsub.s $xr0, $xr2, $xr1, $xr0
++; CONTRACT-OFF-NEXT:    xvst $xr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <8 x float>, ptr %a0
++  %v1 = load <8 x float>, ptr %a1
++  %v2 = load <8 x float>, ptr %a2
++  %mul = fmul contract <8 x float> %v0, %v1
++  %negv2 = fneg contract <8 x float> %v2
++  %add = fadd contract <8 x float> %negv2, %mul
++  %negadd = fneg contract <8 x float> %add
++  store <8 x float> %negadd, ptr %res
++  ret void
++}
+diff --git a/llvm/test/CodeGen/LoongArch/lsx/fma-v2f64.ll b/llvm/test/CodeGen/LoongArch/lsx/fma-v2f64.ll
+new file mode 100644
+index 000000000000..8e0459b4afab
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lsx/fma-v2f64.ll
+@@ -0,0 +1,804 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py
++; RUN: llc --mtriple=loongarch64 --mattr=+lsx --fp-contract=fast < %s \
++; RUN:   | FileCheck %s --check-prefix=CONTRACT-FAST
++; RUN: llc --mtriple=loongarch64 --mattr=+lsx --fp-contract=on < %s \
++; RUN:   | FileCheck %s --check-prefix=CONTRACT-ON
++; RUN: llc --mtriple=loongarch64 --mattr=+lsx --fp-contract=off < %s \
++; RUN:   | FileCheck %s --check-prefix=CONTRACT-OFF
++
++define void @vfmadd_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfmadd_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfmadd_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-ON-NEXT:    vfmul.d $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-ON-NEXT:    vfadd.d $vr0, $vr0, $vr1
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfmadd_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmul.d $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-OFF-NEXT:    vfadd.d $vr0, $vr0, $vr1
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %mul = fmul<2 x double> %v0, %v1
++  %add = fadd<2 x double> %mul, %v2
++  store <2 x double> %add, ptr %res
++  ret void
++}
++
++define void @vfmsub_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfmsub_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfmsub_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-ON-NEXT:    vfmul.d $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-ON-NEXT:    vfsub.d $vr0, $vr0, $vr1
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfmsub_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmul.d $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-OFF-NEXT:    vfsub.d $vr0, $vr0, $vr1
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %mul = fmul<2 x double> %v0, %v1
++  %sub = fsub<2 x double> %mul, %v2
++  store <2 x double> %sub, ptr %res
++  ret void
++}
++
++define void @vfnmadd_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfnmadd_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfnmadd_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-ON-NEXT:    vfmul.d $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-ON-NEXT:    vfadd.d $vr0, $vr0, $vr1
++; CONTRACT-ON-NEXT:    vbitrevi.d $vr0, $vr0, 63
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfnmadd_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmul.d $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-OFF-NEXT:    vfadd.d $vr0, $vr0, $vr1
++; CONTRACT-OFF-NEXT:    vbitrevi.d $vr0, $vr0, 63
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %mul = fmul<2 x double> %v0, %v1
++  %add = fadd<2 x double> %mul, %v2
++  %negadd = fneg<2 x double> %add
++  store <2 x double> %negadd, ptr %res
++  ret void
++}
++
++define void @vfnmadd_d_nsz(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfnmadd_d_nsz:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfnmadd_d_nsz:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-ON-NEXT:    vbitrevi.d $vr1, $vr1, 63
++; CONTRACT-ON-NEXT:    vfmul.d $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-ON-NEXT:    vfsub.d $vr0, $vr0, $vr1
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfnmadd_d_nsz:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-OFF-NEXT:    vbitrevi.d $vr1, $vr1, 63
++; CONTRACT-OFF-NEXT:    vfmul.d $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-OFF-NEXT:    vfsub.d $vr0, $vr0, $vr1
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %negv0 = fneg nsz<2 x double> %v0
++  %negv2 = fneg nsz<2 x double> %v2
++  %mul = fmul nsz<2 x double> %negv0, %v1
++  %add = fadd nsz<2 x double> %mul, %negv2
++  store <2 x double> %add, ptr %res
++  ret void
++}
++
++;; Check that vfnmadd.d is not emitted.
++define void @not_vfnmadd_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: not_vfnmadd_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vbitrevi.d $vr2, $vr2, 63
++; CONTRACT-FAST-NEXT:    vfmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: not_vfnmadd_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-ON-NEXT:    vbitrevi.d $vr1, $vr1, 63
++; CONTRACT-ON-NEXT:    vfmul.d $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-ON-NEXT:    vfsub.d $vr0, $vr0, $vr1
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: not_vfnmadd_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-OFF-NEXT:    vbitrevi.d $vr1, $vr1, 63
++; CONTRACT-OFF-NEXT:    vfmul.d $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-OFF-NEXT:    vfsub.d $vr0, $vr0, $vr1
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %negv0 = fneg<2 x double> %v0
++  %negv2 = fneg<2 x double> %v2
++  %mul = fmul<2 x double> %negv0, %v1
++  %add = fadd<2 x double> %mul, %negv2
++  store <2 x double> %add, ptr %res
++  ret void
++}
++
++define void @vfnmsub_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfnmsub_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfnmsub_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-ON-NEXT:    vfmul.d $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-ON-NEXT:    vfsub.d $vr0, $vr0, $vr1
++; CONTRACT-ON-NEXT:    vbitrevi.d $vr0, $vr0, 63
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfnmsub_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmul.d $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-OFF-NEXT:    vfsub.d $vr0, $vr0, $vr1
++; CONTRACT-OFF-NEXT:    vbitrevi.d $vr0, $vr0, 63
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %negv2 = fneg<2 x double> %v2
++  %mul = fmul<2 x double> %v0, %v1
++  %add = fadd<2 x double> %mul, %negv2
++  %neg = fneg<2 x double> %add
++  store <2 x double> %neg, ptr %res
++  ret void
++}
++
++define void @vfnmsub_d_nsz(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfnmsub_d_nsz:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfnmsub_d_nsz:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-ON-NEXT:    vfmul.d $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-ON-NEXT:    vfsub.d $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfnmsub_d_nsz:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmul.d $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-OFF-NEXT:    vfsub.d $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %negv0 = fneg nsz<2 x double> %v0
++  %mul = fmul nsz<2 x double> %negv0, %v1
++  %add = fadd nsz<2 x double> %mul, %v2
++  store <2 x double> %add, ptr %res
++  ret void
++}
++
++;; Check that vfnmsub.d is not emitted.
++define void @not_vfnmsub_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: not_vfnmsub_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vbitrevi.d $vr2, $vr2, 63
++; CONTRACT-FAST-NEXT:    vfmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: not_vfnmsub_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-ON-NEXT:    vfmul.d $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-ON-NEXT:    vfsub.d $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: not_vfnmsub_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmul.d $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-OFF-NEXT:    vfsub.d $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %negv0 = fneg<2 x double> %v0
++  %mul = fmul<2 x double> %negv0, %v1
++  %add = fadd<2 x double> %mul, %v2
++  store <2 x double> %add, ptr %res
++  ret void
++}
++
++define void @contract_vfmadd_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_vfmadd_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_vfmadd_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_vfmadd_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %mul = fmul contract <2 x double> %v0, %v1
++  %add = fadd contract <2 x double> %mul, %v2
++  store <2 x double> %add, ptr %res
++  ret void
++}
++
++define void @contract_vfmsub_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_vfmsub_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_vfmsub_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_vfmsub_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %mul = fmul contract <2 x double> %v0, %v1
++  %sub = fsub contract <2 x double> %mul, %v2
++  store <2 x double> %sub, ptr %res
++  ret void
++}
++
++define void @contract_vfnmadd_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_vfnmadd_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_vfnmadd_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfnmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_vfnmadd_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfnmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %mul = fmul contract <2 x double> %v0, %v1
++  %add = fadd contract <2 x double> %mul, %v2
++  %negadd = fneg contract <2 x double> %add
++  store <2 x double> %negadd, ptr %res
++  ret void
++}
++
++define void @contract_vfnmadd_d_nsz(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_vfnmadd_d_nsz:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_vfnmadd_d_nsz:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfnmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_vfnmadd_d_nsz:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfnmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %negv0 = fneg contract nsz<2 x double> %v0
++  %negv2 = fneg contract nsz<2 x double> %v2
++  %mul = fmul contract nsz<2 x double> %negv0, %v1
++  %add = fadd contract nsz<2 x double> %mul, %negv2
++  store <2 x double> %add, ptr %res
++  ret void
++}
++
++;; Check that vfnmadd.d is not emitted.
++define void @not_contract_vfnmadd_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: not_contract_vfnmadd_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vbitrevi.d $vr2, $vr2, 63
++; CONTRACT-FAST-NEXT:    vfmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: not_contract_vfnmadd_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vbitrevi.d $vr2, $vr2, 63
++; CONTRACT-ON-NEXT:    vfmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: not_contract_vfnmadd_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vbitrevi.d $vr2, $vr2, 63
++; CONTRACT-OFF-NEXT:    vfmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %negv0 = fneg contract <2 x double> %v0
++  %negv2 = fneg contract <2 x double> %v2
++  %mul = fmul contract <2 x double> %negv0, %v1
++  %add = fadd contract <2 x double> %mul, %negv2
++  store <2 x double> %add, ptr %res
++  ret void
++}
++
++define void @contract_vfnmsub_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_vfnmsub_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_vfnmsub_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfnmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_vfnmsub_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfnmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %negv2 = fneg contract <2 x double> %v2
++  %mul = fmul contract <2 x double> %v0, %v1
++  %add = fadd contract <2 x double> %mul, %negv2
++  %neg = fneg contract <2 x double> %add
++  store <2 x double> %neg, ptr %res
++  ret void
++}
++
++define void @contract_vfnmsub_d_nsz(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_vfnmsub_d_nsz:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_vfnmsub_d_nsz:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfnmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_vfnmsub_d_nsz:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfnmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %negv0 = fneg contract nsz<2 x double> %v0
++  %mul = fmul contract nsz<2 x double> %negv0, %v1
++  %add = fadd contract nsz<2 x double> %mul, %v2
++  store <2 x double> %add, ptr %res
++  ret void
++}
++
++;; Check that vfnmsub.d is not emitted.
++define void @not_contract_vfnmsub_d(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: not_contract_vfnmsub_d:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vbitrevi.d $vr2, $vr2, 63
++; CONTRACT-FAST-NEXT:    vfmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: not_contract_vfnmsub_d:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vbitrevi.d $vr2, $vr2, 63
++; CONTRACT-ON-NEXT:    vfmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: not_contract_vfnmsub_d:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vbitrevi.d $vr2, $vr2, 63
++; CONTRACT-OFF-NEXT:    vfmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %negv0 = fneg contract <2 x double> %v0
++  %mul = fmul contract <2 x double> %negv0, %v1
++  %add = fadd contract <2 x double> %mul, %v2
++  store <2 x double> %add, ptr %res
++  ret void
++}
++
++define void @vfmadd_d_contract(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfmadd_d_contract:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfmadd_d_contract:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfmadd_d_contract:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %mul = fmul contract <2 x double> %v0, %v1
++  %add = fadd contract <2 x double> %mul, %v2
++  store <2 x double> %add, ptr %res
++  ret void
++}
++
++define void @vfmsub_d_contract(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfmsub_d_contract:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfmsub_d_contract:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfmsub_d_contract:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %mul = fmul contract <2 x double> %v0, %v1
++  %sub = fsub contract <2 x double> %mul, %v2
++  store <2 x double> %sub, ptr %res
++  ret void
++}
++
++define void @vfnmadd_d_contract(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfnmadd_d_contract:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfnmadd_d_contract:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfnmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfnmadd_d_contract:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfnmadd.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %mul = fmul contract <2 x double> %v0, %v1
++  %add = fadd contract <2 x double> %mul, %v2
++  %negadd = fneg contract <2 x double> %add
++  store <2 x double> %negadd, ptr %res
++  ret void
++}
++
++define void @vfnmsub_d_contract(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfnmsub_d_contract:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfnmsub_d_contract:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfnmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfnmsub_d_contract:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfnmsub.d $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <2 x double>, ptr %a0
++  %v1 = load <2 x double>, ptr %a1
++  %v2 = load <2 x double>, ptr %a2
++  %mul = fmul contract <2 x double> %v0, %v1
++  %negv2 = fneg contract <2 x double> %v2
++  %add = fadd contract <2 x double> %negv2, %mul
++  %negadd = fneg contract <2 x double> %add
++  store <2 x double> %negadd, ptr %res
++  ret void
++}
+diff --git a/llvm/test/CodeGen/LoongArch/lsx/fma-v4f32.ll b/llvm/test/CodeGen/LoongArch/lsx/fma-v4f32.ll
+new file mode 100644
+index 000000000000..7efbd61c0c4f
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lsx/fma-v4f32.ll
+@@ -0,0 +1,804 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py
++; RUN: llc --mtriple=loongarch64 --mattr=+lsx --fp-contract=fast < %s \
++; RUN:   | FileCheck %s --check-prefix=CONTRACT-FAST
++; RUN: llc --mtriple=loongarch64 --mattr=+lsx --fp-contract=on < %s \
++; RUN:   | FileCheck %s --check-prefix=CONTRACT-ON
++; RUN: llc --mtriple=loongarch64 --mattr=+lsx --fp-contract=off < %s \
++; RUN:   | FileCheck %s --check-prefix=CONTRACT-OFF
++
++define void @vfmadd_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfmadd_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfmadd_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-ON-NEXT:    vfmul.s $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-ON-NEXT:    vfadd.s $vr0, $vr0, $vr1
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfmadd_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmul.s $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-OFF-NEXT:    vfadd.s $vr0, $vr0, $vr1
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %mul = fmul<4 x float> %v0, %v1
++  %add = fadd<4 x float> %mul, %v2
++  store <4 x float> %add, ptr %res
++  ret void
++}
++
++define void @vfmsub_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfmsub_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfmsub_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-ON-NEXT:    vfmul.s $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-ON-NEXT:    vfsub.s $vr0, $vr0, $vr1
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfmsub_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmul.s $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-OFF-NEXT:    vfsub.s $vr0, $vr0, $vr1
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %mul = fmul<4 x float> %v0, %v1
++  %sub = fsub<4 x float> %mul, %v2
++  store <4 x float> %sub, ptr %res
++  ret void
++}
++
++define void @vfnmadd_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfnmadd_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfnmadd_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-ON-NEXT:    vfmul.s $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-ON-NEXT:    vfadd.s $vr0, $vr0, $vr1
++; CONTRACT-ON-NEXT:    vbitrevi.w $vr0, $vr0, 31
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfnmadd_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmul.s $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-OFF-NEXT:    vfadd.s $vr0, $vr0, $vr1
++; CONTRACT-OFF-NEXT:    vbitrevi.w $vr0, $vr0, 31
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %mul = fmul<4 x float> %v0, %v1
++  %add = fadd<4 x float> %mul, %v2
++  %negadd = fneg<4 x float> %add
++  store <4 x float> %negadd, ptr %res
++  ret void
++}
++
++define void @vfnmadd_s_nsz(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfnmadd_s_nsz:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfnmadd_s_nsz:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-ON-NEXT:    vbitrevi.w $vr1, $vr1, 31
++; CONTRACT-ON-NEXT:    vfmul.s $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-ON-NEXT:    vfsub.s $vr0, $vr0, $vr1
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfnmadd_s_nsz:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-OFF-NEXT:    vbitrevi.w $vr1, $vr1, 31
++; CONTRACT-OFF-NEXT:    vfmul.s $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-OFF-NEXT:    vfsub.s $vr0, $vr0, $vr1
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %negv0 = fneg nsz<4 x float> %v0
++  %negv2 = fneg nsz<4 x float> %v2
++  %mul = fmul nsz<4 x float> %negv0, %v1
++  %add = fadd nsz<4 x float> %mul, %negv2
++  store <4 x float> %add, ptr %res
++  ret void
++}
++
++;; Check that vfnmadd.s is not emitted.
++define void @not_vfnmadd_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: not_vfnmadd_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vbitrevi.w $vr2, $vr2, 31
++; CONTRACT-FAST-NEXT:    vfmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: not_vfnmadd_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-ON-NEXT:    vbitrevi.w $vr1, $vr1, 31
++; CONTRACT-ON-NEXT:    vfmul.s $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-ON-NEXT:    vfsub.s $vr0, $vr0, $vr1
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: not_vfnmadd_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-OFF-NEXT:    vbitrevi.w $vr1, $vr1, 31
++; CONTRACT-OFF-NEXT:    vfmul.s $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-OFF-NEXT:    vfsub.s $vr0, $vr0, $vr1
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %negv0 = fneg<4 x float> %v0
++  %negv2 = fneg<4 x float> %v2
++  %mul = fmul<4 x float> %negv0, %v1
++  %add = fadd<4 x float> %mul, %negv2
++  store <4 x float> %add, ptr %res
++  ret void
++}
++
++define void @vfnmsub_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfnmsub_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfnmsub_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-ON-NEXT:    vfmul.s $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-ON-NEXT:    vfsub.s $vr0, $vr0, $vr1
++; CONTRACT-ON-NEXT:    vbitrevi.w $vr0, $vr0, 31
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfnmsub_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmul.s $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-OFF-NEXT:    vfsub.s $vr0, $vr0, $vr1
++; CONTRACT-OFF-NEXT:    vbitrevi.w $vr0, $vr0, 31
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %negv2 = fneg<4 x float> %v2
++  %mul = fmul<4 x float> %v0, %v1
++  %add = fadd<4 x float> %mul, %negv2
++  %neg = fneg<4 x float> %add
++  store <4 x float> %neg, ptr %res
++  ret void
++}
++
++define void @vfnmsub_s_nsz(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfnmsub_s_nsz:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfnmsub_s_nsz:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-ON-NEXT:    vfmul.s $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-ON-NEXT:    vfsub.s $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfnmsub_s_nsz:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmul.s $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-OFF-NEXT:    vfsub.s $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %negv0 = fneg nsz<4 x float> %v0
++  %mul = fmul nsz<4 x float> %negv0, %v1
++  %add = fadd nsz<4 x float> %mul, %v2
++  store <4 x float> %add, ptr %res
++  ret void
++}
++
++;; Check that vfnmsub.s is not emitted.
++define void @not_vfnmsub_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: not_vfnmsub_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vbitrevi.w $vr2, $vr2, 31
++; CONTRACT-FAST-NEXT:    vfmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: not_vfnmsub_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-ON-NEXT:    vfmul.s $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-ON-NEXT:    vfsub.s $vr0, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: not_vfnmsub_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmul.s $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a3, 0
++; CONTRACT-OFF-NEXT:    vfsub.s $vr0, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %negv0 = fneg<4 x float> %v0
++  %mul = fmul<4 x float> %negv0, %v1
++  %add = fadd<4 x float> %mul, %v2
++  store <4 x float> %add, ptr %res
++  ret void
++}
++
++define void @contract_vfmadd_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_vfmadd_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_vfmadd_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_vfmadd_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %mul = fmul contract <4 x float> %v0, %v1
++  %add = fadd contract <4 x float> %mul, %v2
++  store <4 x float> %add, ptr %res
++  ret void
++}
++
++define void @contract_vfmsub_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_vfmsub_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_vfmsub_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_vfmsub_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %mul = fmul contract <4 x float> %v0, %v1
++  %sub = fsub contract <4 x float> %mul, %v2
++  store <4 x float> %sub, ptr %res
++  ret void
++}
++
++define void @contract_vfnmadd_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_vfnmadd_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_vfnmadd_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfnmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_vfnmadd_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfnmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %mul = fmul contract <4 x float> %v0, %v1
++  %add = fadd contract <4 x float> %mul, %v2
++  %negadd = fneg contract <4 x float> %add
++  store <4 x float> %negadd, ptr %res
++  ret void
++}
++
++define void @contract_vfnmadd_s_nsz(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_vfnmadd_s_nsz:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_vfnmadd_s_nsz:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfnmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_vfnmadd_s_nsz:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfnmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %negv0 = fneg contract nsz<4 x float> %v0
++  %negv2 = fneg contract nsz<4 x float> %v2
++  %mul = fmul contract nsz<4 x float> %negv0, %v1
++  %add = fadd contract nsz<4 x float> %mul, %negv2
++  store <4 x float> %add, ptr %res
++  ret void
++}
++
++;; Check that vfnmadd.s is not emitted.
++define void @not_contract_vfnmadd_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: not_contract_vfnmadd_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vbitrevi.w $vr2, $vr2, 31
++; CONTRACT-FAST-NEXT:    vfmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: not_contract_vfnmadd_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vbitrevi.w $vr2, $vr2, 31
++; CONTRACT-ON-NEXT:    vfmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: not_contract_vfnmadd_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vbitrevi.w $vr2, $vr2, 31
++; CONTRACT-OFF-NEXT:    vfmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %negv0 = fneg contract <4 x float> %v0
++  %negv2 = fneg contract <4 x float> %v2
++  %mul = fmul contract <4 x float> %negv0, %v1
++  %add = fadd contract <4 x float> %mul, %negv2
++  store <4 x float> %add, ptr %res
++  ret void
++}
++
++define void @contract_vfnmsub_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_vfnmsub_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_vfnmsub_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfnmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_vfnmsub_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfnmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %negv2 = fneg contract <4 x float> %v2
++  %mul = fmul contract <4 x float> %v0, %v1
++  %add = fadd contract <4 x float> %mul, %negv2
++  %neg = fneg contract <4 x float> %add
++  store <4 x float> %neg, ptr %res
++  ret void
++}
++
++define void @contract_vfnmsub_s_nsz(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: contract_vfnmsub_s_nsz:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: contract_vfnmsub_s_nsz:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfnmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: contract_vfnmsub_s_nsz:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfnmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %negv0 = fneg contract nsz<4 x float> %v0
++  %mul = fmul contract nsz<4 x float> %negv0, %v1
++  %add = fadd contract nsz<4 x float> %mul, %v2
++  store <4 x float> %add, ptr %res
++  ret void
++}
++
++;; Check that vfnmsub.s is not emitted.
++define void @not_contract_vfnmsub_s(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: not_contract_vfnmsub_s:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vbitrevi.w $vr2, $vr2, 31
++; CONTRACT-FAST-NEXT:    vfmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: not_contract_vfnmsub_s:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vbitrevi.w $vr2, $vr2, 31
++; CONTRACT-ON-NEXT:    vfmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: not_contract_vfnmsub_s:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vbitrevi.w $vr2, $vr2, 31
++; CONTRACT-OFF-NEXT:    vfmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %negv0 = fneg contract <4 x float> %v0
++  %mul = fmul contract <4 x float> %negv0, %v1
++  %add = fadd contract <4 x float> %mul, %v2
++  store <4 x float> %add, ptr %res
++  ret void
++}
++
++define void @vfmadd_s_contract(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfmadd_s_contract:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfmadd_s_contract:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfmadd_s_contract:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %mul = fmul contract <4 x float> %v0, %v1
++  %add = fadd contract <4 x float> %mul, %v2
++  store <4 x float> %add, ptr %res
++  ret void
++}
++
++define void @vfmsub_s_contract(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfmsub_s_contract:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfmsub_s_contract:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfmsub_s_contract:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %mul = fmul contract <4 x float> %v0, %v1
++  %sub = fsub contract <4 x float> %mul, %v2
++  store <4 x float> %sub, ptr %res
++  ret void
++}
++
++define void @vfnmadd_s_contract(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfnmadd_s_contract:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfnmadd_s_contract:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfnmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfnmadd_s_contract:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfnmadd.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %mul = fmul contract <4 x float> %v0, %v1
++  %add = fadd contract <4 x float> %mul, %v2
++  %negadd = fneg contract <4 x float> %add
++  store <4 x float> %negadd, ptr %res
++  ret void
++}
++
++define void @vfnmsub_s_contract(ptr %res, ptr %a0, ptr %a1, ptr %a2) nounwind {
++; CONTRACT-FAST-LABEL: vfnmsub_s_contract:
++; CONTRACT-FAST:       # %bb.0: # %entry
++; CONTRACT-FAST-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-FAST-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-FAST-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-FAST-NEXT:    vfnmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-FAST-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-FAST-NEXT:    ret
++;
++; CONTRACT-ON-LABEL: vfnmsub_s_contract:
++; CONTRACT-ON:       # %bb.0: # %entry
++; CONTRACT-ON-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-ON-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-ON-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-ON-NEXT:    vfnmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-ON-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-ON-NEXT:    ret
++;
++; CONTRACT-OFF-LABEL: vfnmsub_s_contract:
++; CONTRACT-OFF:       # %bb.0: # %entry
++; CONTRACT-OFF-NEXT:    vld $vr0, $a3, 0
++; CONTRACT-OFF-NEXT:    vld $vr1, $a2, 0
++; CONTRACT-OFF-NEXT:    vld $vr2, $a1, 0
++; CONTRACT-OFF-NEXT:    vfnmsub.s $vr0, $vr2, $vr1, $vr0
++; CONTRACT-OFF-NEXT:    vst $vr0, $a0, 0
++; CONTRACT-OFF-NEXT:    ret
++entry:
++  %v0 = load <4 x float>, ptr %a0
++  %v1 = load <4 x float>, ptr %a1
++  %v2 = load <4 x float>, ptr %a2
++  %mul = fmul contract <4 x float> %v0, %v1
++  %negv2 = fneg contract <4 x float> %v2
++  %add = fadd contract <4 x float> %negv2, %mul
++  %negadd = fneg contract <4 x float> %add
++  store <4 x float> %negadd, ptr %res
++  ret void
++}
+-- 
+2.20.1
+

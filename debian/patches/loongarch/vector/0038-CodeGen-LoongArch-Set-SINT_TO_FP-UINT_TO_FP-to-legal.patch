@@ -1,0 +1,299 @@
+From a5bc7ef181511a199bf6e042f02c431ad667b52a Mon Sep 17 00:00:00 2001
+From: yjijd <licongtian@loongson.cn>
+Date: Tue, 23 Jan 2024 15:16:23 +0800
+Subject: [PATCH 38/42] [CodeGen][LoongArch] Set SINT_TO_FP/UINT_TO_FP to legal
+ for vector types (#78924)
+
+Support the following conversions:
+v4i32->v4f32, v2i64->v2f64(LSX)
+v8i32->v8f32, v4i64->v4f64(LASX)
+v4i32->v4f64, v4i64->v4f32(LASX)
+
+(cherry picked from commit f799f936929c232a16abc7c520a10fecadbf05f9)
+
+Change-Id: Ib8460a68a74d9d69edbdf6abc8bf193dcaeb7c13
+---
+ .../LoongArch/LoongArchISelLowering.cpp       |  4 ++
+ .../LoongArch/LoongArchLASXInstrInfo.td       | 22 +++++++
+ .../Target/LoongArch/LoongArchLSXInstrInfo.td |  8 +++
+ .../LoongArch/lasx/ir-instruction/sitofp.ll   | 57 +++++++++++++++++++
+ .../LoongArch/lasx/ir-instruction/uitofp.ll   | 57 +++++++++++++++++++
+ .../LoongArch/lsx/ir-instruction/sitofp.ll    | 28 +++++++++
+ .../LoongArch/lsx/ir-instruction/uitofp.ll    | 28 +++++++++
+ 7 files changed, 204 insertions(+)
+ create mode 100644 llvm/test/CodeGen/LoongArch/lasx/ir-instruction/sitofp.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lasx/ir-instruction/uitofp.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lsx/ir-instruction/sitofp.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lsx/ir-instruction/uitofp.ll
+
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+index cf881ce720a6..7a360b42e15d 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+@@ -256,6 +256,8 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+           {ISD::SETNE, ISD::SETGE, ISD::SETGT, ISD::SETUGE, ISD::SETUGT}, VT,
+           Expand);
+     }
++    setOperationAction({ISD::SINT_TO_FP, ISD::UINT_TO_FP},
++                       {MVT::v4i32, MVT::v2i64}, Legal);
+     for (MVT VT : {MVT::v4f32, MVT::v2f64}) {
+       setOperationAction({ISD::FADD, ISD::FSUB}, VT, Legal);
+       setOperationAction({ISD::FMUL, ISD::FDIV}, VT, Legal);
+@@ -298,6 +300,8 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+           {ISD::SETNE, ISD::SETGE, ISD::SETGT, ISD::SETUGE, ISD::SETUGT}, VT,
+           Expand);
+     }
++    setOperationAction({ISD::SINT_TO_FP, ISD::UINT_TO_FP},
++                       {MVT::v8i32, MVT::v4i32, MVT::v4i64}, Legal);
+     for (MVT VT : {MVT::v8f32, MVT::v4f64}) {
+       setOperationAction({ISD::FADD, ISD::FSUB}, VT, Legal);
+       setOperationAction({ISD::FMUL, ISD::FDIV}, VT, Legal);
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+index b3c11bc5423d..b3e74b480922 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+@@ -1611,6 +1611,28 @@ foreach vt = [v32i8, v16i16, v8i32, v4i64, v8f32, v4f64] in
+ def : Pat<(fneg (v8f32 LASX256:$xj)), (XVBITREVI_W LASX256:$xj, 31)>;
+ def : Pat<(fneg (v4f64 LASX256:$xj)), (XVBITREVI_D LASX256:$xj, 63)>;
+ 
++// XVFFINT_{S_W/D_L}
++def : Pat<(v8f32 (sint_to_fp v8i32:$vj)), (XVFFINT_S_W v8i32:$vj)>;
++def : Pat<(v4f64 (sint_to_fp v4i64:$vj)), (XVFFINT_D_L v4i64:$vj)>;
++def : Pat<(v4f64 (sint_to_fp v4i32:$vj)),
++          (XVFFINT_D_L (VEXT2XV_D_W (SUBREG_TO_REG (i64 0), v4i32:$vj,
++                                                   sub_128)))>;
++def : Pat<(v4f32 (sint_to_fp v4i64:$vj)),
++          (EXTRACT_SUBREG (XVFCVT_S_D (XVPERMI_D (XVFFINT_D_L v4i64:$vj), 238),
++                                      (XVFFINT_D_L v4i64:$vj)),
++                          sub_128)>;
++
++// XVFFINT_{S_WU/D_LU}
++def : Pat<(v8f32 (uint_to_fp v8i32:$vj)), (XVFFINT_S_WU v8i32:$vj)>;
++def : Pat<(v4f64 (uint_to_fp v4i64:$vj)), (XVFFINT_D_LU v4i64:$vj)>;
++def : Pat<(v4f64 (uint_to_fp v4i32:$vj)),
++          (XVFFINT_D_LU (VEXT2XV_DU_WU (SUBREG_TO_REG (i64 0), v4i32:$vj,
++                                                      sub_128)))>;
++def : Pat<(v4f32 (uint_to_fp v4i64:$vj)),
++          (EXTRACT_SUBREG (XVFCVT_S_D (XVPERMI_D (XVFFINT_D_LU v4i64:$vj), 238),
++                                       (XVFFINT_D_LU v4i64:$vj)),
++                          sub_128)>;
++
+ } // Predicates = [HasExtLASX]
+ 
+ /// Intrinsic pattern
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+index 5569c2cd15b5..63eac4d1aeb7 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+@@ -1742,6 +1742,14 @@ foreach vt = [v16i8, v8i16, v4i32, v2i64, v4f32, v2f64] in
+ def : Pat<(fneg (v4f32 LSX128:$vj)), (VBITREVI_W LSX128:$vj, 31)>;
+ def : Pat<(fneg (v2f64 LSX128:$vj)), (VBITREVI_D LSX128:$vj, 63)>;
+ 
++// VFFINT_{S_W/D_L}
++def : Pat<(v4f32 (sint_to_fp v4i32:$vj)), (VFFINT_S_W v4i32:$vj)>;
++def : Pat<(v2f64 (sint_to_fp v2i64:$vj)), (VFFINT_D_L v2i64:$vj)>;
++
++// VFFINT_{S_WU/D_LU}
++def : Pat<(v4f32 (uint_to_fp v4i32:$vj)), (VFFINT_S_WU v4i32:$vj)>;
++def : Pat<(v2f64 (uint_to_fp v2i64:$vj)), (VFFINT_D_LU v2i64:$vj)>;
++
+ } // Predicates = [HasExtLSX]
+ 
+ /// Intrinsic pattern
+diff --git a/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/sitofp.ll b/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/sitofp.ll
+new file mode 100644
+index 000000000000..208a758ea4e9
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/sitofp.ll
+@@ -0,0 +1,57 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py UTC_ARGS: --version 3
++; RUN: llc --mtriple=loongarch64 --mattr=+lasx < %s | FileCheck %s
++
++define void @sitofp_v8i32_v8f32(ptr %res, ptr %in){
++; CHECK-LABEL: sitofp_v8i32_v8f32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvffint.s.w $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i32>, ptr %in
++  %v1 = sitofp <8 x i32> %v0 to <8 x float>
++  store <8 x float> %v1, ptr %res
++  ret void
++}
++
++define void @sitofp_v4f64_v4f64(ptr %res, ptr %in){
++; CHECK-LABEL: sitofp_v4f64_v4f64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvffint.d.l $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %in
++  %v1 = sitofp <4 x i64> %v0 to <4 x double>
++  store <4 x double> %v1, ptr %res
++  ret void
++}
++
++define void @sitofp_v4i64_v4f32(ptr %res, ptr %in){
++; CHECK-LABEL: sitofp_v4i64_v4f32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvffint.d.l $xr0, $xr0
++; CHECK-NEXT:    xvpermi.d $xr1, $xr0, 238
++; CHECK-NEXT:    xvfcvt.s.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %in
++  %v1 = sitofp <4 x i64> %v0 to <4 x float>
++  store <4 x float> %v1, ptr %res
++  ret void
++}
++
++define void @sitofp_v4i32_v4f64(ptr %res, ptr %in){
++; CHECK-LABEL: sitofp_v4i32_v4f64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vext2xv.d.w $xr0, $xr0
++; CHECK-NEXT:    xvffint.d.l $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %in
++  %v1 = sitofp <4 x i32> %v0 to <4 x double>
++  store <4 x double> %v1, ptr %res
++  ret void
++}
+diff --git a/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/uitofp.ll b/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/uitofp.ll
+new file mode 100644
+index 000000000000..70cf71c4cec2
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/uitofp.ll
+@@ -0,0 +1,57 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py UTC_ARGS: --version 3
++; RUN: llc --mtriple=loongarch64 --mattr=+lasx < %s | FileCheck %s
++
++define void @uitofp_v8i32_v8f32(ptr %res, ptr %in){
++; CHECK-LABEL: uitofp_v8i32_v8f32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvffint.s.wu $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <8 x i32>, ptr %in
++  %v1 = uitofp <8 x i32> %v0 to <8 x float>
++  store <8 x float> %v1, ptr %res
++  ret void
++}
++
++define void @uitofp_v4f64_v4f64(ptr %res, ptr %in){
++; CHECK-LABEL: uitofp_v4f64_v4f64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvffint.d.lu $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %in
++  %v1 = uitofp <4 x i64> %v0 to <4 x double>
++  store <4 x double> %v1, ptr %res
++  ret void
++}
++
++define void @uitofp_v4i64_v4f32(ptr %res, ptr %in){
++; CHECK-LABEL: uitofp_v4i64_v4f32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a1, 0
++; CHECK-NEXT:    xvffint.d.lu $xr0, $xr0
++; CHECK-NEXT:    xvpermi.d $xr1, $xr0, 238
++; CHECK-NEXT:    xvfcvt.s.d $xr0, $xr1, $xr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i64>, ptr %in
++  %v1 = uitofp <4 x i64> %v0 to <4 x float>
++  store <4 x float> %v1, ptr %res
++  ret void
++}
++
++define void @uitofp_v4i32_v4f64(ptr %res, ptr %in){
++; CHECK-LABEL: uitofp_v4i32_v4f64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vext2xv.du.wu $xr0, $xr0
++; CHECK-NEXT:    xvffint.d.lu $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %in
++  %v1 = uitofp <4 x i32> %v0 to <4 x double>
++  store <4 x double> %v1, ptr %res
++  ret void
++}
+diff --git a/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/sitofp.ll b/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/sitofp.ll
+new file mode 100644
+index 000000000000..1e820a37a240
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/sitofp.ll
+@@ -0,0 +1,28 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py UTC_ARGS: --version 3
++; RUN: llc --mtriple=loongarch64 --mattr=+lsx < %s | FileCheck %s
++
++define void @sitofp_v4i32_v4f32(ptr %res, ptr %in){
++; CHECK-LABEL: sitofp_v4i32_v4f32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vffint.s.w $vr0, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %in
++  %v1 = sitofp <4 x i32> %v0 to <4 x float>
++  store <4 x float> %v1, ptr %res
++  ret void
++}
++
++define void @sitofp_v2i64_v2f64(ptr %res, ptr %in){
++; CHECK-LABEL: sitofp_v2i64_v2f64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vffint.d.l $vr0, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x i64>, ptr %in
++  %v1 = sitofp <2 x i64> %v0 to <2 x double>
++  store <2 x double> %v1, ptr %res
++  ret void
++}
+diff --git a/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/uitofp.ll b/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/uitofp.ll
+new file mode 100644
+index 000000000000..3d4913f12e57
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/uitofp.ll
+@@ -0,0 +1,28 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py UTC_ARGS: --version 3
++; RUN: llc --mtriple=loongarch64 --mattr=+lsx < %s | FileCheck %s
++
++define void @uitofp_v4i32_v4f32(ptr %res, ptr %in){
++; CHECK-LABEL: uitofp_v4i32_v4f32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vffint.s.wu $vr0, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <4 x i32>, ptr %in
++  %v1 = uitofp <4 x i32> %v0 to <4 x float>
++  store <4 x float> %v1, ptr %res
++  ret void
++}
++
++define void @uitofp_v2i64_v2f64(ptr %res, ptr %in){
++; CHECK-LABEL: uitofp_v2i64_v2f64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a1, 0
++; CHECK-NEXT:    vffint.d.lu $vr0, $vr0
++; CHECK-NEXT:    vst $vr0, $a0, 0
++; CHECK-NEXT:    ret
++  %v0 = load <2 x i64>, ptr %in
++  %v1 = uitofp <2 x i64> %v0 to <2 x double>
++  store <2 x double> %v1, ptr %res
++  ret void
++}
+-- 
+2.20.1
+

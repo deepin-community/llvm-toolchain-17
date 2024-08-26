@@ -1,0 +1,2726 @@
+From b1101237c46337236b43f9dbae88b03bf0a526f8 Mon Sep 17 00:00:00 2001
+From: wanglei <wanglei@loongson.cn>
+Date: Sat, 19 Aug 2023 15:58:38 +0800
+Subject: [PATCH 02/42] [LoongArch] Add LSX intrinsic support
+
+For handling intrinsics, our approach is not simply to match them
+one-to-one with instructions. Instead, we lower some intrinsics
+to common nodes and then perform matching. The advantage of this
+approach is that it allows us to fully utilize the passes available
+at the common layer for optimizing purposes.
+
+We perform error checks on the immediate operand of all intrinsics,
+rather than waiting until the end to throw exceptions.
+
+Reviewed By: SixWeining
+
+Differential Revision: https://reviews.llvm.org/D155829
+
+(cherry picked from commit 53141b2fcfa20616970833e6513537d211116c05)
+
+Change-Id: Icde9a81871e71ab7875056daa79568d566a07a07
+---
+ llvm/include/llvm/IR/IntrinsicsLoongArch.td   | 524 ++++++++++
+ .../LoongArch/LoongArchISelDAGToDAG.cpp       | 100 +-
+ .../Target/LoongArch/LoongArchISelDAGToDAG.h  |   8 +
+ .../LoongArch/LoongArchISelLowering.cpp       | 902 +++++++++++++++++-
+ .../Target/LoongArch/LoongArchISelLowering.h  |  14 +
+ .../Target/LoongArch/LoongArchInstrInfo.cpp   |  12 +
+ .../Target/LoongArch/LoongArchInstrInfo.td    |   6 +-
+ .../Target/LoongArch/LoongArchLSXInstrInfo.td | 816 ++++++++++++++++
+ 8 files changed, 2359 insertions(+), 23 deletions(-)
+
+diff --git a/llvm/include/llvm/IR/IntrinsicsLoongArch.td b/llvm/include/llvm/IR/IntrinsicsLoongArch.td
+index 4219b2f55346..d39d8261ebe3 100644
+--- a/llvm/include/llvm/IR/IntrinsicsLoongArch.td
++++ b/llvm/include/llvm/IR/IntrinsicsLoongArch.td
+@@ -123,3 +123,527 @@ def int_loongarch_lddir_d : BaseInt<[llvm_i64_ty], [llvm_i64_ty, llvm_i64_ty],
+ def int_loongarch_ldpte_d : BaseInt<[], [llvm_i64_ty, llvm_i64_ty],
+                                     [ImmArg<ArgIndex<1>>]>;
+ } // TargetPrefix = "loongarch"
++
++/// Vector intrinsic
++
++class VecInt<list<LLVMType> ret_types, list<LLVMType> param_types,
++             list<IntrinsicProperty> intr_properties = []>
++    : Intrinsic<ret_types, param_types, intr_properties>,
++      ClangBuiltin<!subst("int_loongarch", "__builtin", NAME)>;
++
++//===----------------------------------------------------------------------===//
++// LSX
++
++let TargetPrefix = "loongarch" in {
++
++foreach inst = ["vadd_b", "vsub_b",
++                "vsadd_b", "vsadd_bu", "vssub_b", "vssub_bu",
++                "vavg_b", "vavg_bu", "vavgr_b", "vavgr_bu",
++                "vabsd_b", "vabsd_bu", "vadda_b",
++                "vmax_b", "vmax_bu", "vmin_b", "vmin_bu",
++                "vmul_b", "vmuh_b", "vmuh_bu",
++                "vdiv_b", "vdiv_bu", "vmod_b", "vmod_bu", "vsigncov_b",
++                "vand_v", "vor_v", "vxor_v", "vnor_v", "vandn_v", "vorn_v",
++                "vsll_b", "vsrl_b", "vsra_b", "vrotr_b", "vsrlr_b", "vsrar_b",
++                "vbitclr_b", "vbitset_b", "vbitrev_b",
++                "vseq_b", "vsle_b", "vsle_bu", "vslt_b", "vslt_bu",
++                "vpackev_b", "vpackod_b", "vpickev_b", "vpickod_b",
++                "vilvl_b", "vilvh_b"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v16i8_ty],
++                                       [llvm_v16i8_ty, llvm_v16i8_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vadd_h", "vsub_h",
++                "vsadd_h", "vsadd_hu", "vssub_h", "vssub_hu",
++                "vavg_h", "vavg_hu", "vavgr_h", "vavgr_hu",
++                "vabsd_h", "vabsd_hu", "vadda_h",
++                "vmax_h", "vmax_hu", "vmin_h", "vmin_hu",
++                "vmul_h", "vmuh_h", "vmuh_hu",
++                "vdiv_h", "vdiv_hu", "vmod_h", "vmod_hu", "vsigncov_h",
++                "vsll_h", "vsrl_h", "vsra_h", "vrotr_h", "vsrlr_h", "vsrar_h",
++                "vbitclr_h", "vbitset_h", "vbitrev_h",
++                "vseq_h", "vsle_h", "vsle_hu", "vslt_h", "vslt_hu",
++                "vpackev_h", "vpackod_h", "vpickev_h", "vpickod_h",
++                "vilvl_h", "vilvh_h"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v8i16_ty],
++                                       [llvm_v8i16_ty, llvm_v8i16_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vadd_w", "vsub_w",
++                "vsadd_w", "vsadd_wu", "vssub_w", "vssub_wu",
++                "vavg_w", "vavg_wu", "vavgr_w", "vavgr_wu",
++                "vabsd_w", "vabsd_wu", "vadda_w",
++                "vmax_w", "vmax_wu", "vmin_w", "vmin_wu",
++                "vmul_w", "vmuh_w", "vmuh_wu",
++                "vdiv_w", "vdiv_wu", "vmod_w", "vmod_wu", "vsigncov_w",
++                "vsll_w", "vsrl_w", "vsra_w", "vrotr_w", "vsrlr_w", "vsrar_w",
++                "vbitclr_w", "vbitset_w", "vbitrev_w",
++                "vseq_w", "vsle_w", "vsle_wu", "vslt_w", "vslt_wu",
++                "vpackev_w", "vpackod_w", "vpickev_w", "vpickod_w",
++                "vilvl_w", "vilvh_w"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v4i32_ty],
++                                       [llvm_v4i32_ty, llvm_v4i32_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vadd_d", "vadd_q", "vsub_d", "vsub_q",
++                "vsadd_d", "vsadd_du", "vssub_d", "vssub_du",
++                "vhaddw_q_d", "vhaddw_qu_du", "vhsubw_q_d", "vhsubw_qu_du",
++                "vaddwev_q_d", "vaddwod_q_d", "vsubwev_q_d", "vsubwod_q_d",
++                "vaddwev_q_du", "vaddwod_q_du", "vsubwev_q_du", "vsubwod_q_du",
++                "vaddwev_q_du_d", "vaddwod_q_du_d",
++                "vavg_d", "vavg_du", "vavgr_d", "vavgr_du",
++                "vabsd_d", "vabsd_du", "vadda_d",
++                "vmax_d", "vmax_du", "vmin_d", "vmin_du",
++                "vmul_d", "vmuh_d", "vmuh_du",
++                "vmulwev_q_d", "vmulwod_q_d", "vmulwev_q_du", "vmulwod_q_du",
++                "vmulwev_q_du_d", "vmulwod_q_du_d",
++                "vdiv_d", "vdiv_du", "vmod_d", "vmod_du", "vsigncov_d",
++                "vsll_d", "vsrl_d", "vsra_d", "vrotr_d", "vsrlr_d", "vsrar_d",
++                "vbitclr_d", "vbitset_d", "vbitrev_d",
++                "vseq_d", "vsle_d", "vsle_du", "vslt_d", "vslt_du",
++                "vpackev_d", "vpackod_d", "vpickev_d", "vpickod_d",
++                "vilvl_d", "vilvh_d"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v2i64_ty],
++                                       [llvm_v2i64_ty, llvm_v2i64_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vaddi_bu", "vsubi_bu",
++                "vmaxi_b", "vmaxi_bu", "vmini_b", "vmini_bu",
++                "vsat_b", "vsat_bu",
++                "vandi_b", "vori_b", "vxori_b", "vnori_b",
++                "vslli_b", "vsrli_b", "vsrai_b", "vrotri_b",
++                "vsrlri_b", "vsrari_b",
++                "vbitclri_b", "vbitseti_b", "vbitrevi_b",
++                "vseqi_b", "vslei_b", "vslei_bu", "vslti_b", "vslti_bu",
++                "vreplvei_b", "vbsll_v", "vbsrl_v", "vshuf4i_b"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v16i8_ty],
++                                       [llvm_v16i8_ty, llvm_i32_ty],
++                                       [IntrNoMem, ImmArg<ArgIndex<1>>]>;
++foreach inst = ["vaddi_hu", "vsubi_hu",
++                "vmaxi_h", "vmaxi_hu", "vmini_h", "vmini_hu",
++                "vsat_h", "vsat_hu",
++                "vslli_h", "vsrli_h", "vsrai_h", "vrotri_h",
++                "vsrlri_h", "vsrari_h",
++                "vbitclri_h", "vbitseti_h", "vbitrevi_h",
++                "vseqi_h", "vslei_h", "vslei_hu", "vslti_h", "vslti_hu",
++                "vreplvei_h", "vshuf4i_h"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v8i16_ty],
++                                       [llvm_v8i16_ty, llvm_i32_ty],
++                                       [IntrNoMem, ImmArg<ArgIndex<1>>]>;
++foreach inst = ["vaddi_wu", "vsubi_wu",
++                "vmaxi_w", "vmaxi_wu", "vmini_w", "vmini_wu",
++                "vsat_w", "vsat_wu",
++                "vslli_w", "vsrli_w", "vsrai_w", "vrotri_w",
++                "vsrlri_w", "vsrari_w",
++                "vbitclri_w", "vbitseti_w", "vbitrevi_w",
++                "vseqi_w", "vslei_w", "vslei_wu", "vslti_w", "vslti_wu",
++                "vreplvei_w", "vshuf4i_w"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v4i32_ty],
++                                       [llvm_v4i32_ty, llvm_i32_ty],
++                                       [IntrNoMem, ImmArg<ArgIndex<1>>]>;
++foreach inst = ["vaddi_du", "vsubi_du",
++                "vmaxi_d", "vmaxi_du", "vmini_d", "vmini_du",
++                "vsat_d", "vsat_du",
++                "vslli_d", "vsrli_d", "vsrai_d", "vrotri_d",
++                "vsrlri_d", "vsrari_d",
++                "vbitclri_d", "vbitseti_d", "vbitrevi_d",
++                "vseqi_d", "vslei_d", "vslei_du", "vslti_d", "vslti_du",
++                "vreplvei_d"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v2i64_ty],
++                                       [llvm_v2i64_ty, llvm_i32_ty],
++                                       [IntrNoMem, ImmArg<ArgIndex<1>>]>;
++
++foreach inst = ["vhaddw_h_b", "vhaddw_hu_bu", "vhsubw_h_b", "vhsubw_hu_bu",
++                "vaddwev_h_b", "vaddwod_h_b", "vsubwev_h_b", "vsubwod_h_b",
++                "vaddwev_h_bu", "vaddwod_h_bu", "vsubwev_h_bu", "vsubwod_h_bu",
++                "vaddwev_h_bu_b", "vaddwod_h_bu_b",
++                "vmulwev_h_b", "vmulwod_h_b", "vmulwev_h_bu", "vmulwod_h_bu",
++                "vmulwev_h_bu_b", "vmulwod_h_bu_b"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v8i16_ty],
++                                       [llvm_v16i8_ty, llvm_v16i8_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vhaddw_w_h", "vhaddw_wu_hu", "vhsubw_w_h", "vhsubw_wu_hu",
++                "vaddwev_w_h", "vaddwod_w_h", "vsubwev_w_h", "vsubwod_w_h",
++                "vaddwev_w_hu", "vaddwod_w_hu", "vsubwev_w_hu", "vsubwod_w_hu",
++                "vaddwev_w_hu_h", "vaddwod_w_hu_h",
++                "vmulwev_w_h", "vmulwod_w_h", "vmulwev_w_hu", "vmulwod_w_hu",
++                "vmulwev_w_hu_h", "vmulwod_w_hu_h"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v4i32_ty],
++                                       [llvm_v8i16_ty, llvm_v8i16_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vhaddw_d_w", "vhaddw_du_wu", "vhsubw_d_w", "vhsubw_du_wu",
++                "vaddwev_d_w", "vaddwod_d_w", "vsubwev_d_w", "vsubwod_d_w",
++                "vaddwev_d_wu", "vaddwod_d_wu", "vsubwev_d_wu", "vsubwod_d_wu",
++                "vaddwev_d_wu_w", "vaddwod_d_wu_w",
++                "vmulwev_d_w", "vmulwod_d_w", "vmulwev_d_wu", "vmulwod_d_wu",
++                "vmulwev_d_wu_w", "vmulwod_d_wu_w"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v2i64_ty],
++                                       [llvm_v4i32_ty, llvm_v4i32_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vsrln_b_h", "vsran_b_h", "vsrlrn_b_h", "vsrarn_b_h",
++                "vssrln_b_h", "vssran_b_h", "vssrln_bu_h", "vssran_bu_h",
++                "vssrlrn_b_h", "vssrarn_b_h", "vssrlrn_bu_h", "vssrarn_bu_h"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v16i8_ty],
++                                       [llvm_v8i16_ty, llvm_v8i16_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vsrln_h_w", "vsran_h_w", "vsrlrn_h_w", "vsrarn_h_w",
++                "vssrln_h_w", "vssran_h_w", "vssrln_hu_w", "vssran_hu_w",
++                "vssrlrn_h_w", "vssrarn_h_w", "vssrlrn_hu_w", "vssrarn_hu_w"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v8i16_ty],
++                                       [llvm_v4i32_ty, llvm_v4i32_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vsrln_w_d", "vsran_w_d", "vsrlrn_w_d", "vsrarn_w_d",
++                "vssrln_w_d", "vssran_w_d", "vssrln_wu_d", "vssran_wu_d",
++                "vssrlrn_w_d", "vssrarn_w_d", "vssrlrn_wu_d", "vssrarn_wu_d"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v4i32_ty],
++                                       [llvm_v2i64_ty, llvm_v2i64_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vmadd_b", "vmsub_b", "vfrstp_b", "vbitsel_v", "vshuf_b"] in
++  def int_loongarch_lsx_#inst
++    : VecInt<[llvm_v16i8_ty],
++             [llvm_v16i8_ty, llvm_v16i8_ty, llvm_v16i8_ty],
++             [IntrNoMem]>;
++foreach inst = ["vmadd_h", "vmsub_h", "vfrstp_h", "vshuf_h"] in
++  def int_loongarch_lsx_#inst
++    : VecInt<[llvm_v8i16_ty],
++             [llvm_v8i16_ty, llvm_v8i16_ty, llvm_v8i16_ty],
++             [IntrNoMem]>;
++foreach inst = ["vmadd_w", "vmsub_w", "vshuf_w"] in
++  def int_loongarch_lsx_#inst
++    : VecInt<[llvm_v4i32_ty],
++             [llvm_v4i32_ty, llvm_v4i32_ty, llvm_v4i32_ty],
++             [IntrNoMem]>;
++foreach inst = ["vmadd_d", "vmsub_d", "vshuf_d"] in
++  def int_loongarch_lsx_#inst
++    : VecInt<[llvm_v2i64_ty],
++             [llvm_v2i64_ty, llvm_v2i64_ty, llvm_v2i64_ty],
++             [IntrNoMem]>;
++
++foreach inst = ["vsrlni_b_h", "vsrani_b_h", "vsrlrni_b_h", "vsrarni_b_h",
++                "vssrlni_b_h", "vssrani_b_h", "vssrlni_bu_h", "vssrani_bu_h",
++                "vssrlrni_b_h", "vssrarni_b_h", "vssrlrni_bu_h", "vssrarni_bu_h",
++                "vfrstpi_b", "vbitseli_b", "vextrins_b"] in
++  def int_loongarch_lsx_#inst
++    : VecInt<[llvm_v16i8_ty],
++             [llvm_v16i8_ty, llvm_v16i8_ty, llvm_i32_ty],
++             [IntrNoMem, ImmArg<ArgIndex<2>>]>;
++foreach inst = ["vsrlni_h_w", "vsrani_h_w", "vsrlrni_h_w", "vsrarni_h_w",
++                "vssrlni_h_w", "vssrani_h_w", "vssrlni_hu_w", "vssrani_hu_w",
++                "vssrlrni_h_w", "vssrarni_h_w", "vssrlrni_hu_w", "vssrarni_hu_w",
++                "vfrstpi_h", "vextrins_h"] in
++  def int_loongarch_lsx_#inst
++    : VecInt<[llvm_v8i16_ty],
++             [llvm_v8i16_ty, llvm_v8i16_ty, llvm_i32_ty],
++             [IntrNoMem, ImmArg<ArgIndex<2>>]>;
++foreach inst = ["vsrlni_w_d", "vsrani_w_d", "vsrlrni_w_d", "vsrarni_w_d",
++                "vssrlni_w_d", "vssrani_w_d", "vssrlni_wu_d", "vssrani_wu_d",
++                "vssrlrni_w_d", "vssrarni_w_d", "vssrlrni_wu_d", "vssrarni_wu_d",
++                "vpermi_w", "vextrins_w"] in
++  def int_loongarch_lsx_#inst
++    : VecInt<[llvm_v4i32_ty],
++             [llvm_v4i32_ty, llvm_v4i32_ty, llvm_i32_ty],
++             [IntrNoMem, ImmArg<ArgIndex<2>>]>;
++foreach inst = ["vsrlni_d_q", "vsrani_d_q", "vsrlrni_d_q", "vsrarni_d_q",
++                "vssrlni_d_q", "vssrani_d_q", "vssrlni_du_q", "vssrani_du_q",
++                "vssrlrni_d_q", "vssrarni_d_q", "vssrlrni_du_q", "vssrarni_du_q",
++                "vshuf4i_d", "vextrins_d"] in
++  def int_loongarch_lsx_#inst
++    : VecInt<[llvm_v2i64_ty],
++             [llvm_v2i64_ty, llvm_v2i64_ty, llvm_i32_ty],
++             [IntrNoMem, ImmArg<ArgIndex<2>>]>;
++
++foreach inst = ["vmaddwev_h_b", "vmaddwod_h_b", "vmaddwev_h_bu",
++                "vmaddwod_h_bu", "vmaddwev_h_bu_b", "vmaddwod_h_bu_b"] in
++  def int_loongarch_lsx_#inst
++    : VecInt<[llvm_v8i16_ty],
++             [llvm_v8i16_ty, llvm_v16i8_ty, llvm_v16i8_ty],
++             [IntrNoMem]>;
++foreach inst = ["vmaddwev_w_h", "vmaddwod_w_h", "vmaddwev_w_hu",
++                "vmaddwod_w_hu", "vmaddwev_w_hu_h", "vmaddwod_w_hu_h"] in
++  def int_loongarch_lsx_#inst
++    : VecInt<[llvm_v4i32_ty],
++             [llvm_v4i32_ty, llvm_v8i16_ty, llvm_v8i16_ty],
++             [IntrNoMem]>;
++foreach inst = ["vmaddwev_d_w", "vmaddwod_d_w", "vmaddwev_d_wu",
++                "vmaddwod_d_wu", "vmaddwev_d_wu_w", "vmaddwod_d_wu_w"] in
++  def int_loongarch_lsx_#inst
++    : VecInt<[llvm_v2i64_ty],
++             [llvm_v2i64_ty, llvm_v4i32_ty, llvm_v4i32_ty],
++             [IntrNoMem]>;
++foreach inst = ["vmaddwev_q_d", "vmaddwod_q_d", "vmaddwev_q_du",
++                "vmaddwod_q_du", "vmaddwev_q_du_d", "vmaddwod_q_du_d"] in
++  def int_loongarch_lsx_#inst
++    : VecInt<[llvm_v2i64_ty],
++             [llvm_v2i64_ty, llvm_v2i64_ty, llvm_v2i64_ty],
++             [IntrNoMem]>;
++
++foreach inst = ["vsllwil_h_b", "vsllwil_hu_bu"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v8i16_ty],
++                                       [llvm_v16i8_ty, llvm_i32_ty],
++                                       [IntrNoMem, ImmArg<ArgIndex<1>>]>;
++foreach inst = ["vsllwil_w_h", "vsllwil_wu_hu"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v4i32_ty],
++                                       [llvm_v8i16_ty, llvm_i32_ty],
++                                       [IntrNoMem, ImmArg<ArgIndex<1>>]>;
++foreach inst = ["vsllwil_d_w", "vsllwil_du_wu"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v2i64_ty],
++                                       [llvm_v4i32_ty, llvm_i32_ty],
++                                       [IntrNoMem, ImmArg<ArgIndex<1>>]>;
++
++foreach inst = ["vneg_b", "vmskltz_b", "vmskgez_b", "vmsknz_b",
++                "vclo_b", "vclz_b", "vpcnt_b"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v16i8_ty], [llvm_v16i8_ty],
++                                       [IntrNoMem]>;
++foreach inst = ["vneg_h", "vmskltz_h", "vclo_h", "vclz_h", "vpcnt_h"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v8i16_ty], [llvm_v8i16_ty],
++                                       [IntrNoMem]>;
++foreach inst = ["vneg_w", "vmskltz_w", "vclo_w", "vclz_w", "vpcnt_w"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v4i32_ty], [llvm_v4i32_ty],
++                                       [IntrNoMem]>;
++foreach inst = ["vneg_d", "vexth_q_d", "vexth_qu_du", "vmskltz_d",
++                "vextl_q_d", "vextl_qu_du", "vclo_d", "vclz_d", "vpcnt_d"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v2i64_ty], [llvm_v2i64_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vexth_h_b", "vexth_hu_bu"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v8i16_ty], [llvm_v16i8_ty],
++                                       [IntrNoMem]>;
++foreach inst = ["vexth_w_h", "vexth_wu_hu"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v4i32_ty], [llvm_v8i16_ty],
++                                       [IntrNoMem]>;
++foreach inst = ["vexth_d_w", "vexth_du_wu"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v2i64_ty], [llvm_v4i32_ty],
++                                       [IntrNoMem]>;
++
++def int_loongarch_lsx_vldi : VecInt<[llvm_v2i64_ty], [llvm_i32_ty],
++                                    [IntrNoMem, ImmArg<ArgIndex<0>>]>;
++def int_loongarch_lsx_vrepli_b : VecInt<[llvm_v16i8_ty], [llvm_i32_ty],
++                                        [IntrNoMem, ImmArg<ArgIndex<0>>]>;
++def int_loongarch_lsx_vrepli_h : VecInt<[llvm_v8i16_ty], [llvm_i32_ty],
++                                        [IntrNoMem, ImmArg<ArgIndex<0>>]>;
++def int_loongarch_lsx_vrepli_w : VecInt<[llvm_v4i32_ty], [llvm_i32_ty],
++                                        [IntrNoMem, ImmArg<ArgIndex<0>>]>;
++def int_loongarch_lsx_vrepli_d : VecInt<[llvm_v2i64_ty], [llvm_i32_ty],
++                                        [IntrNoMem, ImmArg<ArgIndex<0>>]>;
++
++def int_loongarch_lsx_vreplgr2vr_b : VecInt<[llvm_v16i8_ty], [llvm_i32_ty],
++                                            [IntrNoMem]>;
++def int_loongarch_lsx_vreplgr2vr_h : VecInt<[llvm_v8i16_ty], [llvm_i32_ty],
++                                            [IntrNoMem]>;
++def int_loongarch_lsx_vreplgr2vr_w : VecInt<[llvm_v4i32_ty], [llvm_i32_ty],
++                                            [IntrNoMem]>;
++def int_loongarch_lsx_vreplgr2vr_d : VecInt<[llvm_v2i64_ty], [llvm_i64_ty],
++                                            [IntrNoMem]>;
++
++def int_loongarch_lsx_vinsgr2vr_b
++  : VecInt<[llvm_v16i8_ty], [llvm_v16i8_ty, llvm_i32_ty, llvm_i32_ty],
++           [IntrNoMem, ImmArg<ArgIndex<2>>]>;
++def int_loongarch_lsx_vinsgr2vr_h
++  : VecInt<[llvm_v8i16_ty], [llvm_v8i16_ty, llvm_i32_ty, llvm_i32_ty],
++           [IntrNoMem, ImmArg<ArgIndex<2>>]>;
++def int_loongarch_lsx_vinsgr2vr_w
++  : VecInt<[llvm_v4i32_ty], [llvm_v4i32_ty, llvm_i32_ty, llvm_i32_ty],
++           [IntrNoMem, ImmArg<ArgIndex<2>>]>;
++def int_loongarch_lsx_vinsgr2vr_d
++  : VecInt<[llvm_v2i64_ty], [llvm_v2i64_ty, llvm_i64_ty, llvm_i32_ty],
++           [IntrNoMem, ImmArg<ArgIndex<2>>]>;
++
++def int_loongarch_lsx_vreplve_b
++  : VecInt<[llvm_v16i8_ty], [llvm_v16i8_ty, llvm_i32_ty], [IntrNoMem]>;
++def int_loongarch_lsx_vreplve_h
++  : VecInt<[llvm_v8i16_ty], [llvm_v8i16_ty, llvm_i32_ty], [IntrNoMem]>;
++def int_loongarch_lsx_vreplve_w
++  : VecInt<[llvm_v4i32_ty], [llvm_v4i32_ty, llvm_i32_ty], [IntrNoMem]>;
++def int_loongarch_lsx_vreplve_d
++  : VecInt<[llvm_v2i64_ty], [llvm_v2i64_ty, llvm_i32_ty], [IntrNoMem]>;
++
++foreach inst = ["vpickve2gr_b", "vpickve2gr_bu" ] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_i32_ty],
++                                       [llvm_v16i8_ty, llvm_i32_ty],
++                                       [IntrNoMem, ImmArg<ArgIndex<1>>]>;
++foreach inst = ["vpickve2gr_h", "vpickve2gr_hu" ] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_i32_ty],
++                                       [llvm_v8i16_ty, llvm_i32_ty],
++                                       [IntrNoMem, ImmArg<ArgIndex<1>>]>;
++foreach inst = ["vpickve2gr_w", "vpickve2gr_wu" ] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_i32_ty],
++                                       [llvm_v4i32_ty, llvm_i32_ty],
++                                       [IntrNoMem, ImmArg<ArgIndex<1>>]>;
++foreach inst = ["vpickve2gr_d", "vpickve2gr_du" ] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_i64_ty],
++                                       [llvm_v2i64_ty, llvm_i32_ty],
++                                       [IntrNoMem, ImmArg<ArgIndex<1>>]>;
++
++def int_loongarch_lsx_bz_b : VecInt<[llvm_i32_ty], [llvm_v16i8_ty],
++                                    [IntrNoMem]>;
++def int_loongarch_lsx_bz_h : VecInt<[llvm_i32_ty], [llvm_v8i16_ty],
++                                    [IntrNoMem]>;
++def int_loongarch_lsx_bz_w : VecInt<[llvm_i32_ty], [llvm_v4i32_ty],
++                                    [IntrNoMem]>;
++def int_loongarch_lsx_bz_d : VecInt<[llvm_i32_ty], [llvm_v2i64_ty],
++                                    [IntrNoMem]>;
++def int_loongarch_lsx_bz_v : VecInt<[llvm_i32_ty], [llvm_v16i8_ty],
++                                    [IntrNoMem]>;
++
++def int_loongarch_lsx_bnz_v : VecInt<[llvm_i32_ty], [llvm_v16i8_ty],
++                                     [IntrNoMem]>;
++def int_loongarch_lsx_bnz_b : VecInt<[llvm_i32_ty], [llvm_v16i8_ty],
++                                     [IntrNoMem]>;
++def int_loongarch_lsx_bnz_h : VecInt<[llvm_i32_ty], [llvm_v8i16_ty],
++                                     [IntrNoMem]>;
++def int_loongarch_lsx_bnz_w : VecInt<[llvm_i32_ty], [llvm_v4i32_ty],
++                                     [IntrNoMem]>;
++def int_loongarch_lsx_bnz_d : VecInt<[llvm_i32_ty], [llvm_v2i64_ty],
++                                     [IntrNoMem]>;
++
++// LSX Float
++
++foreach inst = ["vfadd_s", "vfsub_s", "vfmul_s", "vfdiv_s",
++                "vfmax_s", "vfmin_s", "vfmaxa_s", "vfmina_s"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v4f32_ty],
++                                       [llvm_v4f32_ty, llvm_v4f32_ty],
++                                       [IntrNoMem]>;
++foreach inst = ["vfadd_d", "vfsub_d", "vfmul_d", "vfdiv_d",
++                "vfmax_d", "vfmin_d", "vfmaxa_d", "vfmina_d"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v2f64_ty],
++                                       [llvm_v2f64_ty, llvm_v2f64_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vfmadd_s", "vfmsub_s", "vfnmadd_s", "vfnmsub_s"] in
++  def int_loongarch_lsx_#inst
++    : VecInt<[llvm_v4f32_ty],
++             [llvm_v4f32_ty, llvm_v4f32_ty, llvm_v4f32_ty],
++             [IntrNoMem]>;
++foreach inst = ["vfmadd_d", "vfmsub_d", "vfnmadd_d", "vfnmsub_d"] in
++  def int_loongarch_lsx_#inst
++    : VecInt<[llvm_v2f64_ty],
++             [llvm_v2f64_ty, llvm_v2f64_ty, llvm_v2f64_ty],
++             [IntrNoMem]>;
++
++foreach inst = ["vflogb_s", "vfsqrt_s", "vfrecip_s", "vfrsqrt_s", "vfrint_s",
++                "vfrintrne_s", "vfrintrz_s", "vfrintrp_s", "vfrintrm_s"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v4f32_ty], [llvm_v4f32_ty],
++                                       [IntrNoMem]>;
++foreach inst = ["vflogb_d", "vfsqrt_d", "vfrecip_d", "vfrsqrt_d", "vfrint_d",
++                "vfrintrne_d", "vfrintrz_d", "vfrintrp_d", "vfrintrm_d"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v2f64_ty], [llvm_v2f64_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vfcvtl_s_h", "vfcvth_s_h"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v4f32_ty], [llvm_v8i16_ty],
++                                       [IntrNoMem]>;
++foreach inst = ["vfcvtl_d_s", "vfcvth_d_s"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v2f64_ty], [llvm_v4f32_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vftintrne_w_s", "vftintrz_w_s", "vftintrp_w_s", "vftintrm_w_s",
++                "vftint_w_s", "vftintrz_wu_s", "vftint_wu_s", "vfclass_s"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v4i32_ty], [llvm_v4f32_ty],
++                                       [IntrNoMem]>;
++foreach inst = ["vftintrne_l_d", "vftintrz_l_d", "vftintrp_l_d", "vftintrm_l_d",
++                "vftint_l_d", "vftintrz_lu_d", "vftint_lu_d", "vfclass_d"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v2i64_ty], [llvm_v2f64_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vftintrnel_l_s", "vftintrneh_l_s", "vftintrzl_l_s",
++                "vftintrzh_l_s", "vftintrpl_l_s", "vftintrph_l_s",
++                "vftintrml_l_s", "vftintrmh_l_s", "vftintl_l_s",
++                "vftinth_l_s"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v2i64_ty], [llvm_v4f32_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vffint_s_w", "vffint_s_wu"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v4f32_ty], [llvm_v4i32_ty],
++                                       [IntrNoMem]>;
++foreach inst = ["vffint_d_l", "vffint_d_lu"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v2f64_ty], [llvm_v2i64_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vffintl_d_w", "vffinth_d_w"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v2f64_ty], [llvm_v4i32_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vffint_s_l"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v4f32_ty],
++                                       [llvm_v2i64_ty, llvm_v2i64_ty],
++                                       [IntrNoMem]>;
++foreach inst = ["vftintrne_w_d", "vftintrz_w_d", "vftintrp_w_d", "vftintrm_w_d",
++                "vftint_w_d"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v4i32_ty],
++                                       [llvm_v2f64_ty, llvm_v2f64_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vfcvt_h_s"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v8i16_ty],
++                                       [llvm_v4f32_ty, llvm_v4f32_ty],
++                                       [IntrNoMem]>;
++foreach inst = ["vfcvt_s_d"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v4f32_ty],
++                                       [llvm_v2f64_ty, llvm_v2f64_ty],
++                                       [IntrNoMem]>;
++
++foreach inst = ["vfcmp_caf_s", "vfcmp_cun_s", "vfcmp_ceq_s", "vfcmp_cueq_s",
++                "vfcmp_clt_s", "vfcmp_cult_s", "vfcmp_cle_s", "vfcmp_cule_s",
++                "vfcmp_cne_s", "vfcmp_cor_s", "vfcmp_cune_s",
++                "vfcmp_saf_s", "vfcmp_sun_s", "vfcmp_seq_s", "vfcmp_sueq_s",
++                "vfcmp_slt_s", "vfcmp_sult_s", "vfcmp_sle_s", "vfcmp_sule_s",
++                "vfcmp_sne_s", "vfcmp_sor_s", "vfcmp_sune_s"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v4i32_ty],
++                                       [llvm_v4f32_ty, llvm_v4f32_ty],
++                                       [IntrNoMem]>;
++foreach inst = ["vfcmp_caf_d", "vfcmp_cun_d", "vfcmp_ceq_d", "vfcmp_cueq_d",
++                "vfcmp_clt_d", "vfcmp_cult_d", "vfcmp_cle_d", "vfcmp_cule_d",
++                "vfcmp_cne_d", "vfcmp_cor_d", "vfcmp_cune_d",
++                "vfcmp_saf_d", "vfcmp_sun_d", "vfcmp_seq_d", "vfcmp_sueq_d",
++                "vfcmp_slt_d", "vfcmp_sult_d", "vfcmp_sle_d", "vfcmp_sule_d",
++                "vfcmp_sne_d", "vfcmp_sor_d", "vfcmp_sune_d"] in
++  def int_loongarch_lsx_#inst : VecInt<[llvm_v2i64_ty],
++                                       [llvm_v2f64_ty, llvm_v2f64_ty],
++                                       [IntrNoMem]>;
++
++// LSX load/store
++def int_loongarch_lsx_vld
++  : VecInt<[llvm_v16i8_ty], [llvm_ptr_ty, llvm_i32_ty],
++           [IntrReadMem, IntrArgMemOnly, ImmArg<ArgIndex<1>>]>;
++def int_loongarch_lsx_vldx
++  : VecInt<[llvm_v16i8_ty], [llvm_ptr_ty, llvm_i64_ty],
++           [IntrReadMem, IntrArgMemOnly]>;
++def int_loongarch_lsx_vldrepl_b
++  : VecInt<[llvm_v16i8_ty], [llvm_ptr_ty, llvm_i32_ty],
++           [IntrReadMem, IntrArgMemOnly, ImmArg<ArgIndex<1>>]>;
++def int_loongarch_lsx_vldrepl_h
++  : VecInt<[llvm_v8i16_ty], [llvm_ptr_ty, llvm_i32_ty],
++           [IntrReadMem, IntrArgMemOnly, ImmArg<ArgIndex<1>>]>;
++def int_loongarch_lsx_vldrepl_w
++  : VecInt<[llvm_v4i32_ty], [llvm_ptr_ty, llvm_i32_ty],
++           [IntrReadMem, IntrArgMemOnly, ImmArg<ArgIndex<1>>]>;
++def int_loongarch_lsx_vldrepl_d
++  : VecInt<[llvm_v2i64_ty], [llvm_ptr_ty, llvm_i32_ty],
++           [IntrReadMem, IntrArgMemOnly, ImmArg<ArgIndex<1>>]>;
++
++def int_loongarch_lsx_vst
++  : VecInt<[], [llvm_v16i8_ty, llvm_ptr_ty, llvm_i32_ty],
++           [IntrWriteMem, IntrArgMemOnly, ImmArg<ArgIndex<2>>]>;
++def int_loongarch_lsx_vstx
++  : VecInt<[], [llvm_v16i8_ty, llvm_ptr_ty, llvm_i64_ty],
++           [IntrWriteMem, IntrArgMemOnly]>;
++def int_loongarch_lsx_vstelm_b
++  : VecInt<[], [llvm_v16i8_ty, llvm_ptr_ty, llvm_i32_ty, llvm_i32_ty],
++           [IntrWriteMem, IntrArgMemOnly, ImmArg<ArgIndex<2>>, ImmArg<ArgIndex<3>>]>;
++def int_loongarch_lsx_vstelm_h
++  : VecInt<[], [llvm_v8i16_ty, llvm_ptr_ty, llvm_i32_ty, llvm_i32_ty],
++           [IntrWriteMem, IntrArgMemOnly, ImmArg<ArgIndex<2>>, ImmArg<ArgIndex<3>>]>;
++def int_loongarch_lsx_vstelm_w
++  : VecInt<[], [llvm_v4i32_ty, llvm_ptr_ty, llvm_i32_ty, llvm_i32_ty],
++           [IntrWriteMem, IntrArgMemOnly, ImmArg<ArgIndex<2>>, ImmArg<ArgIndex<3>>]>;
++def int_loongarch_lsx_vstelm_d
++  : VecInt<[], [llvm_v2i64_ty, llvm_ptr_ty, llvm_i32_ty, llvm_i32_ty],
++           [IntrWriteMem, IntrArgMemOnly, ImmArg<ArgIndex<2>>, ImmArg<ArgIndex<3>>]>;
++
++} // TargetPrefix = "loongarch"
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelDAGToDAG.cpp b/llvm/lib/Target/LoongArch/LoongArchISelDAGToDAG.cpp
+index ae7167cb5ce7..f55184019988 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelDAGToDAG.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchISelDAGToDAG.cpp
+@@ -15,6 +15,7 @@
+ #include "MCTargetDesc/LoongArchMCTargetDesc.h"
+ #include "MCTargetDesc/LoongArchMatInt.h"
+ #include "llvm/Support/KnownBits.h"
++#include "llvm/Support/raw_ostream.h"
+ 
+ using namespace llvm;
+ 
+@@ -75,7 +76,14 @@ void LoongArchDAGToDAGISel::Select(SDNode *Node) {
+     ReplaceNode(Node, CurDAG->getMachineNode(ADDIOp, DL, VT, TFI, Imm));
+     return;
+   }
+-    // TODO: Add selection nodes needed later.
++  case ISD::BITCAST: {
++    if (VT.is128BitVector() || VT.is512BitVector()) {
++      ReplaceUses(SDValue(Node, 0), Node->getOperand(0));
++      CurDAG->RemoveDeadNode(Node);
++      return;
++    }
++    break;
++  }
+   }
+ 
+   // Select the default instruction.
+@@ -262,6 +270,96 @@ bool LoongArchDAGToDAGISel::selectZExti32(SDValue N, SDValue &Val) {
+   return false;
+ }
+ 
++bool LoongArchDAGToDAGISel::selectVSplat(SDNode *N, APInt &Imm,
++                                         unsigned MinSizeInBits) const {
++  if (!Subtarget->hasExtLSX())
++    return false;
++
++  BuildVectorSDNode *Node = dyn_cast<BuildVectorSDNode>(N);
++
++  if (!Node)
++    return false;
++
++  APInt SplatValue, SplatUndef;
++  unsigned SplatBitSize;
++  bool HasAnyUndefs;
++
++  if (!Node->isConstantSplat(SplatValue, SplatUndef, SplatBitSize, HasAnyUndefs,
++                             MinSizeInBits, /*IsBigEndian=*/false))
++    return false;
++
++  Imm = SplatValue;
++
++  return true;
++}
++
++template <unsigned ImmBitSize, bool IsSigned>
++bool LoongArchDAGToDAGISel::selectVSplatImm(SDValue N, SDValue &SplatVal) {
++  APInt ImmValue;
++  EVT EltTy = N->getValueType(0).getVectorElementType();
++
++  if (N->getOpcode() == ISD::BITCAST)
++    N = N->getOperand(0);
++
++  if (selectVSplat(N.getNode(), ImmValue, EltTy.getSizeInBits()) &&
++      ImmValue.getBitWidth() == EltTy.getSizeInBits()) {
++    if (IsSigned && ImmValue.isSignedIntN(ImmBitSize)) {
++      SplatVal = CurDAG->getTargetConstant(ImmValue.getSExtValue(), SDLoc(N),
++                                           Subtarget->getGRLenVT());
++      return true;
++    }
++    if (!IsSigned && ImmValue.isIntN(ImmBitSize)) {
++      SplatVal = CurDAG->getTargetConstant(ImmValue.getZExtValue(), SDLoc(N),
++                                           Subtarget->getGRLenVT());
++      return true;
++    }
++  }
++
++  return false;
++}
++
++bool LoongArchDAGToDAGISel::selectVSplatUimmInvPow2(SDValue N,
++                                                    SDValue &SplatImm) const {
++  APInt ImmValue;
++  EVT EltTy = N->getValueType(0).getVectorElementType();
++
++  if (N->getOpcode() == ISD::BITCAST)
++    N = N->getOperand(0);
++
++  if (selectVSplat(N.getNode(), ImmValue, EltTy.getSizeInBits()) &&
++      ImmValue.getBitWidth() == EltTy.getSizeInBits()) {
++    int32_t Log2 = (~ImmValue).exactLogBase2();
++
++    if (Log2 != -1) {
++      SplatImm = CurDAG->getTargetConstant(Log2, SDLoc(N), EltTy);
++      return true;
++    }
++  }
++
++  return false;
++}
++
++bool LoongArchDAGToDAGISel::selectVSplatUimmPow2(SDValue N,
++                                                 SDValue &SplatImm) const {
++  APInt ImmValue;
++  EVT EltTy = N->getValueType(0).getVectorElementType();
++
++  if (N->getOpcode() == ISD::BITCAST)
++    N = N->getOperand(0);
++
++  if (selectVSplat(N.getNode(), ImmValue, EltTy.getSizeInBits()) &&
++      ImmValue.getBitWidth() == EltTy.getSizeInBits()) {
++    int32_t Log2 = ImmValue.exactLogBase2();
++
++    if (Log2 != -1) {
++      SplatImm = CurDAG->getTargetConstant(Log2, SDLoc(N), EltTy);
++      return true;
++    }
++  }
++
++  return false;
++}
++
+ // This pass converts a legalized DAG into a LoongArch-specific DAG, ready
+ // for instruction scheduling.
+ FunctionPass *llvm::createLoongArchISelDag(LoongArchTargetMachine &TM) {
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelDAGToDAG.h b/llvm/lib/Target/LoongArch/LoongArchISelDAGToDAG.h
+index 3099407aea3e..5e3d6ccc3755 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelDAGToDAG.h
++++ b/llvm/lib/Target/LoongArch/LoongArchISelDAGToDAG.h
+@@ -56,6 +56,14 @@ public:
+   bool selectSExti32(SDValue N, SDValue &Val);
+   bool selectZExti32(SDValue N, SDValue &Val);
+ 
++  bool selectVSplat(SDNode *N, APInt &Imm, unsigned MinSizeInBits) const;
++
++  template <unsigned ImmSize, bool IsSigned = false>
++  bool selectVSplatImm(SDValue N, SDValue &SplatVal);
++
++  bool selectVSplatUimmInvPow2(SDValue N, SDValue &SplatImm) const;
++  bool selectVSplatUimmPow2(SDValue N, SDValue &SplatImm) const;
++
+ // Include the pieces autogenerated from the target description.
+ #include "LoongArchGenDAGISel.inc"
+ };
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+index db5961fc501a..c05133647929 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+@@ -62,6 +62,13 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+                     MVT::v4i64})
+       addRegisterClass(VT, &LoongArch::LASX256RegClass);
+ 
++  static const MVT::SimpleValueType LSXVTs[] = {
++      MVT::v16i8, MVT::v8i16, MVT::v4i32, MVT::v2i64, MVT::v4f32, MVT::v2f64};
++
++  if (Subtarget.hasExtLSX())
++    for (MVT VT : LSXVTs)
++      addRegisterClass(VT, &LoongArch::LSX128RegClass);
++
+   setLoadExtAction({ISD::EXTLOAD, ISD::SEXTLOAD, ISD::ZEXTLOAD}, GRLenVT,
+                    MVT::i1, Promote);
+ 
+@@ -109,6 +116,7 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+     setOperationAction(ISD::INTRINSIC_W_CHAIN, MVT::Other, Custom);
+     setOperationAction(ISD::READ_REGISTER, MVT::i32, Custom);
+     setOperationAction(ISD::WRITE_REGISTER, MVT::i32, Custom);
++    setOperationAction(ISD::INTRINSIC_WO_CHAIN, MVT::i32, Custom);
+     if (Subtarget.hasBasicF() && !Subtarget.hasBasicD())
+       setOperationAction(ISD::FP_TO_UINT, MVT::i32, Custom);
+     if (Subtarget.hasBasicF())
+@@ -138,6 +146,7 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+     setOperationAction(ISD::WRITE_REGISTER, MVT::i64, Custom);
+     setOperationAction(ISD::INTRINSIC_W_CHAIN, MVT::Other, Custom);
+     setOperationAction(ISD::INTRINSIC_VOID, MVT::i64, Custom);
++    setOperationAction(ISD::INTRINSIC_WO_CHAIN, MVT::i64, Custom);
+   }
+ 
+   static const ISD::CondCode FPCCToExpand[] = {
+@@ -194,6 +203,10 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+     setOperationAction(ISD::UINT_TO_FP, GRLenVT, Custom);
+   }
+ 
++  if (Subtarget.hasExtLSX())
++    setOperationAction({ISD::UMAX, ISD::UMIN, ISD::SMAX, ISD::SMIN},
++                       {MVT::v2i64, MVT::v4i32, MVT::v8i16, MVT::v16i8}, Legal);
++
+   // Compute derived properties from the register classes.
+   computeRegisterProperties(Subtarget.getRegisterInfo());
+ 
+@@ -215,6 +228,8 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+   setTargetDAGCombine(ISD::AND);
+   setTargetDAGCombine(ISD::OR);
+   setTargetDAGCombine(ISD::SRL);
++  if (Subtarget.hasExtLSX())
++    setTargetDAGCombine(ISD::INTRINSIC_WO_CHAIN);
+ }
+ 
+ bool LoongArchTargetLowering::isOffsetFoldingLegal(
+@@ -652,9 +667,24 @@ LoongArchTargetLowering::lowerGlobalTLSAddress(SDValue Op,
+   return Addr;
+ }
+ 
++template <unsigned N>
++static SDValue checkIntrinsicImmArg(SDValue Op, unsigned ImmOp,
++                                    SelectionDAG &DAG, bool IsSigned = false) {
++  auto *CImm = cast<ConstantSDNode>(Op->getOperand(ImmOp));
++  // Check the ImmArg.
++  if ((IsSigned && !isInt<N>(CImm->getSExtValue())) ||
++      (!IsSigned && !isUInt<N>(CImm->getZExtValue()))) {
++    DAG.getContext()->emitError(Op->getOperationName(0) +
++                                ": argument out of range.");
++    return DAG.getNode(ISD::UNDEF, SDLoc(Op), Op.getValueType());
++  }
++  return SDValue();
++}
++
+ SDValue
+ LoongArchTargetLowering::lowerINTRINSIC_WO_CHAIN(SDValue Op,
+                                                  SelectionDAG &DAG) const {
++  SDLoc DL(Op);
+   switch (Op.getConstantOperandVal(0)) {
+   default:
+     return SDValue(); // Don't custom lower most intrinsics.
+@@ -662,6 +692,141 @@ LoongArchTargetLowering::lowerINTRINSIC_WO_CHAIN(SDValue Op,
+     EVT PtrVT = getPointerTy(DAG.getDataLayout());
+     return DAG.getRegister(LoongArch::R2, PtrVT);
+   }
++  case Intrinsic::loongarch_lsx_vpickve2gr_d:
++  case Intrinsic::loongarch_lsx_vpickve2gr_du:
++  case Intrinsic::loongarch_lsx_vreplvei_d:
++    return checkIntrinsicImmArg<1>(Op, 2, DAG);
++  case Intrinsic::loongarch_lsx_vreplvei_w:
++    return checkIntrinsicImmArg<2>(Op, 2, DAG);
++  case Intrinsic::loongarch_lsx_vsat_b:
++  case Intrinsic::loongarch_lsx_vsat_bu:
++  case Intrinsic::loongarch_lsx_vrotri_b:
++  case Intrinsic::loongarch_lsx_vsllwil_h_b:
++  case Intrinsic::loongarch_lsx_vsllwil_hu_bu:
++  case Intrinsic::loongarch_lsx_vsrlri_b:
++  case Intrinsic::loongarch_lsx_vsrari_b:
++  case Intrinsic::loongarch_lsx_vreplvei_h:
++    return checkIntrinsicImmArg<3>(Op, 2, DAG);
++  case Intrinsic::loongarch_lsx_vsat_h:
++  case Intrinsic::loongarch_lsx_vsat_hu:
++  case Intrinsic::loongarch_lsx_vrotri_h:
++  case Intrinsic::loongarch_lsx_vsllwil_w_h:
++  case Intrinsic::loongarch_lsx_vsllwil_wu_hu:
++  case Intrinsic::loongarch_lsx_vsrlri_h:
++  case Intrinsic::loongarch_lsx_vsrari_h:
++  case Intrinsic::loongarch_lsx_vreplvei_b:
++    return checkIntrinsicImmArg<4>(Op, 2, DAG);
++  case Intrinsic::loongarch_lsx_vsrlni_b_h:
++  case Intrinsic::loongarch_lsx_vsrani_b_h:
++  case Intrinsic::loongarch_lsx_vsrlrni_b_h:
++  case Intrinsic::loongarch_lsx_vsrarni_b_h:
++  case Intrinsic::loongarch_lsx_vssrlni_b_h:
++  case Intrinsic::loongarch_lsx_vssrani_b_h:
++  case Intrinsic::loongarch_lsx_vssrlni_bu_h:
++  case Intrinsic::loongarch_lsx_vssrani_bu_h:
++  case Intrinsic::loongarch_lsx_vssrlrni_b_h:
++  case Intrinsic::loongarch_lsx_vssrarni_b_h:
++  case Intrinsic::loongarch_lsx_vssrlrni_bu_h:
++  case Intrinsic::loongarch_lsx_vssrarni_bu_h:
++    return checkIntrinsicImmArg<4>(Op, 3, DAG);
++  case Intrinsic::loongarch_lsx_vsat_w:
++  case Intrinsic::loongarch_lsx_vsat_wu:
++  case Intrinsic::loongarch_lsx_vrotri_w:
++  case Intrinsic::loongarch_lsx_vsllwil_d_w:
++  case Intrinsic::loongarch_lsx_vsllwil_du_wu:
++  case Intrinsic::loongarch_lsx_vsrlri_w:
++  case Intrinsic::loongarch_lsx_vsrari_w:
++  case Intrinsic::loongarch_lsx_vslei_bu:
++  case Intrinsic::loongarch_lsx_vslei_hu:
++  case Intrinsic::loongarch_lsx_vslei_wu:
++  case Intrinsic::loongarch_lsx_vslei_du:
++  case Intrinsic::loongarch_lsx_vslti_bu:
++  case Intrinsic::loongarch_lsx_vslti_hu:
++  case Intrinsic::loongarch_lsx_vslti_wu:
++  case Intrinsic::loongarch_lsx_vslti_du:
++  case Intrinsic::loongarch_lsx_vbsll_v:
++  case Intrinsic::loongarch_lsx_vbsrl_v:
++    return checkIntrinsicImmArg<5>(Op, 2, DAG);
++  case Intrinsic::loongarch_lsx_vseqi_b:
++  case Intrinsic::loongarch_lsx_vseqi_h:
++  case Intrinsic::loongarch_lsx_vseqi_w:
++  case Intrinsic::loongarch_lsx_vseqi_d:
++  case Intrinsic::loongarch_lsx_vslei_b:
++  case Intrinsic::loongarch_lsx_vslei_h:
++  case Intrinsic::loongarch_lsx_vslei_w:
++  case Intrinsic::loongarch_lsx_vslei_d:
++  case Intrinsic::loongarch_lsx_vslti_b:
++  case Intrinsic::loongarch_lsx_vslti_h:
++  case Intrinsic::loongarch_lsx_vslti_w:
++  case Intrinsic::loongarch_lsx_vslti_d:
++    return checkIntrinsicImmArg<5>(Op, 2, DAG, /*IsSigned=*/true);
++  case Intrinsic::loongarch_lsx_vsrlni_h_w:
++  case Intrinsic::loongarch_lsx_vsrani_h_w:
++  case Intrinsic::loongarch_lsx_vsrlrni_h_w:
++  case Intrinsic::loongarch_lsx_vsrarni_h_w:
++  case Intrinsic::loongarch_lsx_vssrlni_h_w:
++  case Intrinsic::loongarch_lsx_vssrani_h_w:
++  case Intrinsic::loongarch_lsx_vssrlni_hu_w:
++  case Intrinsic::loongarch_lsx_vssrani_hu_w:
++  case Intrinsic::loongarch_lsx_vssrlrni_h_w:
++  case Intrinsic::loongarch_lsx_vssrarni_h_w:
++  case Intrinsic::loongarch_lsx_vssrlrni_hu_w:
++  case Intrinsic::loongarch_lsx_vssrarni_hu_w:
++  case Intrinsic::loongarch_lsx_vfrstpi_b:
++  case Intrinsic::loongarch_lsx_vfrstpi_h:
++    return checkIntrinsicImmArg<5>(Op, 3, DAG);
++  case Intrinsic::loongarch_lsx_vsat_d:
++  case Intrinsic::loongarch_lsx_vsat_du:
++  case Intrinsic::loongarch_lsx_vrotri_d:
++  case Intrinsic::loongarch_lsx_vsrlri_d:
++  case Intrinsic::loongarch_lsx_vsrari_d:
++    return checkIntrinsicImmArg<6>(Op, 2, DAG);
++  case Intrinsic::loongarch_lsx_vsrlni_w_d:
++  case Intrinsic::loongarch_lsx_vsrani_w_d:
++  case Intrinsic::loongarch_lsx_vsrlrni_w_d:
++  case Intrinsic::loongarch_lsx_vsrarni_w_d:
++  case Intrinsic::loongarch_lsx_vssrlni_w_d:
++  case Intrinsic::loongarch_lsx_vssrani_w_d:
++  case Intrinsic::loongarch_lsx_vssrlni_wu_d:
++  case Intrinsic::loongarch_lsx_vssrani_wu_d:
++  case Intrinsic::loongarch_lsx_vssrlrni_w_d:
++  case Intrinsic::loongarch_lsx_vssrarni_w_d:
++  case Intrinsic::loongarch_lsx_vssrlrni_wu_d:
++  case Intrinsic::loongarch_lsx_vssrarni_wu_d:
++    return checkIntrinsicImmArg<6>(Op, 3, DAG);
++  case Intrinsic::loongarch_lsx_vsrlni_d_q:
++  case Intrinsic::loongarch_lsx_vsrani_d_q:
++  case Intrinsic::loongarch_lsx_vsrlrni_d_q:
++  case Intrinsic::loongarch_lsx_vsrarni_d_q:
++  case Intrinsic::loongarch_lsx_vssrlni_d_q:
++  case Intrinsic::loongarch_lsx_vssrani_d_q:
++  case Intrinsic::loongarch_lsx_vssrlni_du_q:
++  case Intrinsic::loongarch_lsx_vssrani_du_q:
++  case Intrinsic::loongarch_lsx_vssrlrni_d_q:
++  case Intrinsic::loongarch_lsx_vssrarni_d_q:
++  case Intrinsic::loongarch_lsx_vssrlrni_du_q:
++  case Intrinsic::loongarch_lsx_vssrarni_du_q:
++    return checkIntrinsicImmArg<7>(Op, 3, DAG);
++  case Intrinsic::loongarch_lsx_vnori_b:
++  case Intrinsic::loongarch_lsx_vshuf4i_b:
++  case Intrinsic::loongarch_lsx_vshuf4i_h:
++  case Intrinsic::loongarch_lsx_vshuf4i_w:
++    return checkIntrinsicImmArg<8>(Op, 2, DAG);
++  case Intrinsic::loongarch_lsx_vshuf4i_d:
++  case Intrinsic::loongarch_lsx_vpermi_w:
++  case Intrinsic::loongarch_lsx_vbitseli_b:
++  case Intrinsic::loongarch_lsx_vextrins_b:
++  case Intrinsic::loongarch_lsx_vextrins_h:
++  case Intrinsic::loongarch_lsx_vextrins_w:
++  case Intrinsic::loongarch_lsx_vextrins_d:
++    return checkIntrinsicImmArg<8>(Op, 3, DAG);
++  case Intrinsic::loongarch_lsx_vrepli_b:
++  case Intrinsic::loongarch_lsx_vrepli_h:
++  case Intrinsic::loongarch_lsx_vrepli_w:
++  case Intrinsic::loongarch_lsx_vrepli_d:
++    return checkIntrinsicImmArg<10>(Op, 1, DAG, /*IsSigned=*/true);
++  case Intrinsic::loongarch_lsx_vldi:
++    return checkIntrinsicImmArg<13>(Op, 1, DAG, /*IsSigned=*/true);
+   }
+ }
+ 
+@@ -757,6 +922,29 @@ LoongArchTargetLowering::lowerINTRINSIC_W_CHAIN(SDValue Op,
+                : DAG.getNode(LoongArchISD::MOVFCSR2GR, DL, {VT, MVT::Other},
+                              {Chain, DAG.getConstant(Imm, DL, GRLenVT)});
+   }
++  case Intrinsic::loongarch_lsx_vld:
++  case Intrinsic::loongarch_lsx_vldrepl_b:
++    return !isInt<12>(cast<ConstantSDNode>(Op.getOperand(3))->getSExtValue())
++               ? emitIntrinsicWithChainErrorMessage(Op, ErrorMsgOOR, DAG)
++               : SDValue();
++  case Intrinsic::loongarch_lsx_vldrepl_h:
++    return !isShiftedInt<11, 1>(
++               cast<ConstantSDNode>(Op.getOperand(3))->getSExtValue())
++               ? emitIntrinsicWithChainErrorMessage(
++                     Op, "argument out of range or not a multiple of 2", DAG)
++               : SDValue();
++  case Intrinsic::loongarch_lsx_vldrepl_w:
++    return !isShiftedInt<10, 2>(
++               cast<ConstantSDNode>(Op.getOperand(3))->getSExtValue())
++               ? emitIntrinsicWithChainErrorMessage(
++                     Op, "argument out of range or not a multiple of 4", DAG)
++               : SDValue();
++  case Intrinsic::loongarch_lsx_vldrepl_d:
++    return !isShiftedInt<9, 3>(
++               cast<ConstantSDNode>(Op.getOperand(3))->getSExtValue())
++               ? emitIntrinsicWithChainErrorMessage(
++                     Op, "argument out of range or not a multiple of 8", DAG)
++               : SDValue();
+   }
+ }
+ 
+@@ -875,6 +1063,36 @@ SDValue LoongArchTargetLowering::lowerINTRINSIC_VOID(SDValue Op,
+            : !isUInt<8>(Imm) ? emitIntrinsicErrorMessage(Op, ErrorMsgOOR, DAG)
+                              : Op;
+   }
++  case Intrinsic::loongarch_lsx_vst:
++    return !isInt<12>(cast<ConstantSDNode>(Op.getOperand(4))->getSExtValue())
++               ? emitIntrinsicErrorMessage(Op, ErrorMsgOOR, DAG)
++               : SDValue();
++  case Intrinsic::loongarch_lsx_vstelm_b:
++    return (!isInt<8>(cast<ConstantSDNode>(Op.getOperand(4))->getSExtValue()) ||
++            !isUInt<4>(cast<ConstantSDNode>(Op.getOperand(5))->getZExtValue()))
++               ? emitIntrinsicErrorMessage(Op, ErrorMsgOOR, DAG)
++               : SDValue();
++  case Intrinsic::loongarch_lsx_vstelm_h:
++    return (!isShiftedInt<8, 1>(
++                cast<ConstantSDNode>(Op.getOperand(4))->getSExtValue()) ||
++            !isUInt<3>(cast<ConstantSDNode>(Op.getOperand(5))->getZExtValue()))
++               ? emitIntrinsicErrorMessage(
++                     Op, "argument out of range or not a multiple of 2", DAG)
++               : SDValue();
++  case Intrinsic::loongarch_lsx_vstelm_w:
++    return (!isShiftedInt<8, 2>(
++                cast<ConstantSDNode>(Op.getOperand(4))->getSExtValue()) ||
++            !isUInt<2>(cast<ConstantSDNode>(Op.getOperand(5))->getZExtValue()))
++               ? emitIntrinsicErrorMessage(
++                     Op, "argument out of range or not a multiple of 4", DAG)
++               : SDValue();
++  case Intrinsic::loongarch_lsx_vstelm_d:
++    return (!isShiftedInt<8, 3>(
++                cast<ConstantSDNode>(Op.getOperand(4))->getSExtValue()) ||
++            !isUInt<1>(cast<ConstantSDNode>(Op.getOperand(5))->getZExtValue()))
++               ? emitIntrinsicErrorMessage(
++                     Op, "argument out of range or not a multiple of 8", DAG)
++               : SDValue();
+   }
+ }
+ 
+@@ -1026,16 +1244,110 @@ static SDValue customLegalizeToWOp(SDNode *N, SelectionDAG &DAG, int NumOp,
+   return DAG.getNode(ISD::TRUNCATE, DL, N->getValueType(0), NewRes);
+ }
+ 
+-// Helper function that emits error message for intrinsics with chain and return
+-// a UNDEF and the chain as the results.
+-static void emitErrorAndReplaceIntrinsicWithChainResults(
++// Helper function that emits error message for intrinsics with/without chain
++// and return a UNDEF or and the chain as the results.
++static void emitErrorAndReplaceIntrinsicResults(
+     SDNode *N, SmallVectorImpl<SDValue> &Results, SelectionDAG &DAG,
+-    StringRef ErrorMsg) {
++    StringRef ErrorMsg, bool WithChain = true) {
+   DAG.getContext()->emitError(N->getOperationName(0) + ": " + ErrorMsg + ".");
+   Results.push_back(DAG.getUNDEF(N->getValueType(0)));
++  if (!WithChain)
++    return;
+   Results.push_back(N->getOperand(0));
+ }
+ 
++template <unsigned N>
++static void
++replaceVPICKVE2GRResults(SDNode *Node, SmallVectorImpl<SDValue> &Results,
++                         SelectionDAG &DAG, const LoongArchSubtarget &Subtarget,
++                         unsigned ResOp) {
++  const StringRef ErrorMsgOOR = "argument out of range";
++  unsigned Imm = cast<ConstantSDNode>(Node->getOperand(2))->getZExtValue();
++  if (!isUInt<N>(Imm)) {
++    emitErrorAndReplaceIntrinsicResults(Node, Results, DAG, ErrorMsgOOR,
++                                        /*WithChain=*/false);
++    return;
++  }
++  SDLoc DL(Node);
++  SDValue Vec = Node->getOperand(1);
++
++  SDValue PickElt =
++      DAG.getNode(ResOp, DL, Subtarget.getGRLenVT(), Vec,
++                  DAG.getConstant(Imm, DL, Subtarget.getGRLenVT()),
++                  DAG.getValueType(Vec.getValueType().getVectorElementType()));
++  Results.push_back(DAG.getNode(ISD::TRUNCATE, DL, Node->getValueType(0),
++                                PickElt.getValue(0)));
++}
++
++static void replaceVecCondBranchResults(SDNode *N,
++                                        SmallVectorImpl<SDValue> &Results,
++                                        SelectionDAG &DAG,
++                                        const LoongArchSubtarget &Subtarget,
++                                        unsigned ResOp) {
++  SDLoc DL(N);
++  SDValue Vec = N->getOperand(1);
++
++  SDValue CB = DAG.getNode(ResOp, DL, Subtarget.getGRLenVT(), Vec);
++  Results.push_back(
++      DAG.getNode(ISD::TRUNCATE, DL, N->getValueType(0), CB.getValue(0)));
++}
++
++static void
++replaceINTRINSIC_WO_CHAINResults(SDNode *N, SmallVectorImpl<SDValue> &Results,
++                                 SelectionDAG &DAG,
++                                 const LoongArchSubtarget &Subtarget) {
++  switch (N->getConstantOperandVal(0)) {
++  default:
++    llvm_unreachable("Unexpected Intrinsic.");
++  case Intrinsic::loongarch_lsx_vpickve2gr_b:
++    replaceVPICKVE2GRResults<4>(N, Results, DAG, Subtarget,
++                                LoongArchISD::VPICK_SEXT_ELT);
++    break;
++  case Intrinsic::loongarch_lsx_vpickve2gr_h:
++    replaceVPICKVE2GRResults<3>(N, Results, DAG, Subtarget,
++                                LoongArchISD::VPICK_SEXT_ELT);
++    break;
++  case Intrinsic::loongarch_lsx_vpickve2gr_w:
++    replaceVPICKVE2GRResults<2>(N, Results, DAG, Subtarget,
++                                LoongArchISD::VPICK_SEXT_ELT);
++    break;
++  case Intrinsic::loongarch_lsx_vpickve2gr_bu:
++    replaceVPICKVE2GRResults<4>(N, Results, DAG, Subtarget,
++                                LoongArchISD::VPICK_ZEXT_ELT);
++    break;
++  case Intrinsic::loongarch_lsx_vpickve2gr_hu:
++    replaceVPICKVE2GRResults<3>(N, Results, DAG, Subtarget,
++                                LoongArchISD::VPICK_ZEXT_ELT);
++    break;
++  case Intrinsic::loongarch_lsx_vpickve2gr_wu:
++    replaceVPICKVE2GRResults<2>(N, Results, DAG, Subtarget,
++                                LoongArchISD::VPICK_ZEXT_ELT);
++    break;
++  case Intrinsic::loongarch_lsx_bz_b:
++  case Intrinsic::loongarch_lsx_bz_h:
++  case Intrinsic::loongarch_lsx_bz_w:
++  case Intrinsic::loongarch_lsx_bz_d:
++    replaceVecCondBranchResults(N, Results, DAG, Subtarget,
++                                LoongArchISD::VALL_ZERO);
++    break;
++  case Intrinsic::loongarch_lsx_bz_v:
++    replaceVecCondBranchResults(N, Results, DAG, Subtarget,
++                                LoongArchISD::VANY_ZERO);
++    break;
++  case Intrinsic::loongarch_lsx_bnz_b:
++  case Intrinsic::loongarch_lsx_bnz_h:
++  case Intrinsic::loongarch_lsx_bnz_w:
++  case Intrinsic::loongarch_lsx_bnz_d:
++    replaceVecCondBranchResults(N, Results, DAG, Subtarget,
++                                LoongArchISD::VALL_NONZERO);
++    break;
++  case Intrinsic::loongarch_lsx_bnz_v:
++    replaceVecCondBranchResults(N, Results, DAG, Subtarget,
++                                LoongArchISD::VANY_NONZERO);
++    break;
++  }
++}
++
+ void LoongArchTargetLowering::ReplaceNodeResults(
+     SDNode *N, SmallVectorImpl<SDValue> &Results, SelectionDAG &DAG) const {
+   SDLoc DL(N);
+@@ -1168,14 +1480,12 @@ void LoongArchTargetLowering::ReplaceNodeResults(
+       llvm_unreachable("Unexpected Intrinsic.");
+     case Intrinsic::loongarch_movfcsr2gr: {
+       if (!Subtarget.hasBasicF()) {
+-        emitErrorAndReplaceIntrinsicWithChainResults(N, Results, DAG,
+-                                                     ErrorMsgReqF);
++        emitErrorAndReplaceIntrinsicResults(N, Results, DAG, ErrorMsgReqF);
+         return;
+       }
+       unsigned Imm = cast<ConstantSDNode>(Op2)->getZExtValue();
+       if (!isUInt<2>(Imm)) {
+-        emitErrorAndReplaceIntrinsicWithChainResults(N, Results, DAG,
+-                                                     ErrorMsgOOR);
++        emitErrorAndReplaceIntrinsicResults(N, Results, DAG, ErrorMsgOOR);
+         return;
+       }
+       SDValue MOVFCSR2GRResults = DAG.getNode(
+@@ -1211,7 +1521,7 @@ void LoongArchTargetLowering::ReplaceNodeResults(
+         {Chain, Op2,                                                           \
+          DAG.getNode(ISD::ANY_EXTEND, DL, MVT::i64, N->getOperand(3))});       \
+     Results.push_back(DAG.getNode(ISD::TRUNCATE, DL, VT, NODE.getValue(0)));   \
+-    Results.push_back(NODE.getValue(1));                                                  \
++    Results.push_back(NODE.getValue(1));                                       \
+     break;                                                                     \
+   }
+       CRC_CASE_EXT_UNARYOP(crc_w_d_w, CRC_W_D_W)
+@@ -1220,8 +1530,7 @@ void LoongArchTargetLowering::ReplaceNodeResults(
+ #define CSR_CASE(ID)                                                           \
+   case Intrinsic::loongarch_##ID: {                                            \
+     if (!Subtarget.is64Bit())                                                  \
+-      emitErrorAndReplaceIntrinsicWithChainResults(N, Results, DAG,            \
+-                                                   ErrorMsgReqLA64);           \
++      emitErrorAndReplaceIntrinsicResults(N, Results, DAG, ErrorMsgReqLA64);   \
+     break;                                                                     \
+   }
+       CSR_CASE(csrrd_d);
+@@ -1232,8 +1541,7 @@ void LoongArchTargetLowering::ReplaceNodeResults(
+     case Intrinsic::loongarch_csrrd_w: {
+       unsigned Imm = cast<ConstantSDNode>(Op2)->getZExtValue();
+       if (!isUInt<14>(Imm)) {
+-        emitErrorAndReplaceIntrinsicWithChainResults(N, Results, DAG,
+-                                                     ErrorMsgOOR);
++        emitErrorAndReplaceIntrinsicResults(N, Results, DAG, ErrorMsgOOR);
+         return;
+       }
+       SDValue CSRRDResults =
+@@ -1247,8 +1555,7 @@ void LoongArchTargetLowering::ReplaceNodeResults(
+     case Intrinsic::loongarch_csrwr_w: {
+       unsigned Imm = cast<ConstantSDNode>(N->getOperand(3))->getZExtValue();
+       if (!isUInt<14>(Imm)) {
+-        emitErrorAndReplaceIntrinsicWithChainResults(N, Results, DAG,
+-                                                     ErrorMsgOOR);
++        emitErrorAndReplaceIntrinsicResults(N, Results, DAG, ErrorMsgOOR);
+         return;
+       }
+       SDValue CSRWRResults =
+@@ -1263,8 +1570,7 @@ void LoongArchTargetLowering::ReplaceNodeResults(
+     case Intrinsic::loongarch_csrxchg_w: {
+       unsigned Imm = cast<ConstantSDNode>(N->getOperand(4))->getZExtValue();
+       if (!isUInt<14>(Imm)) {
+-        emitErrorAndReplaceIntrinsicWithChainResults(N, Results, DAG,
+-                                                     ErrorMsgOOR);
++        emitErrorAndReplaceIntrinsicResults(N, Results, DAG, ErrorMsgOOR);
+         return;
+       }
+       SDValue CSRXCHGResults = DAG.getNode(
+@@ -1302,8 +1608,7 @@ void LoongArchTargetLowering::ReplaceNodeResults(
+     }
+     case Intrinsic::loongarch_lddir_d: {
+       if (!Subtarget.is64Bit()) {
+-        emitErrorAndReplaceIntrinsicWithChainResults(N, Results, DAG,
+-                                                     ErrorMsgReqLA64);
++        emitErrorAndReplaceIntrinsicResults(N, Results, DAG, ErrorMsgReqLA64);
+         return;
+       }
+       break;
+@@ -1322,6 +1627,10 @@ void LoongArchTargetLowering::ReplaceNodeResults(
+     Results.push_back(N->getOperand(0));
+     break;
+   }
++  case ISD::INTRINSIC_WO_CHAIN: {
++    replaceINTRINSIC_WO_CHAINResults(N, Results, DAG, Subtarget);
++    break;
++  }
+   }
+ }
+ 
+@@ -1685,6 +1994,440 @@ static SDValue performBITREV_WCombine(SDNode *N, SelectionDAG &DAG,
+                      Src.getOperand(0));
+ }
+ 
++template <unsigned N>
++static SDValue legalizeIntrinsicImmArg(SDNode *Node, unsigned ImmOp,
++                                       SelectionDAG &DAG,
++                                       const LoongArchSubtarget &Subtarget,
++                                       bool IsSigned = false) {
++  SDLoc DL(Node);
++  auto *CImm = cast<ConstantSDNode>(Node->getOperand(ImmOp));
++  // Check the ImmArg.
++  if ((IsSigned && !isInt<N>(CImm->getSExtValue())) ||
++      (!IsSigned && !isUInt<N>(CImm->getZExtValue()))) {
++    DAG.getContext()->emitError(Node->getOperationName(0) +
++                                ": argument out of range.");
++    return DAG.getNode(ISD::UNDEF, DL, Subtarget.getGRLenVT());
++  }
++  return DAG.getConstant(CImm->getZExtValue(), DL, Subtarget.getGRLenVT());
++}
++
++template <unsigned N>
++static SDValue lowerVectorSplatImm(SDNode *Node, unsigned ImmOp,
++                                   SelectionDAG &DAG, bool IsSigned = false) {
++  SDLoc DL(Node);
++  EVT ResTy = Node->getValueType(0);
++  auto *CImm = cast<ConstantSDNode>(Node->getOperand(ImmOp));
++
++  // Check the ImmArg.
++  if ((IsSigned && !isInt<N>(CImm->getSExtValue())) ||
++      (!IsSigned && !isUInt<N>(CImm->getZExtValue()))) {
++    DAG.getContext()->emitError(Node->getOperationName(0) +
++                                ": argument out of range.");
++    return DAG.getNode(ISD::UNDEF, DL, ResTy);
++  }
++  return DAG.getConstant(
++      APInt(ResTy.getScalarType().getSizeInBits(),
++            IsSigned ? CImm->getSExtValue() : CImm->getZExtValue(), IsSigned),
++      DL, ResTy);
++}
++
++static SDValue truncateVecElts(SDNode *Node, SelectionDAG &DAG) {
++  SDLoc DL(Node);
++  EVT ResTy = Node->getValueType(0);
++  SDValue Vec = Node->getOperand(2);
++  SDValue Mask = DAG.getConstant(Vec.getScalarValueSizeInBits() - 1, DL, ResTy);
++  return DAG.getNode(ISD::AND, DL, ResTy, Vec, Mask);
++}
++
++static SDValue lowerVectorBitClear(SDNode *Node, SelectionDAG &DAG) {
++  SDLoc DL(Node);
++  EVT ResTy = Node->getValueType(0);
++  SDValue One = DAG.getConstant(1, DL, ResTy);
++  SDValue Bit =
++      DAG.getNode(ISD::SHL, DL, ResTy, One, truncateVecElts(Node, DAG));
++
++  return DAG.getNode(ISD::AND, DL, ResTy, Node->getOperand(1),
++                     DAG.getNOT(DL, Bit, ResTy));
++}
++
++template <unsigned N>
++static SDValue lowerVectorBitClearImm(SDNode *Node, SelectionDAG &DAG) {
++  SDLoc DL(Node);
++  EVT ResTy = Node->getValueType(0);
++  auto *CImm = cast<ConstantSDNode>(Node->getOperand(2));
++  // Check the unsigned ImmArg.
++  if (!isUInt<N>(CImm->getZExtValue())) {
++    DAG.getContext()->emitError(Node->getOperationName(0) +
++                                ": argument out of range.");
++    return DAG.getNode(ISD::UNDEF, DL, ResTy);
++  }
++
++  APInt BitImm = APInt(ResTy.getScalarSizeInBits(), 1) << CImm->getAPIntValue();
++  SDValue Mask = DAG.getConstant(~BitImm, DL, ResTy);
++
++  return DAG.getNode(ISD::AND, DL, ResTy, Node->getOperand(1), Mask);
++}
++
++template <unsigned N>
++static SDValue lowerVectorBitSetImm(SDNode *Node, SelectionDAG &DAG) {
++  SDLoc DL(Node);
++  EVT ResTy = Node->getValueType(0);
++  auto *CImm = cast<ConstantSDNode>(Node->getOperand(2));
++  // Check the unsigned ImmArg.
++  if (!isUInt<N>(CImm->getZExtValue())) {
++    DAG.getContext()->emitError(Node->getOperationName(0) +
++                                ": argument out of range.");
++    return DAG.getNode(ISD::UNDEF, DL, ResTy);
++  }
++
++  APInt Imm = APInt(ResTy.getScalarSizeInBits(), 1) << CImm->getAPIntValue();
++  SDValue BitImm = DAG.getConstant(Imm, DL, ResTy);
++  return DAG.getNode(ISD::OR, DL, ResTy, Node->getOperand(1), BitImm);
++}
++
++template <unsigned N>
++static SDValue lowerVectorBitRevImm(SDNode *Node, SelectionDAG &DAG) {
++  SDLoc DL(Node);
++  EVT ResTy = Node->getValueType(0);
++  auto *CImm = cast<ConstantSDNode>(Node->getOperand(2));
++  // Check the unsigned ImmArg.
++  if (!isUInt<N>(CImm->getZExtValue())) {
++    DAG.getContext()->emitError(Node->getOperationName(0) +
++                                ": argument out of range.");
++    return DAG.getNode(ISD::UNDEF, DL, ResTy);
++  }
++
++  APInt Imm = APInt(ResTy.getScalarSizeInBits(), 1) << CImm->getAPIntValue();
++  SDValue BitImm = DAG.getConstant(Imm, DL, ResTy);
++  return DAG.getNode(ISD::XOR, DL, ResTy, Node->getOperand(1), BitImm);
++}
++
++static SDValue
++performINTRINSIC_WO_CHAINCombine(SDNode *N, SelectionDAG &DAG,
++                                 TargetLowering::DAGCombinerInfo &DCI,
++                                 const LoongArchSubtarget &Subtarget) {
++  SDLoc DL(N);
++  switch (N->getConstantOperandVal(0)) {
++  default:
++    break;
++  case Intrinsic::loongarch_lsx_vadd_b:
++  case Intrinsic::loongarch_lsx_vadd_h:
++  case Intrinsic::loongarch_lsx_vadd_w:
++  case Intrinsic::loongarch_lsx_vadd_d:
++    return DAG.getNode(ISD::ADD, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2));
++  case Intrinsic::loongarch_lsx_vaddi_bu:
++  case Intrinsic::loongarch_lsx_vaddi_hu:
++  case Intrinsic::loongarch_lsx_vaddi_wu:
++  case Intrinsic::loongarch_lsx_vaddi_du:
++    return DAG.getNode(ISD::ADD, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<5>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vsub_b:
++  case Intrinsic::loongarch_lsx_vsub_h:
++  case Intrinsic::loongarch_lsx_vsub_w:
++  case Intrinsic::loongarch_lsx_vsub_d:
++    return DAG.getNode(ISD::SUB, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2));
++  case Intrinsic::loongarch_lsx_vsubi_bu:
++  case Intrinsic::loongarch_lsx_vsubi_hu:
++  case Intrinsic::loongarch_lsx_vsubi_wu:
++  case Intrinsic::loongarch_lsx_vsubi_du:
++    return DAG.getNode(ISD::SUB, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<5>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vneg_b:
++  case Intrinsic::loongarch_lsx_vneg_h:
++  case Intrinsic::loongarch_lsx_vneg_w:
++  case Intrinsic::loongarch_lsx_vneg_d:
++    return DAG.getNode(
++        ISD::SUB, DL, N->getValueType(0),
++        DAG.getConstant(
++            APInt(N->getValueType(0).getScalarType().getSizeInBits(), 0,
++                  /*isSigned=*/true),
++            SDLoc(N), N->getValueType(0)),
++        N->getOperand(1));
++  case Intrinsic::loongarch_lsx_vmax_b:
++  case Intrinsic::loongarch_lsx_vmax_h:
++  case Intrinsic::loongarch_lsx_vmax_w:
++  case Intrinsic::loongarch_lsx_vmax_d:
++    return DAG.getNode(ISD::SMAX, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2));
++  case Intrinsic::loongarch_lsx_vmax_bu:
++  case Intrinsic::loongarch_lsx_vmax_hu:
++  case Intrinsic::loongarch_lsx_vmax_wu:
++  case Intrinsic::loongarch_lsx_vmax_du:
++    return DAG.getNode(ISD::UMAX, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2));
++  case Intrinsic::loongarch_lsx_vmaxi_b:
++  case Intrinsic::loongarch_lsx_vmaxi_h:
++  case Intrinsic::loongarch_lsx_vmaxi_w:
++  case Intrinsic::loongarch_lsx_vmaxi_d:
++    return DAG.getNode(ISD::SMAX, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<5>(N, 2, DAG, /*IsSigned=*/true));
++  case Intrinsic::loongarch_lsx_vmaxi_bu:
++  case Intrinsic::loongarch_lsx_vmaxi_hu:
++  case Intrinsic::loongarch_lsx_vmaxi_wu:
++  case Intrinsic::loongarch_lsx_vmaxi_du:
++    return DAG.getNode(ISD::UMAX, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<5>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vmin_b:
++  case Intrinsic::loongarch_lsx_vmin_h:
++  case Intrinsic::loongarch_lsx_vmin_w:
++  case Intrinsic::loongarch_lsx_vmin_d:
++    return DAG.getNode(ISD::SMIN, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2));
++  case Intrinsic::loongarch_lsx_vmin_bu:
++  case Intrinsic::loongarch_lsx_vmin_hu:
++  case Intrinsic::loongarch_lsx_vmin_wu:
++  case Intrinsic::loongarch_lsx_vmin_du:
++    return DAG.getNode(ISD::UMIN, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2));
++  case Intrinsic::loongarch_lsx_vmini_b:
++  case Intrinsic::loongarch_lsx_vmini_h:
++  case Intrinsic::loongarch_lsx_vmini_w:
++  case Intrinsic::loongarch_lsx_vmini_d:
++    return DAG.getNode(ISD::SMIN, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<5>(N, 2, DAG, /*IsSigned=*/true));
++  case Intrinsic::loongarch_lsx_vmini_bu:
++  case Intrinsic::loongarch_lsx_vmini_hu:
++  case Intrinsic::loongarch_lsx_vmini_wu:
++  case Intrinsic::loongarch_lsx_vmini_du:
++    return DAG.getNode(ISD::UMIN, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<5>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vmul_b:
++  case Intrinsic::loongarch_lsx_vmul_h:
++  case Intrinsic::loongarch_lsx_vmul_w:
++  case Intrinsic::loongarch_lsx_vmul_d:
++    return DAG.getNode(ISD::MUL, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2));
++  case Intrinsic::loongarch_lsx_vmadd_b:
++  case Intrinsic::loongarch_lsx_vmadd_h:
++  case Intrinsic::loongarch_lsx_vmadd_w:
++  case Intrinsic::loongarch_lsx_vmadd_d: {
++    EVT ResTy = N->getValueType(0);
++    return DAG.getNode(ISD::ADD, SDLoc(N), ResTy, N->getOperand(1),
++                       DAG.getNode(ISD::MUL, SDLoc(N), ResTy, N->getOperand(2),
++                                   N->getOperand(3)));
++  }
++  case Intrinsic::loongarch_lsx_vmsub_b:
++  case Intrinsic::loongarch_lsx_vmsub_h:
++  case Intrinsic::loongarch_lsx_vmsub_w:
++  case Intrinsic::loongarch_lsx_vmsub_d: {
++    EVT ResTy = N->getValueType(0);
++    return DAG.getNode(ISD::SUB, SDLoc(N), ResTy, N->getOperand(1),
++                       DAG.getNode(ISD::MUL, SDLoc(N), ResTy, N->getOperand(2),
++                                   N->getOperand(3)));
++  }
++  case Intrinsic::loongarch_lsx_vdiv_b:
++  case Intrinsic::loongarch_lsx_vdiv_h:
++  case Intrinsic::loongarch_lsx_vdiv_w:
++  case Intrinsic::loongarch_lsx_vdiv_d:
++    return DAG.getNode(ISD::SDIV, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2));
++  case Intrinsic::loongarch_lsx_vdiv_bu:
++  case Intrinsic::loongarch_lsx_vdiv_hu:
++  case Intrinsic::loongarch_lsx_vdiv_wu:
++  case Intrinsic::loongarch_lsx_vdiv_du:
++    return DAG.getNode(ISD::UDIV, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2));
++  case Intrinsic::loongarch_lsx_vmod_b:
++  case Intrinsic::loongarch_lsx_vmod_h:
++  case Intrinsic::loongarch_lsx_vmod_w:
++  case Intrinsic::loongarch_lsx_vmod_d:
++    return DAG.getNode(ISD::SREM, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2));
++  case Intrinsic::loongarch_lsx_vmod_bu:
++  case Intrinsic::loongarch_lsx_vmod_hu:
++  case Intrinsic::loongarch_lsx_vmod_wu:
++  case Intrinsic::loongarch_lsx_vmod_du:
++    return DAG.getNode(ISD::UREM, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2));
++  case Intrinsic::loongarch_lsx_vand_v:
++    return DAG.getNode(ISD::AND, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2));
++  case Intrinsic::loongarch_lsx_vor_v:
++    return DAG.getNode(ISD::OR, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2));
++  case Intrinsic::loongarch_lsx_vxor_v:
++    return DAG.getNode(ISD::XOR, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2));
++  case Intrinsic::loongarch_lsx_vnor_v: {
++    SDValue Res = DAG.getNode(ISD::OR, DL, N->getValueType(0), N->getOperand(1),
++                              N->getOperand(2));
++    return DAG.getNOT(DL, Res, Res->getValueType(0));
++  }
++  case Intrinsic::loongarch_lsx_vandi_b:
++    return DAG.getNode(ISD::AND, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<8>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vori_b:
++    return DAG.getNode(ISD::OR, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<8>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vxori_b:
++    return DAG.getNode(ISD::XOR, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<8>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vsll_b:
++  case Intrinsic::loongarch_lsx_vsll_h:
++  case Intrinsic::loongarch_lsx_vsll_w:
++  case Intrinsic::loongarch_lsx_vsll_d:
++    return DAG.getNode(ISD::SHL, DL, N->getValueType(0), N->getOperand(1),
++                       truncateVecElts(N, DAG));
++  case Intrinsic::loongarch_lsx_vslli_b:
++    return DAG.getNode(ISD::SHL, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<3>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vslli_h:
++    return DAG.getNode(ISD::SHL, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<4>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vslli_w:
++    return DAG.getNode(ISD::SHL, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<5>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vslli_d:
++    return DAG.getNode(ISD::SHL, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<6>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vsrl_b:
++  case Intrinsic::loongarch_lsx_vsrl_h:
++  case Intrinsic::loongarch_lsx_vsrl_w:
++  case Intrinsic::loongarch_lsx_vsrl_d:
++    return DAG.getNode(ISD::SRL, DL, N->getValueType(0), N->getOperand(1),
++                       truncateVecElts(N, DAG));
++  case Intrinsic::loongarch_lsx_vsrli_b:
++    return DAG.getNode(ISD::SRL, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<3>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vsrli_h:
++    return DAG.getNode(ISD::SRL, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<4>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vsrli_w:
++    return DAG.getNode(ISD::SRL, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<5>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vsrli_d:
++    return DAG.getNode(ISD::SRL, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<6>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vsra_b:
++  case Intrinsic::loongarch_lsx_vsra_h:
++  case Intrinsic::loongarch_lsx_vsra_w:
++  case Intrinsic::loongarch_lsx_vsra_d:
++    return DAG.getNode(ISD::SRA, DL, N->getValueType(0), N->getOperand(1),
++                       truncateVecElts(N, DAG));
++  case Intrinsic::loongarch_lsx_vsrai_b:
++    return DAG.getNode(ISD::SRA, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<3>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vsrai_h:
++    return DAG.getNode(ISD::SRA, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<4>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vsrai_w:
++    return DAG.getNode(ISD::SRA, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<5>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vsrai_d:
++    return DAG.getNode(ISD::SRA, DL, N->getValueType(0), N->getOperand(1),
++                       lowerVectorSplatImm<6>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vpcnt_b:
++  case Intrinsic::loongarch_lsx_vpcnt_h:
++  case Intrinsic::loongarch_lsx_vpcnt_w:
++  case Intrinsic::loongarch_lsx_vpcnt_d:
++    return DAG.getNode(ISD::CTPOP, DL, N->getValueType(0), N->getOperand(1));
++  case Intrinsic::loongarch_lsx_vbitclr_b:
++  case Intrinsic::loongarch_lsx_vbitclr_h:
++  case Intrinsic::loongarch_lsx_vbitclr_w:
++  case Intrinsic::loongarch_lsx_vbitclr_d:
++    return lowerVectorBitClear(N, DAG);
++  case Intrinsic::loongarch_lsx_vbitclri_b:
++    return lowerVectorBitClearImm<3>(N, DAG);
++  case Intrinsic::loongarch_lsx_vbitclri_h:
++    return lowerVectorBitClearImm<4>(N, DAG);
++  case Intrinsic::loongarch_lsx_vbitclri_w:
++    return lowerVectorBitClearImm<5>(N, DAG);
++  case Intrinsic::loongarch_lsx_vbitclri_d:
++    return lowerVectorBitClearImm<6>(N, DAG);
++  case Intrinsic::loongarch_lsx_vbitset_b:
++  case Intrinsic::loongarch_lsx_vbitset_h:
++  case Intrinsic::loongarch_lsx_vbitset_w:
++  case Intrinsic::loongarch_lsx_vbitset_d: {
++    EVT VecTy = N->getValueType(0);
++    SDValue One = DAG.getConstant(1, DL, VecTy);
++    return DAG.getNode(
++        ISD::OR, DL, VecTy, N->getOperand(1),
++        DAG.getNode(ISD::SHL, DL, VecTy, One, truncateVecElts(N, DAG)));
++  }
++  case Intrinsic::loongarch_lsx_vbitseti_b:
++    return lowerVectorBitSetImm<3>(N, DAG);
++  case Intrinsic::loongarch_lsx_vbitseti_h:
++    return lowerVectorBitSetImm<4>(N, DAG);
++  case Intrinsic::loongarch_lsx_vbitseti_w:
++    return lowerVectorBitSetImm<5>(N, DAG);
++  case Intrinsic::loongarch_lsx_vbitseti_d:
++    return lowerVectorBitSetImm<6>(N, DAG);
++  case Intrinsic::loongarch_lsx_vbitrev_b:
++  case Intrinsic::loongarch_lsx_vbitrev_h:
++  case Intrinsic::loongarch_lsx_vbitrev_w:
++  case Intrinsic::loongarch_lsx_vbitrev_d: {
++    EVT VecTy = N->getValueType(0);
++    SDValue One = DAG.getConstant(1, DL, VecTy);
++    return DAG.getNode(
++        ISD::XOR, DL, VecTy, N->getOperand(1),
++        DAG.getNode(ISD::SHL, DL, VecTy, One, truncateVecElts(N, DAG)));
++  }
++  case Intrinsic::loongarch_lsx_vbitrevi_b:
++    return lowerVectorBitRevImm<3>(N, DAG);
++  case Intrinsic::loongarch_lsx_vbitrevi_h:
++    return lowerVectorBitRevImm<4>(N, DAG);
++  case Intrinsic::loongarch_lsx_vbitrevi_w:
++    return lowerVectorBitRevImm<5>(N, DAG);
++  case Intrinsic::loongarch_lsx_vbitrevi_d:
++    return lowerVectorBitRevImm<6>(N, DAG);
++  case Intrinsic::loongarch_lsx_vfadd_s:
++  case Intrinsic::loongarch_lsx_vfadd_d:
++    return DAG.getNode(ISD::FADD, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2));
++  case Intrinsic::loongarch_lsx_vfsub_s:
++  case Intrinsic::loongarch_lsx_vfsub_d:
++    return DAG.getNode(ISD::FSUB, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2));
++  case Intrinsic::loongarch_lsx_vfmul_s:
++  case Intrinsic::loongarch_lsx_vfmul_d:
++    return DAG.getNode(ISD::FMUL, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2));
++  case Intrinsic::loongarch_lsx_vfdiv_s:
++  case Intrinsic::loongarch_lsx_vfdiv_d:
++    return DAG.getNode(ISD::FDIV, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2));
++  case Intrinsic::loongarch_lsx_vfmadd_s:
++  case Intrinsic::loongarch_lsx_vfmadd_d:
++    return DAG.getNode(ISD::FMA, DL, N->getValueType(0), N->getOperand(1),
++                       N->getOperand(2), N->getOperand(3));
++  case Intrinsic::loongarch_lsx_vinsgr2vr_b:
++    return DAG.getNode(ISD::INSERT_VECTOR_ELT, SDLoc(N), N->getValueType(0),
++                       N->getOperand(1), N->getOperand(2),
++                       legalizeIntrinsicImmArg<4>(N, 3, DAG, Subtarget));
++  case Intrinsic::loongarch_lsx_vinsgr2vr_h:
++    return DAG.getNode(ISD::INSERT_VECTOR_ELT, SDLoc(N), N->getValueType(0),
++                       N->getOperand(1), N->getOperand(2),
++                       legalizeIntrinsicImmArg<3>(N, 3, DAG, Subtarget));
++  case Intrinsic::loongarch_lsx_vinsgr2vr_w:
++    return DAG.getNode(ISD::INSERT_VECTOR_ELT, SDLoc(N), N->getValueType(0),
++                       N->getOperand(1), N->getOperand(2),
++                       legalizeIntrinsicImmArg<2>(N, 3, DAG, Subtarget));
++  case Intrinsic::loongarch_lsx_vinsgr2vr_d:
++    return DAG.getNode(ISD::INSERT_VECTOR_ELT, SDLoc(N), N->getValueType(0),
++                       N->getOperand(1), N->getOperand(2),
++                       legalizeIntrinsicImmArg<1>(N, 3, DAG, Subtarget));
++  case Intrinsic::loongarch_lsx_vreplgr2vr_b:
++  case Intrinsic::loongarch_lsx_vreplgr2vr_h:
++  case Intrinsic::loongarch_lsx_vreplgr2vr_w:
++  case Intrinsic::loongarch_lsx_vreplgr2vr_d: {
++    EVT ResTy = N->getValueType(0);
++    SmallVector<SDValue> Ops(ResTy.getVectorNumElements(), N->getOperand(1));
++    return DAG.getBuildVector(ResTy, DL, Ops);
++  }
++  case Intrinsic::loongarch_lsx_vreplve_b:
++  case Intrinsic::loongarch_lsx_vreplve_h:
++  case Intrinsic::loongarch_lsx_vreplve_w:
++  case Intrinsic::loongarch_lsx_vreplve_d:
++    return DAG.getNode(LoongArchISD::VREPLVE, DL, N->getValueType(0),
++                       N->getOperand(1),
++                       DAG.getNode(ISD::ANY_EXTEND, DL, Subtarget.getGRLenVT(),
++                                   N->getOperand(2)));
++  }
++  return SDValue();
++}
++
+ SDValue LoongArchTargetLowering::PerformDAGCombine(SDNode *N,
+                                                    DAGCombinerInfo &DCI) const {
+   SelectionDAG &DAG = DCI.DAG;
+@@ -1699,6 +2442,8 @@ SDValue LoongArchTargetLowering::PerformDAGCombine(SDNode *N,
+     return performSRLCombine(N, DAG, DCI, Subtarget);
+   case LoongArchISD::BITREV_W:
+     return performBITREV_WCombine(N, DAG, DCI, Subtarget);
++  case ISD::INTRINSIC_WO_CHAIN:
++    return performINTRINSIC_WO_CHAINCombine(N, DAG, DCI, Subtarget);
+   }
+   return SDValue();
+ }
+@@ -1752,6 +2497,101 @@ static MachineBasicBlock *insertDivByZeroTrap(MachineInstr &MI,
+   return SinkMBB;
+ }
+ 
++static MachineBasicBlock *
++emitVecCondBranchPseudo(MachineInstr &MI, MachineBasicBlock *BB,
++                        const LoongArchSubtarget &Subtarget) {
++  unsigned CondOpc;
++  switch (MI.getOpcode()) {
++  default:
++    llvm_unreachable("Unexpected opcode");
++  case LoongArch::PseudoVBZ:
++    CondOpc = LoongArch::VSETEQZ_V;
++    break;
++  case LoongArch::PseudoVBZ_B:
++    CondOpc = LoongArch::VSETANYEQZ_B;
++    break;
++  case LoongArch::PseudoVBZ_H:
++    CondOpc = LoongArch::VSETANYEQZ_H;
++    break;
++  case LoongArch::PseudoVBZ_W:
++    CondOpc = LoongArch::VSETANYEQZ_W;
++    break;
++  case LoongArch::PseudoVBZ_D:
++    CondOpc = LoongArch::VSETANYEQZ_D;
++    break;
++  case LoongArch::PseudoVBNZ:
++    CondOpc = LoongArch::VSETNEZ_V;
++    break;
++  case LoongArch::PseudoVBNZ_B:
++    CondOpc = LoongArch::VSETALLNEZ_B;
++    break;
++  case LoongArch::PseudoVBNZ_H:
++    CondOpc = LoongArch::VSETALLNEZ_H;
++    break;
++  case LoongArch::PseudoVBNZ_W:
++    CondOpc = LoongArch::VSETALLNEZ_W;
++    break;
++  case LoongArch::PseudoVBNZ_D:
++    CondOpc = LoongArch::VSETALLNEZ_D;
++    break;
++  }
++
++  const TargetInstrInfo *TII = Subtarget.getInstrInfo();
++  const BasicBlock *LLVM_BB = BB->getBasicBlock();
++  DebugLoc DL = MI.getDebugLoc();
++  MachineRegisterInfo &MRI = BB->getParent()->getRegInfo();
++  MachineFunction::iterator It = ++BB->getIterator();
++
++  MachineFunction *F = BB->getParent();
++  MachineBasicBlock *FalseBB = F->CreateMachineBasicBlock(LLVM_BB);
++  MachineBasicBlock *TrueBB = F->CreateMachineBasicBlock(LLVM_BB);
++  MachineBasicBlock *SinkBB = F->CreateMachineBasicBlock(LLVM_BB);
++
++  F->insert(It, FalseBB);
++  F->insert(It, TrueBB);
++  F->insert(It, SinkBB);
++
++  // Transfer the remainder of MBB and its successor edges to Sink.
++  SinkBB->splice(SinkBB->end(), BB, std::next(MI.getIterator()), BB->end());
++  SinkBB->transferSuccessorsAndUpdatePHIs(BB);
++
++  // Insert the real instruction to BB.
++  Register FCC = MRI.createVirtualRegister(&LoongArch::CFRRegClass);
++  BuildMI(BB, DL, TII->get(CondOpc), FCC).addReg(MI.getOperand(1).getReg());
++
++  // Insert branch.
++  BuildMI(BB, DL, TII->get(LoongArch::BCNEZ)).addReg(FCC).addMBB(TrueBB);
++  BB->addSuccessor(FalseBB);
++  BB->addSuccessor(TrueBB);
++
++  // FalseBB.
++  Register RD1 = MRI.createVirtualRegister(&LoongArch::GPRRegClass);
++  BuildMI(FalseBB, DL, TII->get(LoongArch::ADDI_W), RD1)
++      .addReg(LoongArch::R0)
++      .addImm(0);
++  BuildMI(FalseBB, DL, TII->get(LoongArch::PseudoBR)).addMBB(SinkBB);
++  FalseBB->addSuccessor(SinkBB);
++
++  // TrueBB.
++  Register RD2 = MRI.createVirtualRegister(&LoongArch::GPRRegClass);
++  BuildMI(TrueBB, DL, TII->get(LoongArch::ADDI_W), RD2)
++      .addReg(LoongArch::R0)
++      .addImm(1);
++  TrueBB->addSuccessor(SinkBB);
++
++  // SinkBB: merge the results.
++  BuildMI(*SinkBB, SinkBB->begin(), DL, TII->get(LoongArch::PHI),
++          MI.getOperand(0).getReg())
++      .addReg(RD1)
++      .addMBB(FalseBB)
++      .addReg(RD2)
++      .addMBB(TrueBB);
++
++  // The pseudo instruction is gone now.
++  MI.eraseFromParent();
++  return SinkBB;
++}
++
+ MachineBasicBlock *LoongArchTargetLowering::EmitInstrWithCustomInserter(
+     MachineInstr &MI, MachineBasicBlock *BB) const {
+   const TargetInstrInfo *TII = Subtarget.getInstrInfo();
+@@ -1786,6 +2626,17 @@ MachineBasicBlock *LoongArchTargetLowering::EmitInstrWithCustomInserter(
+     MI.eraseFromParent();
+     return BB;
+   }
++  case LoongArch::PseudoVBZ:
++  case LoongArch::PseudoVBZ_B:
++  case LoongArch::PseudoVBZ_H:
++  case LoongArch::PseudoVBZ_W:
++  case LoongArch::PseudoVBZ_D:
++  case LoongArch::PseudoVBNZ:
++  case LoongArch::PseudoVBNZ_B:
++  case LoongArch::PseudoVBNZ_H:
++  case LoongArch::PseudoVBNZ_W:
++  case LoongArch::PseudoVBNZ_D:
++    return emitVecCondBranchPseudo(MI, BB, Subtarget);
+   }
+ }
+ 
+@@ -1858,6 +2709,13 @@ const char *LoongArchTargetLowering::getTargetNodeName(unsigned Opcode) const {
+     NODE_NAME_CASE(MOVFCSR2GR)
+     NODE_NAME_CASE(CACOP_D)
+     NODE_NAME_CASE(CACOP_W)
++    NODE_NAME_CASE(VPICK_SEXT_ELT)
++    NODE_NAME_CASE(VPICK_ZEXT_ELT)
++    NODE_NAME_CASE(VREPLVE)
++    NODE_NAME_CASE(VALL_ZERO)
++    NODE_NAME_CASE(VANY_ZERO)
++    NODE_NAME_CASE(VALL_NONZERO)
++    NODE_NAME_CASE(VANY_NONZERO)
+   }
+ #undef NODE_NAME_CASE
+   return nullptr;
+@@ -1884,6 +2742,10 @@ const MCPhysReg ArgFPR64s[] = {
+     LoongArch::F0_64, LoongArch::F1_64, LoongArch::F2_64, LoongArch::F3_64,
+     LoongArch::F4_64, LoongArch::F5_64, LoongArch::F6_64, LoongArch::F7_64};
+ 
++const MCPhysReg ArgVRs[] = {LoongArch::VR0, LoongArch::VR1, LoongArch::VR2,
++                            LoongArch::VR3, LoongArch::VR4, LoongArch::VR5,
++                            LoongArch::VR6, LoongArch::VR7};
++
+ // Pass a 2*GRLen argument that has been split into two GRLen values through
+ // registers or the stack as necessary.
+ static bool CC_LoongArchAssign2GRLen(unsigned GRLen, CCState &State,
+@@ -2030,6 +2892,8 @@ static bool CC_LoongArch(const DataLayout &DL, LoongArchABI::ABI ABI,
+     Reg = State.AllocateReg(ArgFPR32s);
+   else if (ValVT == MVT::f64 && !UseGPRForFloat)
+     Reg = State.AllocateReg(ArgFPR64s);
++  else if (ValVT.is128BitVector())
++    Reg = State.AllocateReg(ArgVRs);
+   else
+     Reg = State.AllocateReg(ArgGPRs);
+ 
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelLowering.h b/llvm/lib/Target/LoongArch/LoongArchISelLowering.h
+index 500407493fe5..7765057ebffb 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelLowering.h
++++ b/llvm/lib/Target/LoongArch/LoongArchISelLowering.h
+@@ -110,6 +110,20 @@ enum NodeType : unsigned {
+ 
+   // Read CPU configuration information operation
+   CPUCFG,
++
++  // Vector Shuffle
++  VREPLVE,
++
++  // Extended vector element extraction
++  VPICK_SEXT_ELT,
++  VPICK_ZEXT_ELT,
++
++  // Vector comparisons
++  VALL_ZERO,
++  VANY_ZERO,
++  VALL_NONZERO,
++  VANY_NONZERO,
++
+   // Intrinsic operations end =============================================
+ };
+ } // end namespace LoongArchISD
+diff --git a/llvm/lib/Target/LoongArch/LoongArchInstrInfo.cpp b/llvm/lib/Target/LoongArch/LoongArchInstrInfo.cpp
+index ef79b8a0dcd3..a5d66ebac96a 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchInstrInfo.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchInstrInfo.cpp
+@@ -47,6 +47,14 @@ void LoongArchInstrInfo::copyPhysReg(MachineBasicBlock &MBB,
+     return;
+   }
+ 
++  // VR->VR copies.
++  if (LoongArch::LSX128RegClass.contains(DstReg, SrcReg)) {
++    BuildMI(MBB, MBBI, DL, get(LoongArch::VORI_B), DstReg)
++        .addReg(SrcReg, getKillRegState(KillSrc))
++        .addImm(0);
++    return;
++  }
++
+   // GPR->CFR copy.
+   if (LoongArch::CFRRegClass.contains(DstReg) &&
+       LoongArch::GPRRegClass.contains(SrcReg)) {
+@@ -99,6 +107,8 @@ void LoongArchInstrInfo::storeRegToStackSlot(
+     Opcode = LoongArch::FST_S;
+   else if (LoongArch::FPR64RegClass.hasSubClassEq(RC))
+     Opcode = LoongArch::FST_D;
++  else if (LoongArch::LSX128RegClass.hasSubClassEq(RC))
++    Opcode = LoongArch::VST;
+   else if (LoongArch::CFRRegClass.hasSubClassEq(RC))
+     Opcode = LoongArch::PseudoST_CFR;
+   else
+@@ -133,6 +143,8 @@ void LoongArchInstrInfo::loadRegFromStackSlot(MachineBasicBlock &MBB,
+     Opcode = LoongArch::FLD_S;
+   else if (LoongArch::FPR64RegClass.hasSubClassEq(RC))
+     Opcode = LoongArch::FLD_D;
++  else if (LoongArch::LSX128RegClass.hasSubClassEq(RC))
++    Opcode = LoongArch::VLD;
+   else if (LoongArch::CFRRegClass.hasSubClassEq(RC))
+     Opcode = LoongArch::PseudoLD_CFR;
+   else
+diff --git a/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
+index ac391ef471b1..b2c4bb812ba5 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
+@@ -182,7 +182,7 @@ def imm32 : Operand<GRLenVT> {
+   let ParserMatchClass = ImmAsmOperand<"", 32, "">;
+ }
+ 
+-def uimm1 : Operand<GRLenVT> {
++def uimm1 : Operand<GRLenVT>, ImmLeaf<GRLenVT, [{return isUInt<1>(Imm);}]>{
+   let ParserMatchClass = UImmAsmOperand<1>;
+ }
+ 
+@@ -197,11 +197,11 @@ def uimm2_plus1 : Operand<GRLenVT>,
+   let DecoderMethod = "decodeUImmOperand<2, 1>";
+ }
+ 
+-def uimm3 : Operand<GRLenVT> {
++def uimm3 : Operand<GRLenVT>, ImmLeaf<GRLenVT, [{return isUInt<3>(Imm);}]> {
+   let ParserMatchClass = UImmAsmOperand<3>;
+ }
+ 
+-def uimm4 : Operand<GRLenVT> {
++def uimm4 : Operand<GRLenVT>, ImmLeaf<GRLenVT, [{return isUInt<4>(Imm);}]> {
+   let ParserMatchClass = UImmAsmOperand<4>;
+ }
+ 
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+index a8ed285a37cf..13332be0bc38 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+@@ -10,6 +10,146 @@
+ //
+ //===----------------------------------------------------------------------===//
+ 
++def SDT_LoongArchVreplve : SDTypeProfile<1, 2, [SDTCisInt<0>, SDTCisVec<0>,
++                                         SDTCisInt<1>, SDTCisVec<1>,
++                                         SDTCisSameAs<0, 1>, SDTCisInt<2>]>;
++def SDT_LoongArchVecCond : SDTypeProfile<1, 1, [SDTCisInt<0>, SDTCisVec<1>]>;
++
++// Target nodes.
++def loongarch_vreplve : SDNode<"LoongArchISD::VREPLVE", SDT_LoongArchVreplve>;
++def loongarch_vall_nonzero : SDNode<"LoongArchISD::VALL_NONZERO",
++                                    SDT_LoongArchVecCond>;
++def loongarch_vany_nonzero : SDNode<"LoongArchISD::VANY_NONZERO",
++                                    SDT_LoongArchVecCond>;
++def loongarch_vall_zero : SDNode<"LoongArchISD::VALL_ZERO",
++                                SDT_LoongArchVecCond>;
++def loongarch_vany_zero : SDNode<"LoongArchISD::VANY_ZERO",
++                                SDT_LoongArchVecCond>;
++
++def loongarch_vpick_sext_elt : SDNode<"LoongArchISD::VPICK_SEXT_ELT",
++                                      SDTypeProfile<1, 3, [SDTCisPtrTy<2>]>>;
++def loongarch_vpick_zext_elt : SDNode<"LoongArchISD::VPICK_ZEXT_ELT",
++                                      SDTypeProfile<1, 3, [SDTCisPtrTy<2>]>>;
++
++class VecCond<SDPatternOperator OpNode, ValueType TyNode,
++              RegisterClass RC = LSX128>
++    : Pseudo<(outs GPR:$rd), (ins RC:$vj),
++             [(set GPR:$rd, (OpNode (TyNode RC:$vj)))]> {
++  let hasSideEffects = 0;
++  let mayLoad = 0;
++  let mayStore = 0;
++  let usesCustomInserter = 1;
++}
++
++def vsplat_imm_eq_1 : PatFrags<(ops), [(build_vector),
++                                       (bitconvert (v4i32 (build_vector)))], [{
++  APInt Imm;
++  EVT EltTy = N->getValueType(0).getVectorElementType();
++
++  if (N->getOpcode() == ISD::BITCAST)
++    N = N->getOperand(0).getNode();
++
++  return selectVSplat(N, Imm, EltTy.getSizeInBits()) &&
++         Imm.getBitWidth() == EltTy.getSizeInBits() && Imm == 1;
++}]>;
++
++def vsplati8_imm_eq_7 : PatFrags<(ops), [(build_vector)], [{
++  APInt Imm;
++  EVT EltTy = N->getValueType(0).getVectorElementType();
++
++  if (N->getOpcode() == ISD::BITCAST)
++    N = N->getOperand(0).getNode();
++
++  return selectVSplat(N, Imm, EltTy.getSizeInBits()) &&
++         Imm.getBitWidth() == EltTy.getSizeInBits() && Imm == 7;
++}]>;
++def vsplati16_imm_eq_15 : PatFrags<(ops), [(build_vector)], [{
++  APInt Imm;
++  EVT EltTy = N->getValueType(0).getVectorElementType();
++
++  if (N->getOpcode() == ISD::BITCAST)
++    N = N->getOperand(0).getNode();
++
++  return selectVSplat(N, Imm, EltTy.getSizeInBits()) &&
++         Imm.getBitWidth() == EltTy.getSizeInBits() && Imm == 15;
++}]>;
++def vsplati32_imm_eq_31 : PatFrags<(ops), [(build_vector)], [{
++  APInt Imm;
++  EVT EltTy = N->getValueType(0).getVectorElementType();
++
++  if (N->getOpcode() == ISD::BITCAST)
++    N = N->getOperand(0).getNode();
++
++  return selectVSplat(N, Imm, EltTy.getSizeInBits()) &&
++         Imm.getBitWidth() == EltTy.getSizeInBits() && Imm == 31;
++}]>;
++def vsplati64_imm_eq_63 : PatFrags<(ops), [(build_vector),
++                                           (bitconvert (v4i32 (build_vector)))], [{
++  APInt Imm;
++  EVT EltTy = N->getValueType(0).getVectorElementType();
++
++  if (N->getOpcode() == ISD::BITCAST)
++    N = N->getOperand(0).getNode();
++
++  return selectVSplat(N, Imm, EltTy.getSizeInBits()) &&
++         Imm.getBitWidth() == EltTy.getSizeInBits() && Imm == 63;
++}]>;
++
++def vsplati8imm7   : PatFrag<(ops node:$reg),
++                             (and node:$reg, vsplati8_imm_eq_7)>;
++def vsplati16imm15 : PatFrag<(ops node:$reg),
++                             (and node:$reg, vsplati16_imm_eq_15)>;
++def vsplati32imm31 : PatFrag<(ops node:$reg),
++                             (and node:$reg, vsplati32_imm_eq_31)>;
++def vsplati64imm63 : PatFrag<(ops node:$reg),
++                             (and node:$reg, vsplati64_imm_eq_63)>;
++
++foreach N = [3, 4, 5, 6, 8] in
++  def SplatPat_uimm#N : ComplexPattern<vAny, 1, "selectVSplatImm<"#N#">",
++                                       [build_vector, bitconvert], [], 2>;
++
++foreach N = [5] in
++  def SplatPat_simm#N : ComplexPattern<vAny, 1, "selectVSplatImm<"#N#", true>",
++                                       [build_vector, bitconvert]>;
++
++def vsplat_uimm_inv_pow2 : ComplexPattern<vAny, 1, "selectVSplatUimmInvPow2",
++                                          [build_vector, bitconvert]>;
++
++def vsplat_uimm_pow2 : ComplexPattern<vAny, 1, "selectVSplatUimmPow2",
++                                      [build_vector, bitconvert]>;
++
++def muladd : PatFrag<(ops node:$vd, node:$vj, node:$vk),
++                     (add node:$vd, (mul node:$vj, node:$vk))>;
++
++def mulsub : PatFrag<(ops node:$vd, node:$vj, node:$vk),
++                     (sub node:$vd, (mul node:$vj, node:$vk))>;
++
++def lsxsplati8  : PatFrag<(ops node:$e0),
++                          (v16i8 (build_vector node:$e0, node:$e0,
++                                               node:$e0, node:$e0,
++                                               node:$e0, node:$e0,
++                                               node:$e0, node:$e0,
++                                               node:$e0, node:$e0,
++                                               node:$e0, node:$e0,
++                                               node:$e0, node:$e0,
++                                               node:$e0, node:$e0))>;
++def lsxsplati16 : PatFrag<(ops node:$e0),
++                          (v8i16 (build_vector node:$e0, node:$e0,
++                                               node:$e0, node:$e0,
++                                               node:$e0, node:$e0,
++                                               node:$e0, node:$e0))>;
++def lsxsplati32 : PatFrag<(ops node:$e0),
++                          (v4i32 (build_vector node:$e0, node:$e0,
++                                               node:$e0, node:$e0))>;
++
++def lsxsplati64 : PatFrag<(ops node:$e0),
++                          (v2i64 (build_vector node:$e0, node:$e0))>;
++
++def to_valide_timm : SDNodeXForm<timm, [{
++  auto CN = cast<ConstantSDNode>(N);
++  return CurDAG->getTargetConstant(CN->getSExtValue(), SDLoc(N), Subtarget->getGRLenVT());
++}]>;
++
+ //===----------------------------------------------------------------------===//
+ // Instruction class templates
+ //===----------------------------------------------------------------------===//
+@@ -1004,4 +1144,680 @@ def PseudoVREPLI_D : Pseudo<(outs LSX128:$vd), (ins simm10:$imm), [],
+                             "vrepli.d", "$vd, $imm">;
+ }
+ 
++def PseudoVBNZ_B : VecCond<loongarch_vall_nonzero, v16i8>;
++def PseudoVBNZ_H : VecCond<loongarch_vall_nonzero, v8i16>;
++def PseudoVBNZ_W : VecCond<loongarch_vall_nonzero, v4i32>;
++def PseudoVBNZ_D : VecCond<loongarch_vall_nonzero, v2i64>;
++def PseudoVBNZ : VecCond<loongarch_vany_nonzero, v16i8>;
++
++def PseudoVBZ_B : VecCond<loongarch_vall_zero, v16i8>;
++def PseudoVBZ_H : VecCond<loongarch_vall_zero, v8i16>;
++def PseudoVBZ_W : VecCond<loongarch_vall_zero, v4i32>;
++def PseudoVBZ_D : VecCond<loongarch_vall_zero, v2i64>;
++def PseudoVBZ : VecCond<loongarch_vany_zero, v16i8>;
++
++} // Predicates = [HasExtLSX]
++
++multiclass PatVr<SDPatternOperator OpNode, string Inst> {
++  def : Pat<(v16i8 (OpNode (v16i8 LSX128:$vj))),
++            (!cast<LAInst>(Inst#"_B") LSX128:$vj)>;
++  def : Pat<(v8i16 (OpNode (v8i16 LSX128:$vj))),
++            (!cast<LAInst>(Inst#"_H") LSX128:$vj)>;
++  def : Pat<(v4i32 (OpNode (v4i32 LSX128:$vj))),
++            (!cast<LAInst>(Inst#"_W") LSX128:$vj)>;
++  def : Pat<(v2i64 (OpNode (v2i64 LSX128:$vj))),
++            (!cast<LAInst>(Inst#"_D") LSX128:$vj)>;
++}
++
++multiclass PatVrVr<SDPatternOperator OpNode, string Inst> {
++  def : Pat<(OpNode (v16i8 LSX128:$vj), (v16i8 LSX128:$vk)),
++            (!cast<LAInst>(Inst#"_B") LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(OpNode (v8i16 LSX128:$vj), (v8i16 LSX128:$vk)),
++            (!cast<LAInst>(Inst#"_H") LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(OpNode (v4i32 LSX128:$vj), (v4i32 LSX128:$vk)),
++            (!cast<LAInst>(Inst#"_W") LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(OpNode (v2i64 LSX128:$vj), (v2i64 LSX128:$vk)),
++            (!cast<LAInst>(Inst#"_D") LSX128:$vj, LSX128:$vk)>;
++}
++
++multiclass PatVrVrF<SDPatternOperator OpNode, string Inst> {
++  def : Pat<(OpNode (v4f32 LSX128:$vj), (v4f32 LSX128:$vk)),
++            (!cast<LAInst>(Inst#"_S") LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(OpNode (v2f64 LSX128:$vj), (v2f64 LSX128:$vk)),
++            (!cast<LAInst>(Inst#"_D") LSX128:$vj, LSX128:$vk)>;
++}
++
++multiclass PatVrVrU<SDPatternOperator OpNode, string Inst> {
++  def : Pat<(OpNode (v16i8 LSX128:$vj), (v16i8 LSX128:$vk)),
++            (!cast<LAInst>(Inst#"_BU") LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(OpNode (v8i16 LSX128:$vj), (v8i16 LSX128:$vk)),
++            (!cast<LAInst>(Inst#"_HU") LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(OpNode (v4i32 LSX128:$vj), (v4i32 LSX128:$vk)),
++            (!cast<LAInst>(Inst#"_WU") LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(OpNode (v2i64 LSX128:$vj), (v2i64 LSX128:$vk)),
++            (!cast<LAInst>(Inst#"_DU") LSX128:$vj, LSX128:$vk)>;
++}
++
++multiclass PatVrSimm5<SDPatternOperator OpNode, string Inst> {
++  def : Pat<(OpNode (v16i8 LSX128:$vj), (v16i8 (SplatPat_simm5 simm5:$imm))),
++            (!cast<LAInst>(Inst#"_B") LSX128:$vj, simm5:$imm)>;
++  def : Pat<(OpNode (v8i16 LSX128:$vj), (v8i16 (SplatPat_simm5 simm5:$imm))),
++            (!cast<LAInst>(Inst#"_H") LSX128:$vj, simm5:$imm)>;
++  def : Pat<(OpNode (v4i32 LSX128:$vj), (v4i32 (SplatPat_simm5 simm5:$imm))),
++            (!cast<LAInst>(Inst#"_W") LSX128:$vj, simm5:$imm)>;
++  def : Pat<(OpNode (v2i64 LSX128:$vj), (v2i64 (SplatPat_simm5 simm5:$imm))),
++            (!cast<LAInst>(Inst#"_D") LSX128:$vj, simm5:$imm)>;
++}
++
++multiclass PatVrUimm5<SDPatternOperator OpNode, string Inst> {
++  def : Pat<(OpNode (v16i8 LSX128:$vj), (v16i8 (SplatPat_uimm5 uimm5:$imm))),
++            (!cast<LAInst>(Inst#"_BU") LSX128:$vj, uimm5:$imm)>;
++  def : Pat<(OpNode (v8i16 LSX128:$vj), (v8i16 (SplatPat_uimm5 uimm5:$imm))),
++            (!cast<LAInst>(Inst#"_HU") LSX128:$vj, uimm5:$imm)>;
++  def : Pat<(OpNode (v4i32 LSX128:$vj), (v4i32 (SplatPat_uimm5 uimm5:$imm))),
++            (!cast<LAInst>(Inst#"_WU") LSX128:$vj, uimm5:$imm)>;
++  def : Pat<(OpNode (v2i64 LSX128:$vj), (v2i64 (SplatPat_uimm5 uimm5:$imm))),
++            (!cast<LAInst>(Inst#"_DU") LSX128:$vj, uimm5:$imm)>;
++}
++
++multiclass PatVrVrVr<SDPatternOperator OpNode, string Inst> {
++  def : Pat<(OpNode (v16i8 LSX128:$vd), (v16i8 LSX128:$vj), (v16i8 LSX128:$vk)),
++            (!cast<LAInst>(Inst#"_B") LSX128:$vd, LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(OpNode (v8i16 LSX128:$vd), (v8i16 LSX128:$vj), (v8i16 LSX128:$vk)),
++            (!cast<LAInst>(Inst#"_H") LSX128:$vd, LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(OpNode (v4i32 LSX128:$vd), (v4i32 LSX128:$vj), (v4i32 LSX128:$vk)),
++            (!cast<LAInst>(Inst#"_W") LSX128:$vd, LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(OpNode (v2i64 LSX128:$vd), (v2i64 LSX128:$vj), (v2i64 LSX128:$vk)),
++            (!cast<LAInst>(Inst#"_D") LSX128:$vd, LSX128:$vj, LSX128:$vk)>;
++}
++
++multiclass PatShiftVrVr<SDPatternOperator OpNode, string Inst> {
++  def : Pat<(OpNode (v16i8 LSX128:$vj), (and vsplati8_imm_eq_7,
++                                             (v16i8 LSX128:$vk))),
++            (!cast<LAInst>(Inst#"_B") LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(OpNode (v8i16 LSX128:$vj), (and vsplati16_imm_eq_15,
++                                             (v8i16 LSX128:$vk))),
++            (!cast<LAInst>(Inst#"_H") LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(OpNode (v4i32 LSX128:$vj), (and vsplati32_imm_eq_31,
++                                             (v4i32 LSX128:$vk))),
++            (!cast<LAInst>(Inst#"_W") LSX128:$vj, LSX128:$vk)>;
++  def : Pat<(OpNode (v2i64 LSX128:$vj), (and vsplati64_imm_eq_63,
++                                             (v2i64 LSX128:$vk))),
++            (!cast<LAInst>(Inst#"_D") LSX128:$vj, LSX128:$vk)>;
++}
++
++multiclass PatShiftVrUimm<SDPatternOperator OpNode, string Inst> {
++  def : Pat<(OpNode (v16i8 LSX128:$vj), (v16i8 (SplatPat_uimm3 uimm3:$imm))),
++            (!cast<LAInst>(Inst#"_B") LSX128:$vj, uimm3:$imm)>;
++  def : Pat<(OpNode (v8i16 LSX128:$vj), (v8i16 (SplatPat_uimm4 uimm4:$imm))),
++            (!cast<LAInst>(Inst#"_H") LSX128:$vj, uimm4:$imm)>;
++  def : Pat<(OpNode (v4i32 LSX128:$vj), (v4i32 (SplatPat_uimm5 uimm5:$imm))),
++            (!cast<LAInst>(Inst#"_W") LSX128:$vj, uimm5:$imm)>;
++  def : Pat<(OpNode (v2i64 LSX128:$vj), (v2i64 (SplatPat_uimm6 uimm6:$imm))),
++            (!cast<LAInst>(Inst#"_D") LSX128:$vj, uimm6:$imm)>;
++}
++
++class PatVrVrB<SDPatternOperator OpNode, LAInst Inst>
++    : Pat<(OpNode (v16i8 LSX128:$vj), (v16i8 LSX128:$vk)),
++          (Inst LSX128:$vj, LSX128:$vk)>;
++
++let Predicates = [HasExtLSX] in {
++
++// VADD_{B/H/W/D}
++defm : PatVrVr<add, "VADD">;
++// VSUB_{B/H/W/D}
++defm : PatVrVr<sub, "VSUB">;
++
++// VADDI_{B/H/W/D}U
++defm : PatVrUimm5<add, "VADDI">;
++// VSUBI_{B/H/W/D}U
++defm : PatVrUimm5<sub, "VSUBI">;
++
++// VNEG_{B/H/W/D}
++def : Pat<(sub immAllZerosV, (v16i8 LSX128:$vj)), (VNEG_B LSX128:$vj)>;
++def : Pat<(sub immAllZerosV, (v8i16 LSX128:$vj)), (VNEG_H LSX128:$vj)>;
++def : Pat<(sub immAllZerosV, (v4i32 LSX128:$vj)), (VNEG_W LSX128:$vj)>;
++def : Pat<(sub immAllZerosV, (v2i64 LSX128:$vj)), (VNEG_D LSX128:$vj)>;
++
++// VMAX[I]_{B/H/W/D}[U]
++defm : PatVrVr<smax, "VMAX">;
++defm : PatVrVrU<umax, "VMAX">;
++defm : PatVrSimm5<smax, "VMAXI">;
++defm : PatVrUimm5<umax, "VMAXI">;
++
++// VMIN[I]_{B/H/W/D}[U]
++defm : PatVrVr<smin, "VMIN">;
++defm : PatVrVrU<umin, "VMIN">;
++defm : PatVrSimm5<smin, "VMINI">;
++defm : PatVrUimm5<umin, "VMINI">;
++
++// VMUL_{B/H/W/D}
++defm : PatVrVr<mul, "VMUL">;
++
++// VMADD_{B/H/W/D}
++defm : PatVrVrVr<muladd, "VMADD">;
++// VMSUB_{B/H/W/D}
++defm : PatVrVrVr<mulsub, "VMSUB">;
++
++// VDIV_{B/H/W/D}[U]
++defm : PatVrVr<sdiv, "VDIV">;
++defm : PatVrVrU<udiv, "VDIV">;
++
++// VMOD_{B/H/W/D}[U]
++defm : PatVrVr<srem, "VMOD">;
++defm : PatVrVrU<urem, "VMOD">;
++
++// VAND_V
++def : PatVrVrB<and, VAND_V>;
++// VNOR_V
++def : PatVrVrB<or, VOR_V>;
++// VXOR_V
++def : PatVrVrB<xor, VXOR_V>;
++// VNOR_V
++def : Pat<(vnot (or (v16i8 LSX128:$vj), (v16i8 LSX128:$vk))),
++          (VNOR_V LSX128:$vj, LSX128:$vk)>;
++
++// VANDI_B
++def : Pat<(and (v16i8 LSX128:$vj), (v16i8 (SplatPat_uimm8 uimm8:$imm))),
++          (VANDI_B LSX128:$vj, uimm8:$imm)>;
++// VORI_B
++def : Pat<(or (v16i8 LSX128:$vj), (v16i8 (SplatPat_uimm8 uimm8:$imm))),
++          (VORI_B LSX128:$vj, uimm8:$imm)>;
++
++// VXORI_B
++def : Pat<(xor (v16i8 LSX128:$vj), (v16i8 (SplatPat_uimm8 uimm8:$imm))),
++          (VXORI_B LSX128:$vj, uimm8:$imm)>;
++
++// VSLL[I]_{B/H/W/D}
++defm : PatVrVr<shl, "VSLL">;
++defm : PatShiftVrVr<shl, "VSLL">;
++defm : PatShiftVrUimm<shl, "VSLLI">;
++
++// VSRL[I]_{B/H/W/D}
++defm : PatVrVr<srl, "VSRL">;
++defm : PatShiftVrVr<srl, "VSRL">;
++defm : PatShiftVrUimm<srl, "VSRLI">;
++
++// VSRA[I]_{B/H/W/D}
++defm : PatVrVr<sra, "VSRA">;
++defm : PatShiftVrVr<sra, "VSRA">;
++defm : PatShiftVrUimm<sra, "VSRAI">;
++
++// VPCNT_{B/H/W/D}
++defm : PatVr<ctpop, "VPCNT">;
++
++// VBITCLR_{B/H/W/D}
++def : Pat<(and v16i8:$vj, (vnot (shl vsplat_imm_eq_1, v16i8:$vk))),
++          (v16i8 (VBITCLR_B v16i8:$vj, v16i8:$vk))>;
++def : Pat<(and v8i16:$vj, (vnot (shl vsplat_imm_eq_1, v8i16:$vk))),
++          (v8i16 (VBITCLR_H v8i16:$vj, v8i16:$vk))>;
++def : Pat<(and v4i32:$vj, (vnot (shl vsplat_imm_eq_1, v4i32:$vk))),
++          (v4i32 (VBITCLR_W v4i32:$vj, v4i32:$vk))>;
++def : Pat<(and v2i64:$vj, (vnot (shl vsplat_imm_eq_1, v2i64:$vk))),
++          (v2i64 (VBITCLR_D v2i64:$vj, v2i64:$vk))>;
++def : Pat<(and v16i8:$vj, (vnot (shl vsplat_imm_eq_1,
++                                     (vsplati8imm7 v16i8:$vk)))),
++          (v16i8 (VBITCLR_B v16i8:$vj, v16i8:$vk))>;
++def : Pat<(and v8i16:$vj, (vnot (shl vsplat_imm_eq_1,
++                                     (vsplati16imm15 v8i16:$vk)))),
++          (v8i16 (VBITCLR_H v8i16:$vj, v8i16:$vk))>;
++def : Pat<(and v4i32:$vj, (vnot (shl vsplat_imm_eq_1,
++                                     (vsplati32imm31 v4i32:$vk)))),
++          (v4i32 (VBITCLR_W v4i32:$vj, v4i32:$vk))>;
++def : Pat<(and v2i64:$vj, (vnot (shl vsplat_imm_eq_1,
++                                     (vsplati64imm63 v2i64:$vk)))),
++          (v2i64 (VBITCLR_D v2i64:$vj, v2i64:$vk))>;
++
++// VBITCLRI_{B/H/W/D}
++def : Pat<(and (v16i8 LSX128:$vj), (v16i8 (vsplat_uimm_inv_pow2 uimm3:$imm))),
++          (VBITCLRI_B LSX128:$vj, uimm3:$imm)>;
++def : Pat<(and (v8i16 LSX128:$vj), (v8i16 (vsplat_uimm_inv_pow2 uimm4:$imm))),
++          (VBITCLRI_H LSX128:$vj, uimm4:$imm)>;
++def : Pat<(and (v4i32 LSX128:$vj), (v4i32 (vsplat_uimm_inv_pow2 uimm5:$imm))),
++          (VBITCLRI_W LSX128:$vj, uimm5:$imm)>;
++def : Pat<(and (v2i64 LSX128:$vj), (v2i64 (vsplat_uimm_inv_pow2 uimm6:$imm))),
++          (VBITCLRI_D LSX128:$vj, uimm6:$imm)>;
++
++// VBITSET_{B/H/W/D}
++def : Pat<(or v16i8:$vj, (shl vsplat_imm_eq_1, v16i8:$vk)),
++          (v16i8 (VBITSET_B v16i8:$vj, v16i8:$vk))>;
++def : Pat<(or v8i16:$vj, (shl vsplat_imm_eq_1, v8i16:$vk)),
++          (v8i16 (VBITSET_H v8i16:$vj, v8i16:$vk))>;
++def : Pat<(or v4i32:$vj, (shl vsplat_imm_eq_1, v4i32:$vk)),
++          (v4i32 (VBITSET_W v4i32:$vj, v4i32:$vk))>;
++def : Pat<(or v2i64:$vj, (shl vsplat_imm_eq_1, v2i64:$vk)),
++          (v2i64 (VBITSET_D v2i64:$vj, v2i64:$vk))>;
++def : Pat<(or v16i8:$vj, (shl vsplat_imm_eq_1, (vsplati8imm7 v16i8:$vk))),
++          (v16i8 (VBITSET_B v16i8:$vj, v16i8:$vk))>;
++def : Pat<(or v8i16:$vj, (shl vsplat_imm_eq_1, (vsplati16imm15 v8i16:$vk))),
++          (v8i16 (VBITSET_H v8i16:$vj, v8i16:$vk))>;
++def : Pat<(or v4i32:$vj, (shl vsplat_imm_eq_1, (vsplati32imm31 v4i32:$vk))),
++          (v4i32 (VBITSET_W v4i32:$vj, v4i32:$vk))>;
++def : Pat<(or v2i64:$vj, (shl vsplat_imm_eq_1, (vsplati64imm63 v2i64:$vk))),
++          (v2i64 (VBITSET_D v2i64:$vj, v2i64:$vk))>;
++
++// VBITSETI_{B/H/W/D}
++def : Pat<(or (v16i8 LSX128:$vj), (v16i8 (vsplat_uimm_pow2 uimm3:$imm))),
++          (VBITSETI_B LSX128:$vj, uimm3:$imm)>;
++def : Pat<(or (v8i16 LSX128:$vj), (v8i16 (vsplat_uimm_pow2 uimm4:$imm))),
++          (VBITSETI_H LSX128:$vj, uimm4:$imm)>;
++def : Pat<(or (v4i32 LSX128:$vj), (v4i32 (vsplat_uimm_pow2 uimm5:$imm))),
++          (VBITSETI_W LSX128:$vj, uimm5:$imm)>;
++def : Pat<(or (v2i64 LSX128:$vj), (v2i64 (vsplat_uimm_pow2 uimm6:$imm))),
++          (VBITSETI_D LSX128:$vj, uimm6:$imm)>;
++
++// VBITREV_{B/H/W/D}
++def : Pat<(xor v16i8:$vj, (shl vsplat_imm_eq_1, v16i8:$vk)),
++          (v16i8 (VBITREV_B v16i8:$vj, v16i8:$vk))>;
++def : Pat<(xor v8i16:$vj, (shl vsplat_imm_eq_1, v8i16:$vk)),
++          (v8i16 (VBITREV_H v8i16:$vj, v8i16:$vk))>;
++def : Pat<(xor v4i32:$vj, (shl vsplat_imm_eq_1, v4i32:$vk)),
++          (v4i32 (VBITREV_W v4i32:$vj, v4i32:$vk))>;
++def : Pat<(xor v2i64:$vj, (shl vsplat_imm_eq_1, v2i64:$vk)),
++          (v2i64 (VBITREV_D v2i64:$vj, v2i64:$vk))>;
++def : Pat<(xor v16i8:$vj, (shl vsplat_imm_eq_1, (vsplati8imm7 v16i8:$vk))),
++          (v16i8 (VBITREV_B v16i8:$vj, v16i8:$vk))>;
++def : Pat<(xor v8i16:$vj, (shl vsplat_imm_eq_1, (vsplati16imm15 v8i16:$vk))),
++          (v8i16 (VBITREV_H v8i16:$vj, v8i16:$vk))>;
++def : Pat<(xor v4i32:$vj, (shl vsplat_imm_eq_1, (vsplati32imm31 v4i32:$vk))),
++          (v4i32 (VBITREV_W v4i32:$vj, v4i32:$vk))>;
++def : Pat<(xor v2i64:$vj, (shl vsplat_imm_eq_1, (vsplati64imm63 v2i64:$vk))),
++          (v2i64 (VBITREV_D v2i64:$vj, v2i64:$vk))>;
++
++// VBITREVI_{B/H/W/D}
++def : Pat<(xor (v16i8 LSX128:$vj), (v16i8 (vsplat_uimm_pow2 uimm3:$imm))),
++          (VBITREVI_B LSX128:$vj, uimm3:$imm)>;
++def : Pat<(xor (v8i16 LSX128:$vj), (v8i16 (vsplat_uimm_pow2 uimm4:$imm))),
++          (VBITREVI_H LSX128:$vj, uimm4:$imm)>;
++def : Pat<(xor (v4i32 LSX128:$vj), (v4i32 (vsplat_uimm_pow2 uimm5:$imm))),
++          (VBITREVI_W LSX128:$vj, uimm5:$imm)>;
++def : Pat<(xor (v2i64 LSX128:$vj), (v2i64 (vsplat_uimm_pow2 uimm6:$imm))),
++          (VBITREVI_D LSX128:$vj, uimm6:$imm)>;
++
++// VFADD_{S/D}
++defm : PatVrVrF<fadd, "VFADD">;
++
++// VFSUB_{S/D}
++defm : PatVrVrF<fsub, "VFSUB">;
++
++// VFMUL_{S/D}
++defm : PatVrVrF<fmul, "VFMUL">;
++
++// VFDIV_{S/D}
++defm : PatVrVrF<fdiv, "VFDIV">;
++
++// VFMADD_{S/D}
++def : Pat<(fma v4f32:$vj, v4f32:$vk, v4f32:$va),
++          (VFMADD_S v4f32:$vj, v4f32:$vk, v4f32:$va)>;
++def : Pat<(fma v2f64:$vj, v2f64:$vk, v2f64:$va),
++          (VFMADD_D v2f64:$vj, v2f64:$vk, v2f64:$va)>;
++
++// VINSGR2VR_{B/H/W/D}
++def : Pat<(vector_insert v16i8:$vd, GRLenVT:$rj, uimm4:$imm),
++          (VINSGR2VR_B v16i8:$vd, GRLenVT:$rj, uimm4:$imm)>;
++def : Pat<(vector_insert v8i16:$vd, GRLenVT:$rj, uimm3:$imm),
++          (VINSGR2VR_H v8i16:$vd, GRLenVT:$rj, uimm3:$imm)>;
++def : Pat<(vector_insert v4i32:$vd, GRLenVT:$rj, uimm2:$imm),
++          (VINSGR2VR_W v4i32:$vd, GRLenVT:$rj, uimm2:$imm)>;
++def : Pat<(vector_insert v2i64:$vd, GRLenVT:$rj, uimm1:$imm),
++          (VINSGR2VR_D v2i64:$vd, GRLenVT:$rj, uimm1:$imm)>;
++
++// VPICKVE2GR_{B/H/W}[U]
++def : Pat<(loongarch_vpick_sext_elt v16i8:$vd, uimm4:$imm, i8),
++          (VPICKVE2GR_B v16i8:$vd, uimm4:$imm)>;
++def : Pat<(loongarch_vpick_sext_elt v8i16:$vd, uimm3:$imm, i16),
++          (VPICKVE2GR_H v8i16:$vd, uimm3:$imm)>;
++def : Pat<(loongarch_vpick_sext_elt v4i32:$vd, uimm2:$imm, i32),
++          (VPICKVE2GR_W v4i32:$vd, uimm2:$imm)>;
++
++def : Pat<(loongarch_vpick_zext_elt v16i8:$vd, uimm4:$imm, i8),
++          (VPICKVE2GR_BU v16i8:$vd, uimm4:$imm)>;
++def : Pat<(loongarch_vpick_zext_elt v8i16:$vd, uimm3:$imm, i16),
++          (VPICKVE2GR_HU v8i16:$vd, uimm3:$imm)>;
++def : Pat<(loongarch_vpick_zext_elt v4i32:$vd, uimm2:$imm, i32),
++          (VPICKVE2GR_WU v4i32:$vd, uimm2:$imm)>;
++
++// VREPLGR2VR_{B/H/W/D}
++def : Pat<(lsxsplati8 GPR:$rj), (VREPLGR2VR_B GPR:$rj)>;
++def : Pat<(lsxsplati16 GPR:$rj), (VREPLGR2VR_H GPR:$rj)>;
++def : Pat<(lsxsplati32 GPR:$rj), (VREPLGR2VR_W GPR:$rj)>;
++def : Pat<(lsxsplati64 GPR:$rj), (VREPLGR2VR_D GPR:$rj)>;
++
++// VREPLVE_{B/H/W/D}
++def : Pat<(loongarch_vreplve v16i8:$vj, GRLenVT:$rk),
++          (VREPLVE_B v16i8:$vj, GRLenVT:$rk)>;
++def : Pat<(loongarch_vreplve v8i16:$vj, GRLenVT:$rk),
++          (VREPLVE_H v8i16:$vj, GRLenVT:$rk)>;
++def : Pat<(loongarch_vreplve v4i32:$vj, GRLenVT:$rk),
++          (VREPLVE_W v4i32:$vj, GRLenVT:$rk)>;
++def : Pat<(loongarch_vreplve v2i64:$vj, GRLenVT:$rk),
++          (VREPLVE_D v2i64:$vj, GRLenVT:$rk)>;
++
++// Loads/Stores
++foreach vt = [v16i8, v8i16, v4i32, v2i64] in {
++  defm : LdPat<load, VLD, vt>;
++  def  : RegRegLdPat<load, VLDX, vt>;
++  defm : StPat<store, VST, LSX128, vt>;
++  def  : RegRegStPat<store, VSTX, LSX128, vt>;
++}
++
++} // Predicates = [HasExtLSX]
++
++/// Intrinsic pattern
++
++class deriveLSXIntrinsic<string Inst> {
++  Intrinsic ret = !cast<Intrinsic>(!tolower("int_loongarch_lsx_"#Inst));
++}
++
++let Predicates = [HasExtLSX] in {
++
++// vty: v16i8/v8i16/v4i32/v2i64
++// Pat<(Intrinsic vty:$vj, vty:$vk),
++//     (LAInst vty:$vj, vty:$vk)>;
++foreach Inst = ["VSADD_B", "VSADD_BU", "VSSUB_B", "VSSUB_BU",
++                "VHADDW_H_B", "VHADDW_HU_BU", "VHSUBW_H_B", "VHSUBW_HU_BU",
++                "VADDWEV_H_B", "VADDWOD_H_B", "VSUBWEV_H_B", "VSUBWOD_H_B",
++                "VADDWEV_H_BU", "VADDWOD_H_BU", "VSUBWEV_H_BU", "VSUBWOD_H_BU",
++                "VADDWEV_H_BU_B", "VADDWOD_H_BU_B",
++                "VAVG_B", "VAVG_BU", "VAVGR_B", "VAVGR_BU",
++                "VABSD_B", "VABSD_BU", "VADDA_B", "VMUH_B", "VMUH_BU",
++                "VMULWEV_H_B", "VMULWOD_H_B", "VMULWEV_H_BU", "VMULWOD_H_BU",
++                "VMULWEV_H_BU_B", "VMULWOD_H_BU_B", "VSIGNCOV_B",
++                "VANDN_V", "VORN_V", "VROTR_B", "VSRLR_B", "VSRAR_B",
++                "VSEQ_B", "VSLE_B", "VSLE_BU", "VSLT_B", "VSLT_BU",
++                "VPACKEV_B", "VPACKOD_B", "VPICKEV_B", "VPICKOD_B",
++                "VILVL_B", "VILVH_B"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret
++               (v16i8 LSX128:$vj), (v16i8 LSX128:$vk)),
++            (!cast<LAInst>(Inst) LSX128:$vj, LSX128:$vk)>;
++foreach Inst = ["VSADD_H", "VSADD_HU", "VSSUB_H", "VSSUB_HU",
++                "VHADDW_W_H", "VHADDW_WU_HU", "VHSUBW_W_H", "VHSUBW_WU_HU",
++                "VADDWEV_W_H", "VADDWOD_W_H", "VSUBWEV_W_H", "VSUBWOD_W_H",
++                "VADDWEV_W_HU", "VADDWOD_W_HU", "VSUBWEV_W_HU", "VSUBWOD_W_HU",
++                "VADDWEV_W_HU_H", "VADDWOD_W_HU_H",
++                "VAVG_H", "VAVG_HU", "VAVGR_H", "VAVGR_HU",
++                "VABSD_H", "VABSD_HU", "VADDA_H", "VMUH_H", "VMUH_HU",
++                "VMULWEV_W_H", "VMULWOD_W_H", "VMULWEV_W_HU", "VMULWOD_W_HU",
++                "VMULWEV_W_HU_H", "VMULWOD_W_HU_H", "VSIGNCOV_H", "VROTR_H",
++                "VSRLR_H", "VSRAR_H", "VSRLN_B_H", "VSRAN_B_H", "VSRLRN_B_H",
++                "VSRARN_B_H", "VSSRLN_B_H", "VSSRAN_B_H", "VSSRLN_BU_H",
++                "VSSRAN_BU_H", "VSSRLRN_B_H", "VSSRARN_B_H", "VSSRLRN_BU_H",
++                "VSSRARN_BU_H",
++                "VSEQ_H", "VSLE_H", "VSLE_HU", "VSLT_H", "VSLT_HU",
++                "VPACKEV_H", "VPACKOD_H", "VPICKEV_H", "VPICKOD_H",
++                "VILVL_H", "VILVH_H"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret
++               (v8i16 LSX128:$vj), (v8i16 LSX128:$vk)),
++            (!cast<LAInst>(Inst) LSX128:$vj, LSX128:$vk)>;
++foreach Inst = ["VSADD_W", "VSADD_WU", "VSSUB_W", "VSSUB_WU",
++                "VHADDW_D_W", "VHADDW_DU_WU", "VHSUBW_D_W", "VHSUBW_DU_WU",
++                "VADDWEV_D_W", "VADDWOD_D_W", "VSUBWEV_D_W", "VSUBWOD_D_W",
++                "VADDWEV_D_WU", "VADDWOD_D_WU", "VSUBWEV_D_WU", "VSUBWOD_D_WU",
++                "VADDWEV_D_WU_W", "VADDWOD_D_WU_W",
++                "VAVG_W", "VAVG_WU", "VAVGR_W", "VAVGR_WU",
++                "VABSD_W", "VABSD_WU", "VADDA_W", "VMUH_W", "VMUH_WU",
++                "VMULWEV_D_W", "VMULWOD_D_W", "VMULWEV_D_WU", "VMULWOD_D_WU",
++                "VMULWEV_D_WU_W", "VMULWOD_D_WU_W", "VSIGNCOV_W", "VROTR_W",
++                "VSRLR_W", "VSRAR_W", "VSRLN_H_W", "VSRAN_H_W", "VSRLRN_H_W",
++                "VSRARN_H_W", "VSSRLN_H_W", "VSSRAN_H_W", "VSSRLN_HU_W",
++                "VSSRAN_HU_W", "VSSRLRN_H_W", "VSSRARN_H_W", "VSSRLRN_HU_W",
++                "VSSRARN_HU_W",
++                "VSEQ_W", "VSLE_W", "VSLE_WU", "VSLT_W", "VSLT_WU",
++                "VPACKEV_W", "VPACKOD_W", "VPICKEV_W", "VPICKOD_W",
++                "VILVL_W", "VILVH_W"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret
++               (v4i32 LSX128:$vj), (v4i32 LSX128:$vk)),
++            (!cast<LAInst>(Inst) LSX128:$vj, LSX128:$vk)>;
++foreach Inst = ["VADD_Q", "VSUB_Q",
++                "VSADD_D", "VSADD_DU", "VSSUB_D", "VSSUB_DU",
++                "VHADDW_Q_D", "VHADDW_QU_DU", "VHSUBW_Q_D", "VHSUBW_QU_DU",
++                "VADDWEV_Q_D", "VADDWOD_Q_D", "VSUBWEV_Q_D", "VSUBWOD_Q_D",
++                "VADDWEV_Q_DU", "VADDWOD_Q_DU", "VSUBWEV_Q_DU", "VSUBWOD_Q_DU",
++                "VADDWEV_Q_DU_D", "VADDWOD_Q_DU_D",
++                "VAVG_D", "VAVG_DU", "VAVGR_D", "VAVGR_DU",
++                "VABSD_D", "VABSD_DU", "VADDA_D", "VMUH_D", "VMUH_DU",
++                "VMULWEV_Q_D", "VMULWOD_Q_D", "VMULWEV_Q_DU", "VMULWOD_Q_DU",
++                "VMULWEV_Q_DU_D", "VMULWOD_Q_DU_D", "VSIGNCOV_D", "VROTR_D",
++                "VSRLR_D", "VSRAR_D", "VSRLN_W_D", "VSRAN_W_D", "VSRLRN_W_D",
++                "VSRARN_W_D", "VSSRLN_W_D", "VSSRAN_W_D", "VSSRLN_WU_D",
++                "VSSRAN_WU_D", "VSSRLRN_W_D", "VSSRARN_W_D", "VSSRLRN_WU_D",
++                "VSSRARN_WU_D", "VFFINT_S_L",
++                "VSEQ_D", "VSLE_D", "VSLE_DU", "VSLT_D", "VSLT_DU",
++                "VPACKEV_D", "VPACKOD_D", "VPICKEV_D", "VPICKOD_D",
++                "VILVL_D", "VILVH_D"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret
++               (v2i64 LSX128:$vj), (v2i64 LSX128:$vk)),
++            (!cast<LAInst>(Inst) LSX128:$vj, LSX128:$vk)>;
++
++// vty: v16i8/v8i16/v4i32/v2i64
++// Pat<(Intrinsic vty:$vd, vty:$vj, vty:$vk),
++//     (LAInst vty:$vd, vty:$vj, vty:$vk)>;
++foreach Inst = ["VMADDWEV_H_B", "VMADDWOD_H_B", "VMADDWEV_H_BU",
++                "VMADDWOD_H_BU", "VMADDWEV_H_BU_B", "VMADDWOD_H_BU_B"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret
++               (v8i16 LSX128:$vd), (v16i8 LSX128:$vj), (v16i8 LSX128:$vk)),
++            (!cast<LAInst>(Inst) LSX128:$vd, LSX128:$vj, LSX128:$vk)>;
++foreach Inst = ["VMADDWEV_W_H", "VMADDWOD_W_H", "VMADDWEV_W_HU",
++                "VMADDWOD_W_HU", "VMADDWEV_W_HU_H", "VMADDWOD_W_HU_H"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret
++               (v4i32 LSX128:$vd), (v8i16 LSX128:$vj), (v8i16 LSX128:$vk)),
++            (!cast<LAInst>(Inst) LSX128:$vd, LSX128:$vj, LSX128:$vk)>;
++foreach Inst = ["VMADDWEV_D_W", "VMADDWOD_D_W", "VMADDWEV_D_WU",
++                "VMADDWOD_D_WU", "VMADDWEV_D_WU_W", "VMADDWOD_D_WU_W"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret
++               (v2i64 LSX128:$vd), (v4i32 LSX128:$vj), (v4i32 LSX128:$vk)),
++            (!cast<LAInst>(Inst) LSX128:$vd, LSX128:$vj, LSX128:$vk)>;
++foreach Inst = ["VMADDWEV_Q_D", "VMADDWOD_Q_D", "VMADDWEV_Q_DU",
++                "VMADDWOD_Q_DU", "VMADDWEV_Q_DU_D", "VMADDWOD_Q_DU_D"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret
++               (v2i64 LSX128:$vd), (v2i64 LSX128:$vj), (v2i64 LSX128:$vk)),
++            (!cast<LAInst>(Inst) LSX128:$vd, LSX128:$vj, LSX128:$vk)>;
++
++// vty: v16i8/v8i16/v4i32/v2i64
++// Pat<(Intrinsic vty:$vj),
++//     (LAInst vty:$vj)>;
++foreach Inst = ["VEXTH_H_B", "VEXTH_HU_BU",
++                "VMSKLTZ_B", "VMSKGEZ_B", "VMSKNZ_B",
++                "VCLO_B", "VCLZ_B"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret (v16i8 LSX128:$vj)),
++            (!cast<LAInst>(Inst) LSX128:$vj)>;
++foreach Inst = ["VEXTH_W_H", "VEXTH_WU_HU", "VMSKLTZ_H",
++                "VCLO_H", "VCLZ_H", "VFCVTL_S_H", "VFCVTH_S_H"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret (v8i16 LSX128:$vj)),
++            (!cast<LAInst>(Inst) LSX128:$vj)>;
++foreach Inst = ["VEXTH_D_W", "VEXTH_DU_WU", "VMSKLTZ_W",
++                "VCLO_W", "VCLZ_W", "VFFINT_S_W", "VFFINT_S_WU",
++                "VFFINTL_D_W", "VFFINTH_D_W"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret (v4i32 LSX128:$vj)),
++            (!cast<LAInst>(Inst) LSX128:$vj)>;
++foreach Inst = ["VEXTH_Q_D", "VEXTH_QU_DU", "VMSKLTZ_D",
++                "VEXTL_Q_D", "VEXTL_QU_DU",
++                "VCLO_D", "VCLZ_D", "VFFINT_D_L", "VFFINT_D_LU"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret (v2i64 LSX128:$vj)),
++            (!cast<LAInst>(Inst) LSX128:$vj)>;
++
++// Pat<(Intrinsic timm:$imm)
++//     (LAInst timm:$imm)>;
++def : Pat<(int_loongarch_lsx_vldi timm:$imm),
++          (VLDI (to_valide_timm timm:$imm))>;
++foreach Inst = ["VREPLI_B", "VREPLI_H", "VREPLI_W", "VREPLI_D"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret timm:$imm),
++            (!cast<LAInst>("Pseudo"#Inst) (to_valide_timm timm:$imm))>;
++
++// vty: v16i8/v8i16/v4i32/v2i64
++// Pat<(Intrinsic vty:$vj, timm:$imm)
++//     (LAInst vty:$vj, timm:$imm)>;
++foreach Inst = ["VSAT_B", "VSAT_BU", "VNORI_B", "VROTRI_B", "VSLLWIL_H_B",
++                "VSLLWIL_HU_BU", "VSRLRI_B", "VSRARI_B",
++                "VSEQI_B", "VSLEI_B", "VSLEI_BU", "VSLTI_B", "VSLTI_BU",
++                "VREPLVEI_B", "VBSLL_V", "VBSRL_V", "VSHUF4I_B"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret (v16i8 LSX128:$vj), timm:$imm),
++            (!cast<LAInst>(Inst) LSX128:$vj, (to_valide_timm timm:$imm))>;
++foreach Inst = ["VSAT_H", "VSAT_HU", "VROTRI_H", "VSLLWIL_W_H",
++                "VSLLWIL_WU_HU", "VSRLRI_H", "VSRARI_H",
++                "VSEQI_H", "VSLEI_H", "VSLEI_HU", "VSLTI_H", "VSLTI_HU",
++                "VREPLVEI_H", "VSHUF4I_H"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret (v8i16 LSX128:$vj), timm:$imm),
++            (!cast<LAInst>(Inst) LSX128:$vj, (to_valide_timm timm:$imm))>;
++foreach Inst = ["VSAT_W", "VSAT_WU", "VROTRI_W", "VSLLWIL_D_W",
++                "VSLLWIL_DU_WU", "VSRLRI_W", "VSRARI_W",
++                "VSEQI_W", "VSLEI_W", "VSLEI_WU", "VSLTI_W", "VSLTI_WU",
++                "VREPLVEI_W", "VSHUF4I_W"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret (v4i32 LSX128:$vj), timm:$imm),
++            (!cast<LAInst>(Inst) LSX128:$vj, (to_valide_timm timm:$imm))>;
++foreach Inst = ["VSAT_D", "VSAT_DU", "VROTRI_D", "VSRLRI_D", "VSRARI_D",
++                "VSEQI_D", "VSLEI_D", "VSLEI_DU", "VSLTI_D", "VSLTI_DU",
++                "VPICKVE2GR_D", "VPICKVE2GR_DU",
++                "VREPLVEI_D"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret (v2i64 LSX128:$vj), timm:$imm),
++            (!cast<LAInst>(Inst) LSX128:$vj, (to_valide_timm timm:$imm))>;
++
++// vty: v16i8/v8i16/v4i32/v2i64
++// Pat<(Intrinsic vty:$vd, vty:$vj, timm:$imm)
++//     (LAInst vty:$vd, vty:$vj, timm:$imm)>;
++foreach Inst = ["VSRLNI_B_H", "VSRANI_B_H", "VSRLRNI_B_H", "VSRARNI_B_H",
++                "VSSRLNI_B_H", "VSSRANI_B_H", "VSSRLNI_BU_H", "VSSRANI_BU_H",
++                "VSSRLRNI_B_H", "VSSRARNI_B_H", "VSSRLRNI_BU_H", "VSSRARNI_BU_H",
++                "VFRSTPI_B", "VBITSELI_B", "VEXTRINS_B"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret
++               (v16i8 LSX128:$vd), (v16i8 LSX128:$vj), timm:$imm),
++            (!cast<LAInst>(Inst) LSX128:$vd, LSX128:$vj,
++               (to_valide_timm timm:$imm))>;
++foreach Inst = ["VSRLNI_H_W", "VSRANI_H_W", "VSRLRNI_H_W", "VSRARNI_H_W",
++                "VSSRLNI_H_W", "VSSRANI_H_W", "VSSRLNI_HU_W", "VSSRANI_HU_W",
++                "VSSRLRNI_H_W", "VSSRARNI_H_W", "VSSRLRNI_HU_W", "VSSRARNI_HU_W",
++                "VFRSTPI_H", "VEXTRINS_H"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret
++               (v8i16 LSX128:$vd), (v8i16 LSX128:$vj), timm:$imm),
++            (!cast<LAInst>(Inst) LSX128:$vd, LSX128:$vj,
++               (to_valide_timm timm:$imm))>;
++foreach Inst = ["VSRLNI_W_D", "VSRANI_W_D", "VSRLRNI_W_D", "VSRARNI_W_D",
++                "VSSRLNI_W_D", "VSSRANI_W_D", "VSSRLNI_WU_D", "VSSRANI_WU_D",
++                "VSSRLRNI_W_D", "VSSRARNI_W_D", "VSSRLRNI_WU_D", "VSSRARNI_WU_D",
++                "VPERMI_W", "VEXTRINS_W"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret
++               (v4i32 LSX128:$vd), (v4i32 LSX128:$vj), timm:$imm),
++            (!cast<LAInst>(Inst) LSX128:$vd, LSX128:$vj,
++               (to_valide_timm timm:$imm))>;
++foreach Inst = ["VSRLNI_D_Q", "VSRANI_D_Q", "VSRLRNI_D_Q", "VSRARNI_D_Q",
++                "VSSRLNI_D_Q", "VSSRANI_D_Q", "VSSRLNI_DU_Q", "VSSRANI_DU_Q",
++                "VSSRLRNI_D_Q", "VSSRARNI_D_Q", "VSSRLRNI_DU_Q", "VSSRARNI_DU_Q",
++                "VSHUF4I_D", "VEXTRINS_D"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret
++               (v2i64 LSX128:$vd), (v2i64 LSX128:$vj), timm:$imm),
++            (!cast<LAInst>(Inst) LSX128:$vd, LSX128:$vj,
++               (to_valide_timm timm:$imm))>;
++
++// vty: v16i8/v8i16/v4i32/v2i64
++// Pat<(Intrinsic vty:$vd, vty:$vj, vty:$vk),
++//     (LAInst vty:$vd, vty:$vj, vty:$vk)>;
++foreach Inst = ["VFRSTP_B", "VBITSEL_V", "VSHUF_B"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret
++               (v16i8 LSX128:$vd), (v16i8 LSX128:$vj), (v16i8 LSX128:$vk)),
++            (!cast<LAInst>(Inst) LSX128:$vd, LSX128:$vj, LSX128:$vk)>;
++foreach Inst = ["VFRSTP_H", "VSHUF_H"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret
++               (v8i16 LSX128:$vd), (v8i16 LSX128:$vj), (v8i16 LSX128:$vk)),
++            (!cast<LAInst>(Inst) LSX128:$vd, LSX128:$vj, LSX128:$vk)>;
++def : Pat<(int_loongarch_lsx_vshuf_w (v4i32 LSX128:$vd), (v4i32 LSX128:$vj),
++                                     (v4i32 LSX128:$vk)),
++          (VSHUF_W LSX128:$vd, LSX128:$vj, LSX128:$vk)>;
++def : Pat<(int_loongarch_lsx_vshuf_d (v2i64 LSX128:$vd), (v2i64 LSX128:$vj),
++                                     (v2i64 LSX128:$vk)),
++          (VSHUF_D LSX128:$vd, LSX128:$vj, LSX128:$vk)>;
++
++// vty: v4f32/v2f64
++// Pat<(Intrinsic vty:$vj, vty:$vk, vty:$va),
++//     (LAInst vty:$vj, vty:$vk, vty:$va)>;
++foreach Inst = ["VFMSUB_S", "VFNMADD_S", "VFNMSUB_S"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret
++               (v4f32 LSX128:$vj), (v4f32 LSX128:$vk), (v4f32 LSX128:$va)),
++            (!cast<LAInst>(Inst) LSX128:$vj, LSX128:$vk, LSX128:$va)>;
++foreach Inst = ["VFMSUB_D", "VFNMADD_D", "VFNMSUB_D"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret
++               (v2f64 LSX128:$vj), (v2f64 LSX128:$vk), (v2f64 LSX128:$va)),
++            (!cast<LAInst>(Inst) LSX128:$vj, LSX128:$vk, LSX128:$va)>;
++
++// vty: v4f32/v2f64
++// Pat<(Intrinsic vty:$vj, vty:$vk),
++//     (LAInst vty:$vj, vty:$vk)>;
++foreach Inst = ["VFMAX_S", "VFMIN_S", "VFMAXA_S", "VFMINA_S", "VFCVT_H_S",
++                "VFCMP_CAF_S", "VFCMP_CUN_S", "VFCMP_CEQ_S", "VFCMP_CUEQ_S",
++                "VFCMP_CLT_S", "VFCMP_CULT_S", "VFCMP_CLE_S", "VFCMP_CULE_S",
++                "VFCMP_CNE_S", "VFCMP_COR_S", "VFCMP_CUNE_S",
++                "VFCMP_SAF_S", "VFCMP_SUN_S", "VFCMP_SEQ_S", "VFCMP_SUEQ_S",
++                "VFCMP_SLT_S", "VFCMP_SULT_S", "VFCMP_SLE_S", "VFCMP_SULE_S",
++                "VFCMP_SNE_S", "VFCMP_SOR_S", "VFCMP_SUNE_S"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret
++               (v4f32 LSX128:$vj), (v4f32 LSX128:$vk)),
++            (!cast<LAInst>(Inst) LSX128:$vj, LSX128:$vk)>;
++foreach Inst = ["VFMAX_D", "VFMIN_D", "VFMAXA_D", "VFMINA_D", "VFCVT_S_D",
++                "VFTINTRNE_W_D", "VFTINTRZ_W_D", "VFTINTRP_W_D", "VFTINTRM_W_D",
++                "VFTINT_W_D",
++                "VFCMP_CAF_D", "VFCMP_CUN_D", "VFCMP_CEQ_D", "VFCMP_CUEQ_D",
++                "VFCMP_CLT_D", "VFCMP_CULT_D", "VFCMP_CLE_D", "VFCMP_CULE_D",
++                "VFCMP_CNE_D", "VFCMP_COR_D", "VFCMP_CUNE_D",
++                "VFCMP_SAF_D", "VFCMP_SUN_D", "VFCMP_SEQ_D", "VFCMP_SUEQ_D",
++                "VFCMP_SLT_D", "VFCMP_SULT_D", "VFCMP_SLE_D", "VFCMP_SULE_D",
++                "VFCMP_SNE_D", "VFCMP_SOR_D", "VFCMP_SUNE_D"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret
++               (v2f64 LSX128:$vj), (v2f64 LSX128:$vk)),
++            (!cast<LAInst>(Inst) LSX128:$vj, LSX128:$vk)>;
++
++// vty: v4f32/v2f64
++// Pat<(Intrinsic vty:$vj),
++//     (LAInst vty:$vj)>;
++foreach Inst = ["VFLOGB_S", "VFCLASS_S", "VFSQRT_S", "VFRECIP_S", "VFRSQRT_S",
++                "VFRINT_S", "VFCVTL_D_S", "VFCVTH_D_S",
++                "VFRINTRNE_S", "VFRINTRZ_S", "VFRINTRP_S", "VFRINTRM_S",
++                "VFTINTRNE_W_S", "VFTINTRZ_W_S", "VFTINTRP_W_S", "VFTINTRM_W_S",
++                "VFTINT_W_S", "VFTINTRZ_WU_S", "VFTINT_WU_S",
++                "VFTINTRNEL_L_S", "VFTINTRNEH_L_S", "VFTINTRZL_L_S",
++                "VFTINTRZH_L_S", "VFTINTRPL_L_S", "VFTINTRPH_L_S",
++                "VFTINTRML_L_S", "VFTINTRMH_L_S", "VFTINTL_L_S",
++                "VFTINTH_L_S"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret (v4f32 LSX128:$vj)),
++            (!cast<LAInst>(Inst) LSX128:$vj)>;
++foreach Inst = ["VFLOGB_D", "VFCLASS_D", "VFSQRT_D", "VFRECIP_D", "VFRSQRT_D",
++                "VFRINT_D",
++                "VFRINTRNE_D", "VFRINTRZ_D", "VFRINTRP_D", "VFRINTRM_D",
++                "VFTINTRNE_L_D", "VFTINTRZ_L_D", "VFTINTRP_L_D", "VFTINTRM_L_D",
++                "VFTINT_L_D", "VFTINTRZ_LU_D", "VFTINT_LU_D"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret (v2f64 LSX128:$vj)),
++            (!cast<LAInst>(Inst) LSX128:$vj)>;
++
++// load
++def : Pat<(int_loongarch_lsx_vld GPR:$rj, timm:$imm),
++          (VLD GPR:$rj, (to_valide_timm timm:$imm))>;
++def : Pat<(int_loongarch_lsx_vldx GPR:$rj, GPR:$rk),
++          (VLDX GPR:$rj, GPR:$rk)>;
++
++def : Pat<(int_loongarch_lsx_vldrepl_b GPR:$rj, timm:$imm),
++          (VLDREPL_B GPR:$rj, (to_valide_timm timm:$imm))>;
++def : Pat<(int_loongarch_lsx_vldrepl_h GPR:$rj, timm:$imm),
++          (VLDREPL_H GPR:$rj, (to_valide_timm timm:$imm))>;
++def : Pat<(int_loongarch_lsx_vldrepl_w GPR:$rj, timm:$imm),
++          (VLDREPL_W GPR:$rj, (to_valide_timm timm:$imm))>;
++def : Pat<(int_loongarch_lsx_vldrepl_d GPR:$rj, timm:$imm),
++          (VLDREPL_D GPR:$rj, (to_valide_timm timm:$imm))>;
++
++// store
++def : Pat<(int_loongarch_lsx_vst LSX128:$vd, GPR:$rj, timm:$imm),
++          (VST LSX128:$vd, GPR:$rj, (to_valide_timm timm:$imm))>;
++def : Pat<(int_loongarch_lsx_vstx LSX128:$vd, GPR:$rj, GPR:$rk),
++          (VSTX LSX128:$vd, GPR:$rj, GPR:$rk)>;
++
++def : Pat<(int_loongarch_lsx_vstelm_b v16i8:$vd, GPR:$rj, timm:$imm, timm:$idx),
++          (VSTELM_B v16i8:$vd, GPR:$rj, (to_valide_timm timm:$imm),
++                    (to_valide_timm timm:$idx))>;
++def : Pat<(int_loongarch_lsx_vstelm_h v8i16:$vd, GPR:$rj, timm:$imm, timm:$idx),
++          (VSTELM_H v8i16:$vd, GPR:$rj, (to_valide_timm timm:$imm),
++                    (to_valide_timm timm:$idx))>;
++def : Pat<(int_loongarch_lsx_vstelm_w v4i32:$vd, GPR:$rj, timm:$imm, timm:$idx),
++          (VSTELM_W v4i32:$vd, GPR:$rj, (to_valide_timm timm:$imm),
++                    (to_valide_timm timm:$idx))>;
++def : Pat<(int_loongarch_lsx_vstelm_d v2i64:$vd, GPR:$rj, timm:$imm, timm:$idx),
++          (VSTELM_D v2i64:$vd, GPR:$rj, (to_valide_timm timm:$imm),
++                    (to_valide_timm timm:$idx))>;
++
+ } // Predicates = [HasExtLSX]
+-- 
+2.20.1
+

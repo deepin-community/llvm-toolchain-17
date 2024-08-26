@@ -1,0 +1,390 @@
+From 4bbe405d5a8a789f23a4b430fe619c1cdfa3d631 Mon Sep 17 00:00:00 2001
+From: wanglei <wanglei@loongson.cn>
+Date: Sat, 2 Dec 2023 16:24:33 +0800
+Subject: [PATCH 26/42] Reland "[LoongArch] Support CTLZ with lsx/lasx"
+
+This patch simultaneously adds tests for `CTPOP`.
+
+This relands 07cec73dcd095035257eec1f213d273b10988130 with fix tests.
+
+(cherry picked from commit a60a5421b60be1bce0272385fa16846ada5eed5e)
+
+Change-Id: I577d0c54b78e4d90ab5fce1afc407d526c793429
+---
+ .../LoongArch/LoongArchISelLowering.cpp       |  13 +-
+ .../LoongArch/LoongArchLASXInstrInfo.td       |  11 +-
+ .../Target/LoongArch/LoongArchLSXInstrInfo.td |  11 +-
+ .../test/CodeGen/LoongArch/lasx/ctpop-ctlz.ll | 115 ++++++++++++++++++
+ llvm/test/CodeGen/LoongArch/lsx/ctpop-ctlz.ll | 115 ++++++++++++++++++
+ 5 files changed, 255 insertions(+), 10 deletions(-)
+ create mode 100644 llvm/test/CodeGen/LoongArch/lasx/ctpop-ctlz.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lsx/ctpop-ctlz.ll
+
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+index e45f21265d7b..358263b1a258 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+@@ -247,7 +247,7 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+                          VT, Legal);
+       setOperationAction({ISD::AND, ISD::OR, ISD::XOR}, VT, Legal);
+       setOperationAction({ISD::SHL, ISD::SRA, ISD::SRL}, VT, Legal);
+-      setOperationAction(ISD::CTPOP, VT, Legal);
++      setOperationAction({ISD::CTPOP, ISD::CTLZ}, VT, Legal);
+     }
+     for (MVT VT : {MVT::v4f32, MVT::v2f64}) {
+       setOperationAction({ISD::FADD, ISD::FSUB}, VT, Legal);
+@@ -277,7 +277,7 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+                          VT, Legal);
+       setOperationAction({ISD::AND, ISD::OR, ISD::XOR}, VT, Legal);
+       setOperationAction({ISD::SHL, ISD::SRA, ISD::SRL}, VT, Legal);
+-      setOperationAction(ISD::CTPOP, VT, Legal);
++      setOperationAction({ISD::CTPOP, ISD::CTLZ}, VT, Legal);
+     }
+     for (MVT VT : {MVT::v8f32, MVT::v4f64}) {
+       setOperationAction({ISD::FADD, ISD::FSUB}, VT, Legal);
+@@ -2800,6 +2800,15 @@ performINTRINSIC_WO_CHAINCombine(SDNode *N, SelectionDAG &DAG,
+   case Intrinsic::loongarch_lasx_xvsrai_d:
+     return DAG.getNode(ISD::SRA, DL, N->getValueType(0), N->getOperand(1),
+                        lowerVectorSplatImm<6>(N, 2, DAG));
++  case Intrinsic::loongarch_lsx_vclz_b:
++  case Intrinsic::loongarch_lsx_vclz_h:
++  case Intrinsic::loongarch_lsx_vclz_w:
++  case Intrinsic::loongarch_lsx_vclz_d:
++  case Intrinsic::loongarch_lasx_xvclz_b:
++  case Intrinsic::loongarch_lasx_xvclz_h:
++  case Intrinsic::loongarch_lasx_xvclz_w:
++  case Intrinsic::loongarch_lasx_xvclz_d:
++    return DAG.getNode(ISD::CTLZ, DL, N->getValueType(0), N->getOperand(1));
+   case Intrinsic::loongarch_lsx_vpcnt_b:
+   case Intrinsic::loongarch_lsx_vpcnt_h:
+   case Intrinsic::loongarch_lsx_vpcnt_w:
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+index a5652472481a..960ac627578c 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+@@ -1273,6 +1273,9 @@ defm : PatXrXr<sra, "XVSRA">;
+ defm : PatShiftXrXr<sra, "XVSRA">;
+ defm : PatShiftXrUimm<sra, "XVSRAI">;
+ 
++// XVCLZ_{B/H/W/D}
++defm : PatXr<ctlz, "XVCLZ">;
++
+ // XVPCNT_{B/H/W/D}
+ defm : PatXr<ctpop, "XVPCNT">;
+ 
+@@ -1590,26 +1593,26 @@ foreach Inst = ["XVMADDWEV_Q_D", "XVMADDWOD_Q_D", "XVMADDWEV_Q_DU",
+ //     (LAInst vty:$xj)>;
+ foreach Inst = ["XVEXTH_H_B", "XVEXTH_HU_BU",
+                 "XVMSKLTZ_B", "XVMSKGEZ_B", "XVMSKNZ_B",
+-                "XVCLO_B", "XVCLZ_B", "VEXT2XV_H_B", "VEXT2XV_HU_BU",
++                "XVCLO_B", "VEXT2XV_H_B", "VEXT2XV_HU_BU",
+                 "VEXT2XV_W_B", "VEXT2XV_WU_BU", "VEXT2XV_D_B",
+                 "VEXT2XV_DU_BU", "XVREPLVE0_B", "XVREPLVE0_Q"] in
+   def : Pat<(deriveLASXIntrinsic<Inst>.ret (v32i8 LASX256:$xj)),
+             (!cast<LAInst>(Inst) LASX256:$xj)>;
+ foreach Inst = ["XVEXTH_W_H", "XVEXTH_WU_HU", "XVMSKLTZ_H",
+-                "XVCLO_H", "XVCLZ_H", "XVFCVTL_S_H", "XVFCVTH_S_H",
++                "XVCLO_H", "XVFCVTL_S_H", "XVFCVTH_S_H",
+                 "VEXT2XV_W_H", "VEXT2XV_WU_HU", "VEXT2XV_D_H",
+                 "VEXT2XV_DU_HU", "XVREPLVE0_H"] in
+   def : Pat<(deriveLASXIntrinsic<Inst>.ret (v16i16 LASX256:$xj)),
+             (!cast<LAInst>(Inst) LASX256:$xj)>;
+ foreach Inst = ["XVEXTH_D_W", "XVEXTH_DU_WU", "XVMSKLTZ_W",
+-                "XVCLO_W", "XVCLZ_W", "XVFFINT_S_W", "XVFFINT_S_WU",
++                "XVCLO_W", "XVFFINT_S_W", "XVFFINT_S_WU",
+                 "XVFFINTL_D_W", "XVFFINTH_D_W",
+                 "VEXT2XV_D_W", "VEXT2XV_DU_WU", "XVREPLVE0_W"] in
+   def : Pat<(deriveLASXIntrinsic<Inst>.ret (v8i32 LASX256:$xj)),
+             (!cast<LAInst>(Inst) LASX256:$xj)>;
+ foreach Inst = ["XVEXTH_Q_D", "XVEXTH_QU_DU", "XVMSKLTZ_D",
+                 "XVEXTL_Q_D", "XVEXTL_QU_DU",
+-                "XVCLO_D", "XVCLZ_D", "XVFFINT_D_L", "XVFFINT_D_LU",
++                "XVCLO_D", "XVFFINT_D_L", "XVFFINT_D_LU",
+                 "XVREPLVE0_D"] in
+   def : Pat<(deriveLASXIntrinsic<Inst>.ret (v4i64 LASX256:$xj)),
+             (!cast<LAInst>(Inst) LASX256:$xj)>;
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+index 5645ce51194a..3480ade9eebf 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+@@ -1350,6 +1350,9 @@ defm : PatVrVr<sra, "VSRA">;
+ defm : PatShiftVrVr<sra, "VSRA">;
+ defm : PatShiftVrUimm<sra, "VSRAI">;
+ 
++// VCLZ_{B/H/W/D}
++defm : PatVr<ctlz, "VCLZ">;
++
+ // VPCNT_{B/H/W/D}
+ defm : PatVr<ctpop, "VPCNT">;
+ 
+@@ -1674,21 +1677,21 @@ foreach Inst = ["VMADDWEV_Q_D", "VMADDWOD_Q_D", "VMADDWEV_Q_DU",
+ //     (LAInst vty:$vj)>;
+ foreach Inst = ["VEXTH_H_B", "VEXTH_HU_BU",
+                 "VMSKLTZ_B", "VMSKGEZ_B", "VMSKNZ_B",
+-                "VCLO_B", "VCLZ_B"] in
++                "VCLO_B"] in
+   def : Pat<(deriveLSXIntrinsic<Inst>.ret (v16i8 LSX128:$vj)),
+             (!cast<LAInst>(Inst) LSX128:$vj)>;
+ foreach Inst = ["VEXTH_W_H", "VEXTH_WU_HU", "VMSKLTZ_H",
+-                "VCLO_H", "VCLZ_H", "VFCVTL_S_H", "VFCVTH_S_H"] in
++                "VCLO_H", "VFCVTL_S_H", "VFCVTH_S_H"] in
+   def : Pat<(deriveLSXIntrinsic<Inst>.ret (v8i16 LSX128:$vj)),
+             (!cast<LAInst>(Inst) LSX128:$vj)>;
+ foreach Inst = ["VEXTH_D_W", "VEXTH_DU_WU", "VMSKLTZ_W",
+-                "VCLO_W", "VCLZ_W", "VFFINT_S_W", "VFFINT_S_WU",
++                "VCLO_W", "VFFINT_S_W", "VFFINT_S_WU",
+                 "VFFINTL_D_W", "VFFINTH_D_W"] in
+   def : Pat<(deriveLSXIntrinsic<Inst>.ret (v4i32 LSX128:$vj)),
+             (!cast<LAInst>(Inst) LSX128:$vj)>;
+ foreach Inst = ["VEXTH_Q_D", "VEXTH_QU_DU", "VMSKLTZ_D",
+                 "VEXTL_Q_D", "VEXTL_QU_DU",
+-                "VCLO_D", "VCLZ_D", "VFFINT_D_L", "VFFINT_D_LU"] in
++                "VCLO_D", "VFFINT_D_L", "VFFINT_D_LU"] in
+   def : Pat<(deriveLSXIntrinsic<Inst>.ret (v2i64 LSX128:$vj)),
+             (!cast<LAInst>(Inst) LSX128:$vj)>;
+ 
+diff --git a/llvm/test/CodeGen/LoongArch/lasx/ctpop-ctlz.ll b/llvm/test/CodeGen/LoongArch/lasx/ctpop-ctlz.ll
+new file mode 100644
+index 000000000000..7786e399c95f
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lasx/ctpop-ctlz.ll
+@@ -0,0 +1,115 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py
++; RUN: llc --mtriple=loongarch64 --mattr=+lasx < %s | FileCheck %s
++
++define void @ctpop_v32i8(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: ctpop_v32i8:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvpcnt.b $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load <32 x i8>, ptr %src
++  %res = call <32 x i8> @llvm.ctpop.v32i8(<32 x i8> %v)
++  store <32 x i8> %res, ptr %dst
++  ret void
++}
++
++define void @ctpop_v16i16(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: ctpop_v16i16:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvpcnt.h $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load <16 x i16>, ptr %src
++  %res = call <16 x i16> @llvm.ctpop.v16i16(<16 x i16> %v)
++  store <16 x i16> %res, ptr %dst
++  ret void
++}
++
++define void @ctpop_v8i32(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: ctpop_v8i32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvpcnt.w $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load <8 x i32>, ptr %src
++  %res = call <8 x i32> @llvm.ctpop.v8i32(<8 x i32> %v)
++  store <8 x i32> %res, ptr %dst
++  ret void
++}
++
++define void @ctpop_v4i64(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: ctpop_v4i64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvpcnt.d $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load <4 x i64>, ptr %src
++  %res = call <4 x i64> @llvm.ctpop.v4i64(<4 x i64> %v)
++  store <4 x i64> %res, ptr %dst
++  ret void
++}
++
++define void @ctlz_v32i8(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: ctlz_v32i8:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvclz.b $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load <32 x i8>, ptr %src
++  %res = call <32 x i8> @llvm.ctlz.v32i8(<32 x i8> %v, i1 false)
++  store <32 x i8> %res, ptr %dst
++  ret void
++}
++
++define void @ctlz_v16i16(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: ctlz_v16i16:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvclz.h $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load <16 x i16>, ptr %src
++  %res = call <16 x i16> @llvm.ctlz.v16i16(<16 x i16> %v, i1 false)
++  store <16 x i16> %res, ptr %dst
++  ret void
++}
++
++define void @ctlz_v8i32(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: ctlz_v8i32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvclz.w $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load <8 x i32>, ptr %src
++  %res = call <8 x i32> @llvm.ctlz.v8i32(<8 x i32> %v, i1 false)
++  store <8 x i32> %res, ptr %dst
++  ret void
++}
++
++define void @ctlz_v4i64(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: ctlz_v4i64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvclz.d $xr0, $xr0
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load <4 x i64>, ptr %src
++  %res = call <4 x i64> @llvm.ctlz.v4i64(<4 x i64> %v, i1 false)
++  store <4 x i64> %res, ptr %dst
++  ret void
++}
++
++declare <32 x i8> @llvm.ctpop.v32i8(<32 x i8>)
++declare <16 x i16> @llvm.ctpop.v16i16(<16 x i16>)
++declare <8 x i32> @llvm.ctpop.v8i32(<8 x i32>)
++declare <4 x i64> @llvm.ctpop.v4i64(<4 x i64>)
++declare <32 x i8> @llvm.ctlz.v32i8(<32 x i8>, i1)
++declare <16 x i16> @llvm.ctlz.v16i16(<16 x i16>, i1)
++declare <8 x i32> @llvm.ctlz.v8i32(<8 x i32>, i1)
++declare <4 x i64> @llvm.ctlz.v4i64(<4 x i64>, i1)
+diff --git a/llvm/test/CodeGen/LoongArch/lsx/ctpop-ctlz.ll b/llvm/test/CodeGen/LoongArch/lsx/ctpop-ctlz.ll
+new file mode 100644
+index 000000000000..5df553fba7ef
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lsx/ctpop-ctlz.ll
+@@ -0,0 +1,115 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py
++; RUN: llc --mtriple=loongarch64 --mattr=+lsx < %s | FileCheck %s
++
++define void @ctpop_v16i8(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: ctpop_v16i8:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vpcnt.b $vr0, $vr0
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load <16 x i8>, ptr %src
++  %res = call <16 x i8> @llvm.ctpop.v16i8(<16 x i8> %v)
++  store <16 x i8> %res, ptr %dst
++  ret void
++}
++
++define void @ctpop_v8i16(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: ctpop_v8i16:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vpcnt.h $vr0, $vr0
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load <8 x i16>, ptr %src
++  %res = call <8 x i16> @llvm.ctpop.v8i16(<8 x i16> %v)
++  store <8 x i16> %res, ptr %dst
++  ret void
++}
++
++define void @ctpop_v4i32(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: ctpop_v4i32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vpcnt.w $vr0, $vr0
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load <4 x i32>, ptr %src
++  %res = call <4 x i32> @llvm.ctpop.v4i32(<4 x i32> %v)
++  store <4 x i32> %res, ptr %dst
++  ret void
++}
++
++define void @ctpop_v2i64(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: ctpop_v2i64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vpcnt.d $vr0, $vr0
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load <2 x i64>, ptr %src
++  %res = call <2 x i64> @llvm.ctpop.v2i64(<2 x i64> %v)
++  store <2 x i64> %res, ptr %dst
++  ret void
++}
++
++define void @ctlz_v16i8(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: ctlz_v16i8:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vclz.b $vr0, $vr0
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load <16 x i8>, ptr %src
++  %res = call <16 x i8> @llvm.ctlz.v16i8(<16 x i8> %v, i1 false)
++  store <16 x i8> %res, ptr %dst
++  ret void
++}
++
++define void @ctlz_v8i16(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: ctlz_v8i16:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vclz.h $vr0, $vr0
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load <8 x i16>, ptr %src
++  %res = call <8 x i16> @llvm.ctlz.v8i16(<8 x i16> %v, i1 false)
++  store <8 x i16> %res, ptr %dst
++  ret void
++}
++
++define void @ctlz_v4i32(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: ctlz_v4i32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vclz.w $vr0, $vr0
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load <4 x i32>, ptr %src
++  %res = call <4 x i32> @llvm.ctlz.v4i32(<4 x i32> %v, i1 false)
++  store <4 x i32> %res, ptr %dst
++  ret void
++}
++
++define void @ctlz_v2i64(ptr %src, ptr %dst) nounwind {
++; CHECK-LABEL: ctlz_v2i64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vclz.d $vr0, $vr0
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load <2 x i64>, ptr %src
++  %res = call <2 x i64> @llvm.ctlz.v2i64(<2 x i64> %v, i1 false)
++  store <2 x i64> %res, ptr %dst
++  ret void
++}
++
++declare <16 x i8> @llvm.ctpop.v16i8(<16 x i8>)
++declare <8 x i16> @llvm.ctpop.v8i16(<8 x i16>)
++declare <4 x i32> @llvm.ctpop.v4i32(<4 x i32>)
++declare <2 x i64> @llvm.ctpop.v2i64(<2 x i64>)
++declare <16 x i8> @llvm.ctlz.v16i8(<16 x i8>, i1)
++declare <8 x i16> @llvm.ctlz.v8i16(<8 x i16>, i1)
++declare <4 x i32> @llvm.ctlz.v4i32(<4 x i32>, i1)
++declare <2 x i64> @llvm.ctlz.v2i64(<2 x i64>, i1)
+-- 
+2.20.1
+

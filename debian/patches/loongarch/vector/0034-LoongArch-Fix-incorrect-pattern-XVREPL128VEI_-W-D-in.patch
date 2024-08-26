@@ -1,0 +1,61 @@
+From 487d08e5156f328b1f2d8da7b51c4c04c4e117d6 Mon Sep 17 00:00:00 2001
+From: wanglei <wanglei@loongson.cn>
+Date: Wed, 27 Dec 2023 16:31:49 +0800
+Subject: [PATCH 34/42] [LoongArch] Fix incorrect pattern XVREPL128VEI_{W/D}
+ instructions
+
+Remove the incorrect patterns for `XVREPL128VEI_{W/D}` instructions,
+and add correct patterns for XVREPLVE0_{W/D} instructions
+
+(cherry picked from commit c7367f985e0d27aeb8bc993406d1b9f4ca307399)
+
+Change-Id: Id9c36f5009941748f696a9a65bebf2c20de0c052
+---
+ llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td | 6 +++---
+ llvm/test/CodeGen/LoongArch/lasx/build-vector.ll    | 4 ++--
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+index 9b7a34688811..059689cef840 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+@@ -1571,11 +1571,11 @@ def : Pat<(loongarch_vreplve v8i32:$xj, GRLenVT:$rk),
+ def : Pat<(loongarch_vreplve v4i64:$xj, GRLenVT:$rk),
+           (XVREPLVE_D v4i64:$xj, GRLenVT:$rk)>;
+ 
+-// XVREPL128VEI_{W/D}
++// XVREPLVE0_{W/D}
+ def : Pat<(lasxsplatf32 FPR32:$fj),
+-          (XVREPL128VEI_W (SUBREG_TO_REG (i64 0), FPR32:$fj, sub_32), 0)>;
++          (XVREPLVE0_W (SUBREG_TO_REG (i64 0), FPR32:$fj, sub_32))>;
+ def : Pat<(lasxsplatf64 FPR64:$fj),
+-          (XVREPL128VEI_D (SUBREG_TO_REG (i64 0), FPR64:$fj, sub_64), 0)>;
++          (XVREPLVE0_D (SUBREG_TO_REG (i64 0), FPR64:$fj, sub_64))>;
+ 
+ // Loads/Stores
+ foreach vt = [v32i8, v16i16, v8i32, v4i64, v8f32, v4f64] in {
+diff --git a/llvm/test/CodeGen/LoongArch/lasx/build-vector.ll b/llvm/test/CodeGen/LoongArch/lasx/build-vector.ll
+index 6824ab5cda8d..ae6f31aaec64 100644
+--- a/llvm/test/CodeGen/LoongArch/lasx/build-vector.ll
++++ b/llvm/test/CodeGen/LoongArch/lasx/build-vector.ll
+@@ -57,7 +57,7 @@ define void @buildvector_v8f32_splat(ptr %dst, float %a0) nounwind {
+ ; CHECK-LABEL: buildvector_v8f32_splat:
+ ; CHECK:       # %bb.0: # %entry
+ ; CHECK-NEXT:    # kill: def $f0 killed $f0 def $xr0
+-; CHECK-NEXT:    xvrepl128vei.w $xr0, $xr0, 0
++; CHECK-NEXT:    xvreplve0.w $xr0, $xr0
+ ; CHECK-NEXT:    xvst $xr0, $a0, 0
+ ; CHECK-NEXT:    ret
+ entry:
+@@ -71,7 +71,7 @@ define void @buildvector_v4f64_splat(ptr %dst, double %a0) nounwind {
+ ; CHECK-LABEL: buildvector_v4f64_splat:
+ ; CHECK:       # %bb.0: # %entry
+ ; CHECK-NEXT:    # kill: def $f0_64 killed $f0_64 def $xr0
+-; CHECK-NEXT:    xvrepl128vei.d $xr0, $xr0, 0
++; CHECK-NEXT:    xvreplve0.d $xr0, $xr0
+ ; CHECK-NEXT:    xvst $xr0, $a0, 0
+ ; CHECK-NEXT:    ret
+ entry:
+-- 
+2.20.1
+

@@ -1,0 +1,701 @@
+From bae7130f659fb0d052523d6e667684f178a9515b Mon Sep 17 00:00:00 2001
+From: wanglei <wanglei@loongson.cn>
+Date: Thu, 16 Nov 2023 20:05:01 +0800
+Subject: [PATCH 21/42] [LoongArch] Add codegen support for insertelement
+
+(cherry picked from commit f2cbd1fdf702afe31d0198c9185e08dc2b104252)
+
+Change-Id: I29ad0969265aa1db39219a40b5a02dd53057a6c1
+---
+ .../LoongArch/LoongArchISelLowering.cpp       |  82 +++++-
+ .../Target/LoongArch/LoongArchISelLowering.h  |   1 +
+ .../LoongArch/LoongArchLASXInstrInfo.td       |  18 ++
+ .../Target/LoongArch/LoongArchLSXInstrInfo.td |   5 +
+ .../lasx/ir-instruction/insertelement.ll      | 276 ++++++++++++++++++
+ .../lsx/ir-instruction/insertelement.ll       | 196 +++++++++++++
+ 6 files changed, 576 insertions(+), 2 deletions(-)
+ create mode 100644 llvm/test/CodeGen/LoongArch/lasx/ir-instruction/insertelement.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lsx/ir-instruction/insertelement.ll
+
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+index 26e94a53b344..492339ce2151 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+@@ -237,7 +237,7 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+       // FIXME: For BUILD_VECTOR, it is temporarily set to `Legal` here, and it
+       // will be `Custom` handled in the future.
+       setOperationAction(ISD::BUILD_VECTOR, VT, Legal);
+-      setOperationAction(ISD::INSERT_VECTOR_ELT, VT, Legal);
++      setOperationAction(ISD::INSERT_VECTOR_ELT, VT, Custom);
+       setOperationAction(ISD::EXTRACT_VECTOR_ELT, VT, Legal);
+     }
+     for (MVT VT : {MVT::v16i8, MVT::v8i16, MVT::v4i32, MVT::v2i64}) {
+@@ -267,7 +267,7 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+ 
+       // FIXME: Same as above.
+       setOperationAction(ISD::BUILD_VECTOR, VT, Legal);
+-      setOperationAction(ISD::INSERT_VECTOR_ELT, VT, Legal);
++      setOperationAction(ISD::INSERT_VECTOR_ELT, VT, Custom);
+       setOperationAction(ISD::EXTRACT_VECTOR_ELT, VT, Legal);
+     }
+     for (MVT VT : {MVT::v4i64, MVT::v8i32, MVT::v16i16, MVT::v32i8}) {
+@@ -369,10 +369,20 @@ SDValue LoongArchTargetLowering::LowerOperation(SDValue Op,
+     return lowerRETURNADDR(Op, DAG);
+   case ISD::WRITE_REGISTER:
+     return lowerWRITE_REGISTER(Op, DAG);
++  case ISD::INSERT_VECTOR_ELT:
++    return lowerINSERT_VECTOR_ELT(Op, DAG);
+   }
+   return SDValue();
+ }
+ 
++SDValue
++LoongArchTargetLowering::lowerINSERT_VECTOR_ELT(SDValue Op,
++                                                SelectionDAG &DAG) const {
++  if (isa<ConstantSDNode>(Op->getOperand(2)))
++    return Op;
++  return SDValue();
++}
++
+ SDValue LoongArchTargetLowering::lowerWRITE_REGISTER(SDValue Op,
+                                                      SelectionDAG &DAG) const {
+ 
+@@ -3040,6 +3050,71 @@ emitVecCondBranchPseudo(MachineInstr &MI, MachineBasicBlock *BB,
+   return SinkBB;
+ }
+ 
++static MachineBasicBlock *
++emitPseudoXVINSGR2VR(MachineInstr &MI, MachineBasicBlock *BB,
++                     const LoongArchSubtarget &Subtarget) {
++  unsigned InsOp;
++  unsigned HalfSize;
++  switch (MI.getOpcode()) {
++  default:
++    llvm_unreachable("Unexpected opcode");
++  case LoongArch::PseudoXVINSGR2VR_B:
++    HalfSize = 16;
++    InsOp = LoongArch::VINSGR2VR_B;
++    break;
++  case LoongArch::PseudoXVINSGR2VR_H:
++    HalfSize = 8;
++    InsOp = LoongArch::VINSGR2VR_H;
++    break;
++  }
++  const TargetInstrInfo *TII = Subtarget.getInstrInfo();
++  const TargetRegisterClass *RC = &LoongArch::LASX256RegClass;
++  const TargetRegisterClass *SubRC = &LoongArch::LSX128RegClass;
++  DebugLoc DL = MI.getDebugLoc();
++  MachineRegisterInfo &MRI = BB->getParent()->getRegInfo();
++  // XDst = vector_insert XSrc, Elt, Idx
++  Register XDst = MI.getOperand(0).getReg();
++  Register XSrc = MI.getOperand(1).getReg();
++  Register Elt = MI.getOperand(2).getReg();
++  unsigned Idx = MI.getOperand(3).getImm();
++
++  Register ScratchReg1 = XSrc;
++  if (Idx >= HalfSize) {
++    ScratchReg1 = MRI.createVirtualRegister(RC);
++    BuildMI(*BB, MI, DL, TII->get(LoongArch::XVPERMI_Q), ScratchReg1)
++        .addReg(XSrc)
++        .addReg(XSrc)
++        .addImm(1);
++  }
++
++  Register ScratchSubReg1 = MRI.createVirtualRegister(SubRC);
++  Register ScratchSubReg2 = MRI.createVirtualRegister(SubRC);
++  BuildMI(*BB, MI, DL, TII->get(LoongArch::COPY), ScratchSubReg1)
++      .addReg(ScratchReg1, 0, LoongArch::sub_128);
++  BuildMI(*BB, MI, DL, TII->get(InsOp), ScratchSubReg2)
++      .addReg(ScratchSubReg1)
++      .addReg(Elt)
++      .addImm(Idx >= HalfSize ? Idx - HalfSize : Idx);
++
++  Register ScratchReg2 = XDst;
++  if (Idx >= HalfSize)
++    ScratchReg2 = MRI.createVirtualRegister(RC);
++
++  BuildMI(*BB, MI, DL, TII->get(LoongArch::SUBREG_TO_REG), ScratchReg2)
++      .addImm(0)
++      .addReg(ScratchSubReg2)
++      .addImm(LoongArch::sub_128);
++
++  if (Idx >= HalfSize)
++    BuildMI(*BB, MI, DL, TII->get(LoongArch::XVPERMI_Q), XDst)
++        .addReg(XSrc)
++        .addReg(ScratchReg2)
++        .addImm(2);
++
++  MI.eraseFromParent();
++  return BB;
++}
++
+ MachineBasicBlock *LoongArchTargetLowering::EmitInstrWithCustomInserter(
+     MachineInstr &MI, MachineBasicBlock *BB) const {
+   const TargetInstrInfo *TII = Subtarget.getInstrInfo();
+@@ -3095,6 +3170,9 @@ MachineBasicBlock *LoongArchTargetLowering::EmitInstrWithCustomInserter(
+   case LoongArch::PseudoXVBNZ_W:
+   case LoongArch::PseudoXVBNZ_D:
+     return emitVecCondBranchPseudo(MI, BB, Subtarget);
++  case LoongArch::PseudoXVINSGR2VR_B:
++  case LoongArch::PseudoXVINSGR2VR_H:
++    return emitPseudoXVINSGR2VR(MI, BB, Subtarget);
+   }
+ }
+ 
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelLowering.h b/llvm/lib/Target/LoongArch/LoongArchISelLowering.h
+index 7765057ebffb..29028ff963d0 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelLowering.h
++++ b/llvm/lib/Target/LoongArch/LoongArchISelLowering.h
+@@ -275,6 +275,7 @@ private:
+   SDValue lowerFRAMEADDR(SDValue Op, SelectionDAG &DAG) const;
+   SDValue lowerRETURNADDR(SDValue Op, SelectionDAG &DAG) const;
+   SDValue lowerWRITE_REGISTER(SDValue Op, SelectionDAG &DAG) const;
++  SDValue lowerINSERT_VECTOR_ELT(SDValue Op, SelectionDAG &DAG) const;
+ 
+   bool isFPImmLegal(const APFloat &Imm, EVT VT,
+                     bool ForCodeSize) const override;
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+index 380206ddcf10..475565db15c9 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+@@ -1065,6 +1065,13 @@ def PseudoXVBZ_W : VecCond<loongarch_vall_zero, v8i32, LASX256>;
+ def PseudoXVBZ_D : VecCond<loongarch_vall_zero, v4i64, LASX256>;
+ def PseudoXVBZ : VecCond<loongarch_vany_zero, v32i8, LASX256>;
+ 
++let usesCustomInserter = 1, Constraints = "$xd = $dst" in {
++def PseudoXVINSGR2VR_B
++  : Pseudo<(outs LASX256:$dst), (ins LASX256:$xd, GPR:$rj, uimm5:$imm)>;
++def PseudoXVINSGR2VR_H
++  : Pseudo<(outs LASX256:$dst), (ins LASX256:$xd, GPR:$rj, uimm4:$imm)>;
++} //  usesCustomInserter = 1, Constraints = "$xd = $dst"
++
+ } // Predicates = [HasExtLASX]
+ 
+ multiclass PatXr<SDPatternOperator OpNode, string Inst> {
+@@ -1365,12 +1372,23 @@ def : Pat<(fma v8f32:$xj, v8f32:$xk, v8f32:$xa),
+ def : Pat<(fma v4f64:$xj, v4f64:$xk, v4f64:$xa),
+           (XVFMADD_D v4f64:$xj, v4f64:$xk, v4f64:$xa)>;
+ 
++// PseudoXVINSGR2VR_{B/H}
++def : Pat<(vector_insert v32i8:$xd, GRLenVT:$rj, uimm5:$imm),
++          (PseudoXVINSGR2VR_B v32i8:$xd, GRLenVT:$rj, uimm5:$imm)>;
++def : Pat<(vector_insert v16i16:$xd, GRLenVT:$rj, uimm4:$imm),
++          (PseudoXVINSGR2VR_H v16i16:$xd, GRLenVT:$rj, uimm4:$imm)>;
++
+ // XVINSGR2VR_{W/D}
+ def : Pat<(vector_insert v8i32:$xd, GRLenVT:$rj, uimm3:$imm),
+           (XVINSGR2VR_W v8i32:$xd, GRLenVT:$rj, uimm3:$imm)>;
+ def : Pat<(vector_insert v4i64:$xd, GRLenVT:$rj, uimm2:$imm),
+           (XVINSGR2VR_D v4i64:$xd, GRLenVT:$rj, uimm2:$imm)>;
+ 
++def : Pat<(vector_insert v8f32:$vd, FPR32:$fj, uimm3:$imm),
++          (XVINSGR2VR_W $vd, (COPY_TO_REGCLASS FPR32:$fj, GPR), uimm3:$imm)>;
++def : Pat<(vector_insert v4f64:$vd, FPR64:$fj, uimm2:$imm),
++          (XVINSGR2VR_D $vd, (COPY_TO_REGCLASS FPR64:$fj, GPR), uimm2:$imm)>;
++
+ // XVPICKVE2GR_W[U]
+ def : Pat<(loongarch_vpick_sext_elt v8i32:$xd, uimm3:$imm, i32),
+           (XVPICKVE2GR_W v8i32:$xd, uimm3:$imm)>;
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+index 980870e34503..d8fd132a1c59 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+@@ -1462,6 +1462,11 @@ def : Pat<(vector_insert v4i32:$vd, GRLenVT:$rj, uimm2:$imm),
+ def : Pat<(vector_insert v2i64:$vd, GRLenVT:$rj, uimm1:$imm),
+           (VINSGR2VR_D v2i64:$vd, GRLenVT:$rj, uimm1:$imm)>;
+ 
++def : Pat<(vector_insert v4f32:$vd, FPR32:$fj, uimm2:$imm),
++          (VINSGR2VR_W $vd, (COPY_TO_REGCLASS FPR32:$fj, GPR), uimm2:$imm)>;
++def : Pat<(vector_insert v2f64:$vd, FPR64:$fj, uimm1:$imm),
++          (VINSGR2VR_D $vd, (COPY_TO_REGCLASS FPR64:$fj, GPR), uimm1:$imm)>;
++
+ // VPICKVE2GR_{B/H/W}[U]
+ def : Pat<(loongarch_vpick_sext_elt v16i8:$vd, uimm4:$imm, i8),
+           (VPICKVE2GR_B v16i8:$vd, uimm4:$imm)>;
+diff --git a/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/insertelement.ll b/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/insertelement.ll
+new file mode 100644
+index 000000000000..e571a5d2e4cf
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lasx/ir-instruction/insertelement.ll
+@@ -0,0 +1,276 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py UTC_ARGS: --version 3
++; RUN: llc --mtriple=loongarch64 --mattr=+lasx < %s | FileCheck %s
++
++define void @insert_32xi8(ptr %src, ptr %dst, i8 %in) nounwind {
++; CHECK-LABEL: insert_32xi8:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    vinsgr2vr.b $vr0, $a2, 1
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <32 x i8>, ptr %src
++  %v_new = insertelement <32 x i8> %v, i8 %in, i32 1
++  store <32 x i8> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_32xi8_upper(ptr %src, ptr %dst, i8 %in) nounwind {
++; CHECK-LABEL: insert_32xi8_upper:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvori.b $xr1, $xr0, 0
++; CHECK-NEXT:    xvpermi.q $xr1, $xr0, 1
++; CHECK-NEXT:    vinsgr2vr.b $vr1, $a2, 0
++; CHECK-NEXT:    xvpermi.q $xr0, $xr1, 2
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <32 x i8>, ptr %src
++  %v_new = insertelement <32 x i8> %v, i8 %in, i32 16
++  store <32 x i8> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_16xi16(ptr %src, ptr %dst, i16 %in) nounwind {
++; CHECK-LABEL: insert_16xi16:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    vinsgr2vr.h $vr0, $a2, 1
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <16 x i16>, ptr %src
++  %v_new = insertelement <16 x i16> %v, i16 %in, i32 1
++  store <16 x i16> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_16xi16_upper(ptr %src, ptr %dst, i16 %in) nounwind {
++; CHECK-LABEL: insert_16xi16_upper:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvori.b $xr1, $xr0, 0
++; CHECK-NEXT:    xvpermi.q $xr1, $xr0, 1
++; CHECK-NEXT:    vinsgr2vr.h $vr1, $a2, 0
++; CHECK-NEXT:    xvpermi.q $xr0, $xr1, 2
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <16 x i16>, ptr %src
++  %v_new = insertelement <16 x i16> %v, i16 %in, i32 8
++  store <16 x i16> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_8xi32(ptr %src, ptr %dst, i32 %in) nounwind {
++; CHECK-LABEL: insert_8xi32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvinsgr2vr.w $xr0, $a2, 1
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <8 x i32>, ptr %src
++  %v_new = insertelement <8 x i32> %v, i32 %in, i32 1
++  store <8 x i32> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_4xi64(ptr %src, ptr %dst, i64 %in) nounwind {
++; CHECK-LABEL: insert_4xi64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvinsgr2vr.d $xr0, $a2, 1
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <4 x i64>, ptr %src
++  %v_new = insertelement <4 x i64> %v, i64 %in, i32 1
++  store <4 x i64> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_8xfloat(ptr %src, ptr %dst, float %in) nounwind {
++; CHECK-LABEL: insert_8xfloat:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    movfr2gr.s $a2, $fa0
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvinsgr2vr.w $xr0, $a2, 1
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <8 x float>, ptr %src
++  %v_new = insertelement <8 x float> %v, float %in, i32 1
++  store <8 x float> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_4xdouble(ptr %src, ptr %dst, double %in) nounwind {
++; CHECK-LABEL: insert_4xdouble:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    movfr2gr.d $a2, $fa0
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvinsgr2vr.d $xr0, $a2, 1
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <4 x double>, ptr %src
++  %v_new = insertelement <4 x double> %v, double %in, i32 1
++  store <4 x double> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_32xi8_idx(ptr %src, ptr %dst, i8 %in, i32 %idx) nounwind {
++; CHECK-LABEL: insert_32xi8_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    addi.d $sp, $sp, -64
++; CHECK-NEXT:    st.d $ra, $sp, 56 # 8-byte Folded Spill
++; CHECK-NEXT:    st.d $fp, $sp, 48 # 8-byte Folded Spill
++; CHECK-NEXT:    addi.d $fp, $sp, 64
++; CHECK-NEXT:    srli.d $a4, $sp, 5
++; CHECK-NEXT:    slli.d $sp, $a4, 5
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvst $xr0, $sp, 0
++; CHECK-NEXT:    addi.d $a0, $sp, 0
++; CHECK-NEXT:    bstrins.d $a0, $a3, 4, 0
++; CHECK-NEXT:    st.b $a2, $a0, 0
++; CHECK-NEXT:    xvld $xr0, $sp, 0
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    addi.d $sp, $fp, -64
++; CHECK-NEXT:    ld.d $fp, $sp, 48 # 8-byte Folded Reload
++; CHECK-NEXT:    ld.d $ra, $sp, 56 # 8-byte Folded Reload
++; CHECK-NEXT:    addi.d $sp, $sp, 64
++; CHECK-NEXT:    ret
++  %v = load volatile <32 x i8>, ptr %src
++  %v_new = insertelement <32 x i8> %v, i8 %in, i32 %idx
++  store <32 x i8> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_16xi16_idx(ptr %src, ptr %dst, i16 %in, i32 %idx) nounwind {
++; CHECK-LABEL: insert_16xi16_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    addi.d $sp, $sp, -64
++; CHECK-NEXT:    st.d $ra, $sp, 56 # 8-byte Folded Spill
++; CHECK-NEXT:    st.d $fp, $sp, 48 # 8-byte Folded Spill
++; CHECK-NEXT:    addi.d $fp, $sp, 64
++; CHECK-NEXT:    srli.d $a4, $sp, 5
++; CHECK-NEXT:    slli.d $sp, $a4, 5
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvst $xr0, $sp, 0
++; CHECK-NEXT:    addi.d $a0, $sp, 0
++; CHECK-NEXT:    bstrins.d $a0, $a3, 4, 1
++; CHECK-NEXT:    st.h $a2, $a0, 0
++; CHECK-NEXT:    xvld $xr0, $sp, 0
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    addi.d $sp, $fp, -64
++; CHECK-NEXT:    ld.d $fp, $sp, 48 # 8-byte Folded Reload
++; CHECK-NEXT:    ld.d $ra, $sp, 56 # 8-byte Folded Reload
++; CHECK-NEXT:    addi.d $sp, $sp, 64
++; CHECK-NEXT:    ret
++  %v = load volatile <16 x i16>, ptr %src
++  %v_new = insertelement <16 x i16> %v, i16 %in, i32 %idx
++  store <16 x i16> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_8xi32_idx(ptr %src, ptr %dst, i32 %in, i32 %idx) nounwind {
++; CHECK-LABEL: insert_8xi32_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    addi.d $sp, $sp, -64
++; CHECK-NEXT:    st.d $ra, $sp, 56 # 8-byte Folded Spill
++; CHECK-NEXT:    st.d $fp, $sp, 48 # 8-byte Folded Spill
++; CHECK-NEXT:    addi.d $fp, $sp, 64
++; CHECK-NEXT:    srli.d $a4, $sp, 5
++; CHECK-NEXT:    slli.d $sp, $a4, 5
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvst $xr0, $sp, 0
++; CHECK-NEXT:    addi.d $a0, $sp, 0
++; CHECK-NEXT:    bstrins.d $a0, $a3, 4, 2
++; CHECK-NEXT:    st.w $a2, $a0, 0
++; CHECK-NEXT:    xvld $xr0, $sp, 0
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    addi.d $sp, $fp, -64
++; CHECK-NEXT:    ld.d $fp, $sp, 48 # 8-byte Folded Reload
++; CHECK-NEXT:    ld.d $ra, $sp, 56 # 8-byte Folded Reload
++; CHECK-NEXT:    addi.d $sp, $sp, 64
++; CHECK-NEXT:    ret
++  %v = load volatile <8 x i32>, ptr %src
++  %v_new = insertelement <8 x i32> %v, i32 %in, i32 %idx
++  store <8 x i32> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_4xi64_idx(ptr %src, ptr %dst, i64 %in, i32 %idx) nounwind {
++; CHECK-LABEL: insert_4xi64_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    addi.d $sp, $sp, -64
++; CHECK-NEXT:    st.d $ra, $sp, 56 # 8-byte Folded Spill
++; CHECK-NEXT:    st.d $fp, $sp, 48 # 8-byte Folded Spill
++; CHECK-NEXT:    addi.d $fp, $sp, 64
++; CHECK-NEXT:    srli.d $a4, $sp, 5
++; CHECK-NEXT:    slli.d $sp, $a4, 5
++; CHECK-NEXT:    xvld $xr0, $a0, 0
++; CHECK-NEXT:    xvst $xr0, $sp, 0
++; CHECK-NEXT:    addi.d $a0, $sp, 0
++; CHECK-NEXT:    bstrins.d $a0, $a3, 4, 3
++; CHECK-NEXT:    st.d $a2, $a0, 0
++; CHECK-NEXT:    xvld $xr0, $sp, 0
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    addi.d $sp, $fp, -64
++; CHECK-NEXT:    ld.d $fp, $sp, 48 # 8-byte Folded Reload
++; CHECK-NEXT:    ld.d $ra, $sp, 56 # 8-byte Folded Reload
++; CHECK-NEXT:    addi.d $sp, $sp, 64
++; CHECK-NEXT:    ret
++  %v = load volatile <4 x i64>, ptr %src
++  %v_new = insertelement <4 x i64> %v, i64 %in, i32 %idx
++  store <4 x i64> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_8xfloat_idx(ptr %src, ptr %dst, float %in, i32 %idx) nounwind {
++; CHECK-LABEL: insert_8xfloat_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    addi.d $sp, $sp, -64
++; CHECK-NEXT:    st.d $ra, $sp, 56 # 8-byte Folded Spill
++; CHECK-NEXT:    st.d $fp, $sp, 48 # 8-byte Folded Spill
++; CHECK-NEXT:    addi.d $fp, $sp, 64
++; CHECK-NEXT:    srli.d $a3, $sp, 5
++; CHECK-NEXT:    slli.d $sp, $a3, 5
++; CHECK-NEXT:    xvld $xr1, $a0, 0
++; CHECK-NEXT:    xvst $xr1, $sp, 0
++; CHECK-NEXT:    addi.d $a0, $sp, 0
++; CHECK-NEXT:    bstrins.d $a0, $a2, 4, 2
++; CHECK-NEXT:    fst.s $fa0, $a0, 0
++; CHECK-NEXT:    xvld $xr0, $sp, 0
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    addi.d $sp, $fp, -64
++; CHECK-NEXT:    ld.d $fp, $sp, 48 # 8-byte Folded Reload
++; CHECK-NEXT:    ld.d $ra, $sp, 56 # 8-byte Folded Reload
++; CHECK-NEXT:    addi.d $sp, $sp, 64
++; CHECK-NEXT:    ret
++  %v = load volatile <8 x float>, ptr %src
++  %v_new = insertelement <8 x float> %v, float %in, i32 %idx
++  store <8 x float> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_4xdouble_idx(ptr %src, ptr %dst, double %in, i32 %idx) nounwind {
++; CHECK-LABEL: insert_4xdouble_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    addi.d $sp, $sp, -64
++; CHECK-NEXT:    st.d $ra, $sp, 56 # 8-byte Folded Spill
++; CHECK-NEXT:    st.d $fp, $sp, 48 # 8-byte Folded Spill
++; CHECK-NEXT:    addi.d $fp, $sp, 64
++; CHECK-NEXT:    srli.d $a3, $sp, 5
++; CHECK-NEXT:    slli.d $sp, $a3, 5
++; CHECK-NEXT:    xvld $xr1, $a0, 0
++; CHECK-NEXT:    xvst $xr1, $sp, 0
++; CHECK-NEXT:    addi.d $a0, $sp, 0
++; CHECK-NEXT:    bstrins.d $a0, $a2, 4, 3
++; CHECK-NEXT:    fst.d $fa0, $a0, 0
++; CHECK-NEXT:    xvld $xr0, $sp, 0
++; CHECK-NEXT:    xvst $xr0, $a1, 0
++; CHECK-NEXT:    addi.d $sp, $fp, -64
++; CHECK-NEXT:    ld.d $fp, $sp, 48 # 8-byte Folded Reload
++; CHECK-NEXT:    ld.d $ra, $sp, 56 # 8-byte Folded Reload
++; CHECK-NEXT:    addi.d $sp, $sp, 64
++; CHECK-NEXT:    ret
++  %v = load volatile <4 x double>, ptr %src
++  %v_new = insertelement <4 x double> %v, double %in, i32 %idx
++  store <4 x double> %v_new, ptr %dst
++  ret void
++}
+diff --git a/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/insertelement.ll b/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/insertelement.ll
+new file mode 100644
+index 000000000000..a9834591aa0e
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lsx/ir-instruction/insertelement.ll
+@@ -0,0 +1,196 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py UTC_ARGS: --version 3
++; RUN: llc --mtriple=loongarch64 --mattr=+lsx < %s | FileCheck %s
++
++define void @insert_16xi8(ptr %src, ptr %dst, i8 %ins) nounwind {
++; CHECK-LABEL: insert_16xi8:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vinsgr2vr.b $vr0, $a2, 1
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <16 x i8>, ptr %src
++  %v_new = insertelement <16 x i8> %v, i8 %ins, i32 1
++  store <16 x i8> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_8xi16(ptr %src, ptr %dst, i16 %ins) nounwind {
++; CHECK-LABEL: insert_8xi16:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vinsgr2vr.h $vr0, $a2, 1
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <8 x i16>, ptr %src
++  %v_new = insertelement <8 x i16> %v, i16 %ins, i32 1
++  store <8 x i16> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_4xi32(ptr %src, ptr %dst, i32 %ins) nounwind {
++; CHECK-LABEL: insert_4xi32:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vinsgr2vr.w $vr0, $a2, 1
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <4 x i32>, ptr %src
++  %v_new = insertelement <4 x i32> %v, i32 %ins, i32 1
++  store <4 x i32> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_2xi64(ptr %src, ptr %dst, i64 %ins) nounwind {
++; CHECK-LABEL: insert_2xi64:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vinsgr2vr.d $vr0, $a2, 1
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <2 x i64>, ptr %src
++  %v_new = insertelement <2 x i64> %v, i64 %ins, i32 1
++  store <2 x i64> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_4xfloat(ptr %src, ptr %dst, float %ins) nounwind {
++; CHECK-LABEL: insert_4xfloat:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    movfr2gr.s $a2, $fa0
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vinsgr2vr.w $vr0, $a2, 1
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <4 x float>, ptr %src
++  %v_new = insertelement <4 x float> %v, float %ins, i32 1
++  store <4 x float> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_2xdouble(ptr %src, ptr %dst, double %ins) nounwind {
++; CHECK-LABEL: insert_2xdouble:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    movfr2gr.d $a2, $fa0
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vinsgr2vr.d $vr0, $a2, 1
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    ret
++  %v = load volatile <2 x double>, ptr %src
++  %v_new = insertelement <2 x double> %v, double %ins, i32 1
++  store <2 x double> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_16xi8_idx(ptr %src, ptr %dst, i8 %ins, i32 %idx) nounwind {
++; CHECK-LABEL: insert_16xi8_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    addi.d $sp, $sp, -16
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vst $vr0, $sp, 0
++; CHECK-NEXT:    addi.d $a0, $sp, 0
++; CHECK-NEXT:    bstrins.d $a0, $a3, 3, 0
++; CHECK-NEXT:    st.b $a2, $a0, 0
++; CHECK-NEXT:    vld $vr0, $sp, 0
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    addi.d $sp, $sp, 16
++; CHECK-NEXT:    ret
++  %v = load volatile <16 x i8>, ptr %src
++  %v_new = insertelement <16 x i8> %v, i8 %ins, i32 %idx
++  store <16 x i8> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_8xi16_idx(ptr %src, ptr %dst, i16 %ins, i32 %idx) nounwind {
++; CHECK-LABEL: insert_8xi16_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    addi.d $sp, $sp, -16
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vst $vr0, $sp, 0
++; CHECK-NEXT:    addi.d $a0, $sp, 0
++; CHECK-NEXT:    bstrins.d $a0, $a3, 3, 1
++; CHECK-NEXT:    st.h $a2, $a0, 0
++; CHECK-NEXT:    vld $vr0, $sp, 0
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    addi.d $sp, $sp, 16
++; CHECK-NEXT:    ret
++  %v = load volatile <8 x i16>, ptr %src
++  %v_new = insertelement <8 x i16> %v, i16 %ins, i32 %idx
++  store <8 x i16> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_4xi32_idx(ptr %src, ptr %dst, i32 %ins, i32 %idx) nounwind {
++; CHECK-LABEL: insert_4xi32_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    addi.d $sp, $sp, -16
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vst $vr0, $sp, 0
++; CHECK-NEXT:    addi.d $a0, $sp, 0
++; CHECK-NEXT:    bstrins.d $a0, $a3, 3, 2
++; CHECK-NEXT:    st.w $a2, $a0, 0
++; CHECK-NEXT:    vld $vr0, $sp, 0
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    addi.d $sp, $sp, 16
++; CHECK-NEXT:    ret
++  %v = load volatile <4 x i32>, ptr %src
++  %v_new = insertelement <4 x i32> %v, i32 %ins, i32 %idx
++  store <4 x i32> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_2xi64_idx(ptr %src, ptr %dst, i64 %ins, i32 %idx) nounwind {
++; CHECK-LABEL: insert_2xi64_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    addi.d $sp, $sp, -16
++; CHECK-NEXT:    vld $vr0, $a0, 0
++; CHECK-NEXT:    vst $vr0, $sp, 0
++; CHECK-NEXT:    addi.d $a0, $sp, 0
++; CHECK-NEXT:    bstrins.d $a0, $a3, 3, 3
++; CHECK-NEXT:    st.d $a2, $a0, 0
++; CHECK-NEXT:    vld $vr0, $sp, 0
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    addi.d $sp, $sp, 16
++; CHECK-NEXT:    ret
++  %v = load volatile <2 x i64>, ptr %src
++  %v_new = insertelement <2 x i64> %v, i64 %ins, i32 %idx
++  store <2 x i64> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_4xfloat_idx(ptr %src, ptr %dst, float %ins, i32 %idx) nounwind {
++; CHECK-LABEL: insert_4xfloat_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    addi.d $sp, $sp, -16
++; CHECK-NEXT:    vld $vr1, $a0, 0
++; CHECK-NEXT:    vst $vr1, $sp, 0
++; CHECK-NEXT:    addi.d $a0, $sp, 0
++; CHECK-NEXT:    bstrins.d $a0, $a2, 3, 2
++; CHECK-NEXT:    fst.s $fa0, $a0, 0
++; CHECK-NEXT:    vld $vr0, $sp, 0
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    addi.d $sp, $sp, 16
++; CHECK-NEXT:    ret
++  %v = load volatile <4 x float>, ptr %src
++  %v_new = insertelement <4 x float> %v, float %ins, i32 %idx
++  store <4 x float> %v_new, ptr %dst
++  ret void
++}
++
++define void @insert_2xdouble_idx(ptr %src, ptr %dst, double %ins, i32 %idx) nounwind {
++; CHECK-LABEL: insert_2xdouble_idx:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    addi.d $sp, $sp, -16
++; CHECK-NEXT:    vld $vr1, $a0, 0
++; CHECK-NEXT:    vst $vr1, $sp, 0
++; CHECK-NEXT:    addi.d $a0, $sp, 0
++; CHECK-NEXT:    bstrins.d $a0, $a2, 3, 3
++; CHECK-NEXT:    fst.d $fa0, $a0, 0
++; CHECK-NEXT:    vld $vr0, $sp, 0
++; CHECK-NEXT:    vst $vr0, $a1, 0
++; CHECK-NEXT:    addi.d $sp, $sp, 16
++; CHECK-NEXT:    ret
++  %v = load volatile <2 x double>, ptr %src
++  %v_new = insertelement <2 x double> %v, double %ins, i32 %idx
++  store <2 x double> %v_new, ptr %dst
++  ret void
++}
+-- 
+2.20.1
+

@@ -1,0 +1,351 @@
+From c7f4dc3b39fc0519884ff3553bbdc51627211d7e Mon Sep 17 00:00:00 2001
+From: licongtian <licongtian@loongson.cn>
+Date: Wed, 20 Sep 2023 11:21:56 +0800
+Subject: [PATCH 13/42] [Clang][LoongArch] Support compiler options
+ -mlsx/-mlasx for clang
+
+This patch adds compiler options -mlsx/-mlasx which enables the
+instruction sets of LSX and LASX, and sets related predefined macros
+according to the options.
+
+(cherry picked from commit 8d4e35600f3ba90997a59fdb9baeb196e723eec9)
+
+Change-Id: Ie2ac4fb70acaaeeb246e0cc796a5a653db8fd6d6
+---
+ .../clang/Basic/DiagnosticDriverKinds.td      |  6 +++
+ clang/include/clang/Driver/Options.td         | 10 +++++
+ clang/lib/Basic/Targets/LoongArch.cpp         | 12 +++++-
+ clang/lib/Basic/Targets/LoongArch.h           |  4 ++
+ .../lib/Driver/ToolChains/Arch/LoongArch.cpp  | 32 +++++++++++++++
+ clang/test/Driver/loongarch-mlasx-error.c     | 15 +++++++
+ clang/test/Driver/loongarch-mlasx.c           | 37 +++++++++++++++++
+ clang/test/Driver/loongarch-mlsx-error.c      | 12 ++++++
+ clang/test/Driver/loongarch-mlsx.c            | 41 +++++++++++++++++++
+ clang/test/Preprocessor/init-loongarch.c      | 35 ++++++++++++++++
+ 10 files changed, 203 insertions(+), 1 deletion(-)
+ create mode 100644 clang/test/Driver/loongarch-mlasx-error.c
+ create mode 100644 clang/test/Driver/loongarch-mlasx.c
+ create mode 100644 clang/test/Driver/loongarch-mlsx-error.c
+ create mode 100644 clang/test/Driver/loongarch-mlsx.c
+
+diff --git a/clang/include/clang/Basic/DiagnosticDriverKinds.td b/clang/include/clang/Basic/DiagnosticDriverKinds.td
+index 1b69324d073a..8c751f2c4bda 100644
+--- a/clang/include/clang/Basic/DiagnosticDriverKinds.td
++++ b/clang/include/clang/Basic/DiagnosticDriverKinds.td
+@@ -732,6 +732,12 @@ def warn_drv_loongarch_conflicting_implied_val : Warning<
+   InGroup<OptionIgnored>;
+ def err_drv_loongarch_invalid_mfpu_EQ : Error<
+   "invalid argument '%0' to -mfpu=; must be one of: 64, 32, none, 0 (alias for none)">;
++def err_drv_loongarch_wrong_fpu_width_for_lsx : Error<
++  "wrong fpu width; LSX depends on 64-bit FPU.">;
++def err_drv_loongarch_wrong_fpu_width_for_lasx : Error<
++  "wrong fpu width; LASX depends on 64-bit FPU.">;
++def err_drv_loongarch_invalid_simd_option_combination : Error<
++  "invalid option combination; LASX depends on LSX.">;
+ 
+ def err_drv_expand_response_file : Error<
+   "failed to expand response file: %0">;
+diff --git a/clang/include/clang/Driver/Options.td b/clang/include/clang/Driver/Options.td
+index 37e8c56b2d29..c94979b4dc34 100644
+--- a/clang/include/clang/Driver/Options.td
++++ b/clang/include/clang/Driver/Options.td
+@@ -192,6 +192,8 @@ def m_x86_Features_Group : OptionGroup<"<x86 features group>">,
+                            Group<m_Group>, Flags<[CoreOption]>, DocName<"X86">;
+ def m_riscv_Features_Group : OptionGroup<"<riscv features group>">,
+                              Group<m_Group>, DocName<"RISC-V">;
++def m_loongarch_Features_Group : OptionGroup<"<loongarch features group>">,
++                                 Group<m_Group>, DocName<"LoongArch">;
+ 
+ def m_libc_Group : OptionGroup<"<m libc group>">, Group<m_mips_Features_Group>,
+                    Flags<[HelpHidden]>;
+@@ -4190,6 +4192,14 @@ def mstack_protector_guard_reg_EQ : Joined<["-"], "mstack-protector-guard-reg=">
+ def mfentry : Flag<["-"], "mfentry">, HelpText<"Insert calls to fentry at function entry (x86/SystemZ only)">,
+   Flags<[CC1Option]>, Group<m_Group>,
+   MarshallingInfoFlag<CodeGenOpts<"CallFEntry">>;
++def mlsx : Flag<["-"], "mlsx">, Group<m_loongarch_Features_Group>,
++  HelpText<"Enable Loongson SIMD Extension (LSX).">;
++def mno_lsx : Flag<["-"], "mno-lsx">, Group<m_loongarch_Features_Group>,
++  HelpText<"Disable Loongson SIMD Extension (LSX).">;
++def mlasx : Flag<["-"], "mlasx">, Group<m_loongarch_Features_Group>,
++  HelpText<"Enable Loongson Advanced SIMD Extension (LASX).">;
++def mno_lasx : Flag<["-"], "mno-lasx">, Group<m_loongarch_Features_Group>,
++  HelpText<"Disable Loongson Advanced SIMD Extension (LASX).">;
+ def mnop_mcount : Flag<["-"], "mnop-mcount">, HelpText<"Generate mcount/__fentry__ calls as nops. To activate they need to be patched in.">,
+   Flags<[CC1Option]>, Group<m_Group>,
+   MarshallingInfoFlag<CodeGenOpts<"MNopMCount">>;
+diff --git a/clang/lib/Basic/Targets/LoongArch.cpp b/clang/lib/Basic/Targets/LoongArch.cpp
+index 4448a2ae10a1..88537989a051 100644
+--- a/clang/lib/Basic/Targets/LoongArch.cpp
++++ b/clang/lib/Basic/Targets/LoongArch.cpp
+@@ -208,6 +208,11 @@ void LoongArchTargetInfo::getTargetDefines(const LangOptions &Opts,
+     TuneCPU = ArchName;
+   Builder.defineMacro("__loongarch_tune", Twine('"') + TuneCPU + Twine('"'));
+ 
++  if (HasFeatureLSX)
++    Builder.defineMacro("__loongarch_sx", Twine(1));
++  if (HasFeatureLASX)
++    Builder.defineMacro("__loongarch_asx", Twine(1));
++
+   StringRef ABI = getABI();
+   if (ABI == "lp64d" || ABI == "lp64f" || ABI == "lp64s")
+     Builder.defineMacro("__loongarch_lp64");
+@@ -257,6 +262,8 @@ bool LoongArchTargetInfo::hasFeature(StringRef Feature) const {
+       .Case("loongarch64", Is64Bit)
+       .Case("32bit", !Is64Bit)
+       .Case("64bit", Is64Bit)
++      .Case("lsx", HasFeatureLSX)
++      .Case("lasx", HasFeatureLASX)
+       .Default(false);
+ }
+ 
+@@ -274,7 +281,10 @@ bool LoongArchTargetInfo::handleTargetFeatures(
+       if (Feature == "+d") {
+         HasFeatureD = true;
+       }
+-    }
++    } else if (Feature == "+lsx")
++      HasFeatureLSX = true;
++    else if (Feature == "+lasx")
++      HasFeatureLASX = true;
+   }
+   return true;
+ }
+diff --git a/clang/lib/Basic/Targets/LoongArch.h b/clang/lib/Basic/Targets/LoongArch.h
+index 34143f462a24..8f4150b2539d 100644
+--- a/clang/lib/Basic/Targets/LoongArch.h
++++ b/clang/lib/Basic/Targets/LoongArch.h
+@@ -27,12 +27,16 @@ protected:
+   std::string CPU;
+   bool HasFeatureD;
+   bool HasFeatureF;
++  bool HasFeatureLSX;
++  bool HasFeatureLASX;
+ 
+ public:
+   LoongArchTargetInfo(const llvm::Triple &Triple, const TargetOptions &)
+       : TargetInfo(Triple) {
+     HasFeatureD = false;
+     HasFeatureF = false;
++    HasFeatureLSX = false;
++    HasFeatureLASX = false;
+     LongDoubleWidth = 128;
+     LongDoubleAlign = 128;
+     LongDoubleFormat = &llvm::APFloat::IEEEquad();
+diff --git a/clang/lib/Driver/ToolChains/Arch/LoongArch.cpp b/clang/lib/Driver/ToolChains/Arch/LoongArch.cpp
+index 65925e9ed610..31153a67ad28 100644
+--- a/clang/lib/Driver/ToolChains/Arch/LoongArch.cpp
++++ b/clang/lib/Driver/ToolChains/Arch/LoongArch.cpp
+@@ -175,6 +175,38 @@ void loongarch::getLoongArchTargetFeatures(const Driver &D,
+     A->ignoreTargetSpecific();
+   if (Arg *A = Args.getLastArgNoClaim(options::OPT_mfpu_EQ))
+     A->ignoreTargetSpecific();
++
++  // Select lsx feature determined by -m[no-]lsx.
++  if (const Arg *A = Args.getLastArg(options::OPT_mlsx, options::OPT_mno_lsx)) {
++    // LSX depends on 64-bit FPU.
++    // -m*-float and -mfpu=none/0/32 conflict with -mlsx.
++    if (A->getOption().matches(options::OPT_mlsx)) {
++      if (llvm::find(Features, "-d") != Features.end())
++        D.Diag(diag::err_drv_loongarch_wrong_fpu_width_for_lsx);
++      else /*-mlsx*/
++        Features.push_back("+lsx");
++    } else /*-mno-lsx*/ {
++      Features.push_back("-lsx");
++    }
++  }
++
++  // Select lasx feature determined by -m[no-]lasx.
++  if (const Arg *A =
++          Args.getLastArg(options::OPT_mlasx, options::OPT_mno_lasx)) {
++    // LASX depends on 64-bit FPU and LSX.
++    // -mno-lsx conflicts with -mlasx.
++    if (A->getOption().matches(options::OPT_mlasx)) {
++      if (llvm::find(Features, "-d") != Features.end())
++        D.Diag(diag::err_drv_loongarch_wrong_fpu_width_for_lasx);
++      else if (llvm::find(Features, "-lsx") != Features.end())
++        D.Diag(diag::err_drv_loongarch_invalid_simd_option_combination);
++      else { /*-mlasx*/
++        Features.push_back("+lsx");
++        Features.push_back("+lasx");
++      }
++    } else /*-mno-lasx*/
++      Features.push_back("-lasx");
++  }
+ }
+ 
+ std::string loongarch::postProcessTargetCPUString(const std::string &CPU,
+diff --git a/clang/test/Driver/loongarch-mlasx-error.c b/clang/test/Driver/loongarch-mlasx-error.c
+new file mode 100644
+index 000000000000..e66f277f7c29
+--- /dev/null
++++ b/clang/test/Driver/loongarch-mlasx-error.c
+@@ -0,0 +1,15 @@
++// RUN: not %clang --target=loongarch64 %s -fsyntax-only -mlasx -msingle-float 2>&1 \
++// RUN:   FileCheck --check-prefix=ERROR_LASX_FPU64 %s
++// RUN: not %clang --target=loongarch64 %s -fsyntax-only -mlasx -msoft-float 2>&1 \
++// RUN:   FileCheck --check-prefix=ERROR_LASX_FPU64 %s
++// RUN: not %clang --target=loongarch64 %s -fsyntax-only -mlasx -mfpu=32 2>&1 \
++// RUN:   FileCheck --check-prefix=ERROR_LASX_FPU64 %s
++// RUN: not %clang --target=loongarch64 %s -fsyntax-only -mlasx -mfpu=0 2>&1 \
++// RUN:   FileCheck --check-prefix=ERROR_LASX_FPU64 %s
++// RUN: not %clang --target=loongarch64 %s -fsyntax-only -mlasx -mfpu=none 2>&1 \
++// RUN:   FileCheck --check-prefix=ERROR_LASX_FPU64 %s
++// RUN: not %clang --target=loongarch64 %s -fsyntax-only -mlasx -mno-lsx 2>&1 \
++// RUN:   FileCheck --check-prefix=ERROR_LASX_FPU128 %s
++
++// ERROR_LASX_FPU64: error: wrong fpu width; LASX depends on 64-bit FPU.
++// ERROR_LASX_FPU128: error: invalid option combination; LASX depends on LSX.
+diff --git a/clang/test/Driver/loongarch-mlasx.c b/clang/test/Driver/loongarch-mlasx.c
+new file mode 100644
+index 000000000000..0b934f125c9e
+--- /dev/null
++++ b/clang/test/Driver/loongarch-mlasx.c
+@@ -0,0 +1,37 @@
++/// Test -m[no-]lasx options.
++
++// RUN: %clang --target=loongarch64 -mlasx -fsyntax-only %s -### 2>&1 | \
++// RUN:   FileCheck %s --check-prefix=CC1-LASX
++// RUN: %clang --target=loongarch64 -mno-lasx -fsyntax-only %s -### 2>&1 | \
++// RUN:   FileCheck %s --check-prefix=CC1-NOLASX
++// RUN: %clang --target=loongarch64 -mlasx -mno-lasx -fsyntax-only %s -### 2>&1 | \
++// RUN:   FileCheck %s --check-prefix=CC1-NOLASX
++// RUN: %clang --target=loongarch64 -mno-lasx -mlasx -fsyntax-only %s -### 2>&1 | \
++// RUN:   FileCheck %s --check-prefix=CC1-LASX
++// RUN: %clang --target=loongarch64 -mlsx -mlasx -fsyntax-only %s -### 2>&1 | \
++// RUN:   FileCheck %s --check-prefix=CC1-LASX
++// RUN: %clang --target=loongarch64 -mlasx -mlsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   FileCheck %s --check-prefix=CC1-LASX
++
++// RUN: %clang --target=loongarch64 -mlasx -S -emit-llvm %s -o - | \
++// RUN:   FileCheck %s --check-prefix=IR-LASX
++// RUN: %clang --target=loongarch64 -mno-lasx -S -emit-llvm %s -o - | \
++// RUN:   FileCheck %s --check-prefix=IR-NOLASX
++// RUN: %clang --target=loongarch64 -mlasx -mno-lasx -S -emit-llvm %s -o - | \
++// RUN:   FileCheck %s --check-prefix=IR-NOLASX
++// RUN: %clang --target=loongarch64 -mno-lasx -mlasx -S -emit-llvm %s -o - | \
++// RUN:   FileCheck %s --check-prefix=IR-LASX
++// RUN: %clang --target=loongarch64 -mlsx -mlasx -S -emit-llvm %s -o - | \
++// RUN:   FileCheck %s --check-prefix=IR-LASX
++// RUN: %clang --target=loongarch64 -mlasx -mlsx -S -emit-llvm %s -o - | \
++// RUN:   FileCheck %s --check-prefix=IR-LASX
++
++// CC1-LASX: "-target-feature" "+lsx" "-target-feature" "+lasx"
++// CC1-NOLASX: "-target-feature" "-lasx"
++
++// IR-LASX: attributes #[[#]] ={{.*}}"target-features"="{{(.*,)?}}+lasx{{(,.*)?}}"
++// IR-NOLASX: attributes #[[#]] ={{.*}}"target-features"="{{(.*,)?}}-lasx{{(,.*)?}}"
++
++int foo(void){
++  return 3;
++}
+diff --git a/clang/test/Driver/loongarch-mlsx-error.c b/clang/test/Driver/loongarch-mlsx-error.c
+new file mode 100644
+index 000000000000..bd6b8e2718bf
+--- /dev/null
++++ b/clang/test/Driver/loongarch-mlsx-error.c
+@@ -0,0 +1,12 @@
++// RUN: not %clang --target=loongarch64 %s -fsyntax-only -mlsx -msingle-float 2>&1 \
++// RUN:   FileCheck --check-prefix=ERROR_LSX_FPU64 %s
++// RUN: not %clang --target=loongarch64 %s -fsyntax-only -mlsx -msoft-float 2>&1 \
++// RUN:   FileCheck --check-prefix=ERROR_LSX_FPU64 %s
++// RUN: not %clang --target=loongarch64 %s -fsyntax-only -mlsx -mfpu=32 2>&1 \
++// RUN:   FileCheck --check-prefix=ERROR_LSX_FPU64 %s
++// RUN: not %clang --target=loongarch64 %s -fsyntax-only -mlsx -mfpu=0 2>&1 \
++// RUN:   FileCheck --check-prefix=ERROR_LSX_FPU64 %s
++// RUN: not %clang --target=loongarch64 %s -fsyntax-only -mlsx -mfpu=none 2>&1 \
++// RUN:   FileCheck --check-prefix=ERROR_LSX_FPU64 %s
++
++// ERROR_LSX_FPU64: error: wrong fpu width; LSX depends on 64-bit FPU.
+diff --git a/clang/test/Driver/loongarch-mlsx.c b/clang/test/Driver/loongarch-mlsx.c
+new file mode 100644
+index 000000000000..7d4307b078e1
+--- /dev/null
++++ b/clang/test/Driver/loongarch-mlsx.c
+@@ -0,0 +1,41 @@
++/// Test -m[no-]lsx options.
++
++// RUN: %clang --target=loongarch64 -mlsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   FileCheck %s --check-prefix=CC1-LSX
++// RUN: %clang --target=loongarch64 -mno-lsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   FileCheck %s --check-prefix=CC1-NOLSX
++// RUN: %clang --target=loongarch64 -mlsx -mno-lsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   FileCheck %s --check-prefix=CC1-NOLSX
++// RUN: %clang --target=loongarch64 -mno-lsx -mlsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   FileCheck %s --check-prefix=CC1-LSX
++// RUN: %clang --target=loongarch64 -mlsx -mno-lasx -fsyntax-only %s -### 2>&1 | \
++// RUN:   FileCheck %s --check-prefix=CC1-LSX
++// RUN: %clang --target=loongarch64 -mno-lasx -mlsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   FileCheck %s --check-prefix=CC1-LSX
++// RUN: %clang --target=loongarch64 -mno-lsx -mno-lasx -fsyntax-only %s -### 2>&1 | \
++// RUN:   FileCheck %s --check-prefix=CC1-NOLSX
++
++// RUN: %clang --target=loongarch64 -mlsx -S -emit-llvm %s -o - | \
++// RUN:   FileCheck %s --check-prefix=IR-LSX
++// RUN: %clang --target=loongarch64 -mno-lsx -S -emit-llvm %s -o - | \
++// RUN:   FileCheck %s --check-prefix=IR-NOLSX
++// RUN: %clang --target=loongarch64 -mlsx -mno-lsx -S -emit-llvm %s -o - | \
++// RUN:   FileCheck %s --check-prefix=IR-NOLSX
++// RUN: %clang --target=loongarch64 -mno-lsx -mlsx -S -emit-llvm %s -o - | \
++// RUN:   FileCheck %s --check-prefix=IR-LSX
++// RUN: %clang --target=loongarch64 -mlsx -mno-lasx -S -emit-llvm %s -o - | \
++// RUN:   FileCheck %s --check-prefix=IR-LSX
++// RUN: %clang --target=loongarch64 -mno-lasx -mlsx -S -emit-llvm %s -o - | \
++// RUN:   FileCheck %s --check-prefix=IR-LSX
++// RUN: %clang --target=loongarch64 -mno-lsx -mno-lasx -S -emit-llvm %s -o - | \
++// RUN:   FileCheck %s --check-prefix=IR-NOLSX
++
++// CC1-LSX: "-target-feature" "+lsx"
++// CC1-NOLSX: "-target-feature" "-lsx"
++
++// IR-LSX: attributes #[[#]] ={{.*}}"target-features"="{{(.*,)?}}+lsx{{(,.*)?}}"
++// IR-NOLSX: attributes #[[#]] ={{.*}}"target-features"="{{(.*,)?}}-lsx{{(,.*)?}}"
++
++int foo(void){
++  return 3;
++}
+diff --git a/clang/test/Preprocessor/init-loongarch.c b/clang/test/Preprocessor/init-loongarch.c
+index 4ef42a921ec0..e235a7283021 100644
+--- a/clang/test/Preprocessor/init-loongarch.c
++++ b/clang/test/Preprocessor/init-loongarch.c
+@@ -807,3 +807,38 @@
+ 
+ // ARCH-TUNE: #define __loongarch_arch "[[ARCH]]"
+ // ARCH-TUNE: #define __loongarch_tune "[[TUNE]]"
++
++// RUN: %clang --target=loongarch64 -mlsx -x c -E -dM %s -o - \
++// RUN:   | FileCheck --match-full-lines --check-prefix=MLSX %s
++// RUN: %clang --target=loongarch64 -mno-lsx -mlsx -x c -E -dM %s -o - \
++// RUN:   | FileCheck --match-full-lines --check-prefix=MLSX %s
++// RUN: %clang --target=loongarch64 -mlsx -mno-lasx -x c -E -dM %s -o - \
++// RUN:   | FileCheck --match-full-lines --check-prefix=MLSX %s
++// RUN: %clang --target=loongarch64 -mno-lasx -mlsx -x c -E -dM %s -o - \
++// RUN:   | FileCheck --match-full-lines --check-prefix=MLSX %s
++// MLSX-NOT: #define __loongarch_asx
++// MLSX: #define __loongarch_sx 1
++
++// RUN: %clang --target=loongarch64 -mlasx -x c -E -dM %s -o - \
++// RUN:   | FileCheck --match-full-lines --check-prefix=MLASX %s
++// RUN: %clang --target=loongarch64 -mno-lasx -mlasx -x c -E -dM %s -o - \
++// RUN:   | FileCheck --match-full-lines --check-prefix=MLASX %s
++// RUN: %clang --target=loongarch64 -mlsx -mlasx -x c -E -dM %s -o - \
++// RUN:   | FileCheck --match-full-lines --check-prefix=MLASX %s
++// RUN: %clang --target=loongarch64 -mlasx -mlsx -x c -E -dM %s -o - \
++// RUN:   | FileCheck --match-full-lines --check-prefix=MLASX %s
++// MLASX: #define __loongarch_asx 1
++// MLASX: #define __loongarch_sx 1
++
++// RUN: %clang --target=loongarch64 -mno-lsx -x c -E -dM %s -o - \
++// RUN:   | FileCheck --match-full-lines --check-prefix=MNO-LSX %s
++// RUN: %clang --target=loongarch64 -mlsx -mno-lsx -x c -E -dM %s -o - \
++// RUN:   | FileCheck --match-full-lines --check-prefix=MNO-LSX %s
++// RUN: %clang --target=loongarch64 -mno-lsx -mno-lasx -x c -E -dM %s -o - \
++// RUN:   | FileCheck --match-full-lines --check-prefix=MNO-LSX %s
++// RUN: %clang --target=loongarch64 -mno-lasx -mno-lsx -x c -E -dM %s -o - \
++// RUN:   | FileCheck --match-full-lines --check-prefix=MNO-LSX %s
++// RUN: %clang --target=loongarch64 -mno-lasx -x c -E -dM %s -o - \
++// RUN:   | FileCheck --match-full-lines --check-prefix=MNO-LSX %s
++// MNO-LSX-NOT: #define __loongarch_asx
++// MNO-LSX-NOT: #define __loongarch_sx
+-- 
+2.20.1
+
