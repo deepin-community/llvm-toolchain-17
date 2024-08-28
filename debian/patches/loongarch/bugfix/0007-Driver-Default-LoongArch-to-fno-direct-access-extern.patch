@@ -1,0 +1,65 @@
+From 896bdd6b1b7bbfc0b157ad1aeee724973b58bb62 Mon Sep 17 00:00:00 2001
+From: Fangrui Song <i@maskray.me>
+Date: Tue, 14 Nov 2023 00:43:40 -0800
+Subject: [PATCH 07/20] [Driver] Default LoongArch to
+ -fno-direct-access-external-data for non-PIC (#72221)
+
+For -fno-pic, if an extern variable is defined in a DSO, a copy
+relocation will be needed. However, loongarch*-linux does not and will
+not support copy relocations.
+
+Change Driver to default to -fno-direct-access-external-data for
+LoongArch && non-PIC.
+Keep Frontend conditions unchanged (-fdirect-access-external-data ||
+-fno-direct-access-external-data && PIC>0 => direct access).
+
+Fix #71645
+
+(cherry picked from commit 47eeee297775347cbdb7624d6a766c2a3eec4a59)
+Change-Id: I9be865d2a200fcaf6e1aca6e784d85410f7f56ab
+---
+ clang/lib/Driver/ToolChains/Clang.cpp            | 7 ++++++-
+ clang/test/Driver/fdirect-access-external-data.c | 6 ++++++
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/clang/lib/Driver/ToolChains/Clang.cpp b/clang/lib/Driver/ToolChains/Clang.cpp
+index 37a07b8f224d..777e21af98df 100644
+--- a/clang/lib/Driver/ToolChains/Clang.cpp
++++ b/clang/lib/Driver/ToolChains/Clang.cpp
+@@ -5595,10 +5595,15 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
+   // defaults to -fno-direct-access-external-data. Pass the option if different
+   // from the default.
+   if (Arg *A = Args.getLastArg(options::OPT_fdirect_access_external_data,
+-                               options::OPT_fno_direct_access_external_data))
++                               options::OPT_fno_direct_access_external_data)) {
+     if (A->getOption().matches(options::OPT_fdirect_access_external_data) !=
+         (PICLevel == 0))
+       A->render(Args, CmdArgs);
++  } else if (PICLevel == 0 && Triple.isLoongArch()) {
++    // Some targets default to -fno-direct-access-external-data even for
++    // -fno-pic.
++    CmdArgs.push_back("-fno-direct-access-external-data");
++  }
+ 
+   if (Args.hasFlag(options::OPT_fno_plt, options::OPT_fplt, false)) {
+     CmdArgs.push_back("-fno-plt");
+diff --git a/clang/test/Driver/fdirect-access-external-data.c b/clang/test/Driver/fdirect-access-external-data.c
+index f132b1b088af..a6da776e6977 100644
+--- a/clang/test/Driver/fdirect-access-external-data.c
++++ b/clang/test/Driver/fdirect-access-external-data.c
+@@ -9,6 +9,12 @@
+ // RUN: %clang -### -c -target aarch64 %s -fpic 2>&1 | FileCheck %s --check-prefix=DEFAULT
+ // RUN: %clang -### -c -target aarch64 %s -fpic -fdirect-access-external-data 2>&1 | FileCheck %s --check-prefix=DIRECT
+ 
++/// loongarch* targets default to -fno-direct-access-external-data even for -fno-pic.
++// RUN: %clang -### -c --target=loongarch64 -fno-pic %s 2>&1 | FileCheck %s --check-prefix=INDIRECT
++// RUN: %clang -### -c --target=loongarch64 -fpie %s 2>&1 | FileCheck %s --check-prefix=DEFAULT
++// RUN: %clang -### -c --target=loongarch32 -fno-pic -fdirect-access-external-data %s 2>&1 | FileCheck %s --check-prefix=DEFAULT
++// RUN: %clang -### -c --target=loongarch32 -fpie -fdirect-access-external-data %s 2>&1 | FileCheck %s --check-prefix=DIRECT
++
+ // DEFAULT-NOT: direct-access-external-data"
+ // DIRECT:      "-fdirect-access-external-data"
+ // INDIRECT:    "-fno-direct-access-external-data"
+-- 
+2.20.1
+

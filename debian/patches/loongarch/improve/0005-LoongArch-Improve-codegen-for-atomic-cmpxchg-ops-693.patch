@@ -1,0 +1,205 @@
+From 0604fa00628899bf420fe2d0621b3fffbe52547c Mon Sep 17 00:00:00 2001
+From: Lu Weining <90239436+SixWeining@users.noreply.github.com>
+Date: Thu, 19 Oct 2023 09:21:51 +0800
+Subject: [PATCH 5/7] [LoongArch] Improve codegen for atomic cmpxchg ops
+ (#69339)
+
+PR #67391 improved atomic codegen by handling memory ordering specified
+by the `cmpxchg` instruction. An acquire barrier needs to be generated
+when memory ordering includes an acquire operation. This PR improves the
+codegen further by only handling the failure ordering.
+
+(cherry picked from commit 78abc45c44cdadf76b30e1f3dc24936bb5627d68)
+
+Change-Id: I00391ad1aaf5c64ae95cc0f4f84a0b480a2fb5b3
+---
+ .../LoongArchExpandAtomicPseudoInsts.cpp      |  4 +-
+ .../LoongArch/LoongArchISelLowering.cpp       |  7 ++-
+ .../Target/LoongArch/LoongArchInstrInfo.td    | 55 ++++++++++++++++---
+ .../ir-instruction/atomic-cmpxchg.ll          |  8 +--
+ 4 files changed, 56 insertions(+), 18 deletions(-)
+
+diff --git a/llvm/lib/Target/LoongArch/LoongArchExpandAtomicPseudoInsts.cpp b/llvm/lib/Target/LoongArch/LoongArchExpandAtomicPseudoInsts.cpp
+index b348cb56c136..18a532b55ee5 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchExpandAtomicPseudoInsts.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchExpandAtomicPseudoInsts.cpp
+@@ -571,11 +571,11 @@ bool LoongArchExpandAtomicPseudo::expandAtomicCmpXchg(
+     BuildMI(LoopTailMBB, DL, TII->get(LoongArch::B)).addMBB(DoneMBB);
+   }
+ 
+-  AtomicOrdering Ordering =
++  AtomicOrdering FailureOrdering =
+       static_cast<AtomicOrdering>(MI.getOperand(IsMasked ? 6 : 5).getImm());
+   int hint;
+ 
+-  switch (Ordering) {
++  switch (FailureOrdering) {
+   case AtomicOrdering::Acquire:
+   case AtomicOrdering::AcquireRelease:
+   case AtomicOrdering::SequentiallyConsistent:
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+index 33a3197013cc..99328f09921f 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+@@ -4492,8 +4492,9 @@ LoongArchTargetLowering::shouldExpandAtomicCmpXchgInIR(
+ Value *LoongArchTargetLowering::emitMaskedAtomicCmpXchgIntrinsic(
+     IRBuilderBase &Builder, AtomicCmpXchgInst *CI, Value *AlignedAddr,
+     Value *CmpVal, Value *NewVal, Value *Mask, AtomicOrdering Ord) const {
+-  Value *Ordering =
+-      Builder.getIntN(Subtarget.getGRLen(), static_cast<uint64_t>(Ord));
++  AtomicOrdering FailOrd = CI->getFailureOrdering();
++  Value *FailureOrdering =
++      Builder.getIntN(Subtarget.getGRLen(), static_cast<uint64_t>(FailOrd));
+ 
+   // TODO: Support cmpxchg on LA32.
+   Intrinsic::ID CmpXchgIntrID = Intrinsic::loongarch_masked_cmpxchg_i64;
+@@ -4504,7 +4505,7 @@ Value *LoongArchTargetLowering::emitMaskedAtomicCmpXchgIntrinsic(
+   Function *MaskedCmpXchg =
+       Intrinsic::getDeclaration(CI->getModule(), CmpXchgIntrID, Tys);
+   Value *Result = Builder.CreateCall(
+-      MaskedCmpXchg, {AlignedAddr, CmpVal, NewVal, Mask, Ordering});
++      MaskedCmpXchg, {AlignedAddr, CmpVal, NewVal, Mask, FailureOrdering});
+   Result = Builder.CreateTrunc(Result, Builder.getInt32Ty());
+   return Result;
+ }
+diff --git a/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
+index fcbd314507a5..ab1890556814 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
+@@ -1753,7 +1753,7 @@ def PseudoMaskedAtomicLoadMin32 : PseudoMaskedAMMinMax;
+ 
+ class PseudoCmpXchg
+     : Pseudo<(outs GPR:$res, GPR:$scratch),
+-             (ins GPR:$addr, GPR:$cmpval, GPR:$newval, grlenimm:$ordering)> {
++             (ins GPR:$addr, GPR:$cmpval, GPR:$newval, grlenimm:$fail_order)> {
+   let Constraints = "@earlyclobber $res,@earlyclobber $scratch";
+   let mayLoad = 1;
+   let mayStore = 1;
+@@ -1767,7 +1767,7 @@ def PseudoCmpXchg64 : PseudoCmpXchg;
+ def PseudoMaskedCmpXchg32
+     : Pseudo<(outs GPR:$res, GPR:$scratch),
+              (ins GPR:$addr, GPR:$cmpval, GPR:$newval, GPR:$mask,
+-              grlenimm:$ordering)> {
++              grlenimm:$fail_order)> {
+   let Constraints = "@earlyclobber $res,@earlyclobber $scratch";
+   let mayLoad = 1;
+   let mayStore = 1;
+@@ -1785,6 +1785,43 @@ class AtomicPat<Intrinsic intrin, Pseudo AMInst>
+     : Pat<(intrin GPR:$addr, GPR:$incr, GPR:$mask, timm:$ordering),
+           (AMInst GPR:$addr, GPR:$incr, GPR:$mask, timm:$ordering)>;
+ 
++// These atomic cmpxchg PatFrags only care about the failure ordering.
++// The PatFrags defined by multiclass `ternary_atomic_op_ord` in
++// TargetSelectionDAG.td care about the merged memory ordering that is the
++// stronger one between success and failure. But for LoongArch LL-SC we only
++// need to care about the failure ordering as explained in PR #67391. So we
++// define these PatFrags that will be used to define cmpxchg pats below.
++multiclass ternary_atomic_op_failure_ord {
++  def NAME#_failure_monotonic : PatFrag<(ops node:$ptr, node:$cmp, node:$val),
++      (!cast<SDPatternOperator>(NAME) node:$ptr, node:$cmp, node:$val), [{
++    AtomicOrdering Ordering = cast<AtomicSDNode>(N)->getFailureOrdering();
++    return Ordering == AtomicOrdering::Monotonic;
++  }]>;
++  def NAME#_failure_acquire : PatFrag<(ops node:$ptr, node:$cmp, node:$val),
++      (!cast<SDPatternOperator>(NAME) node:$ptr, node:$cmp, node:$val), [{
++    AtomicOrdering Ordering = cast<AtomicSDNode>(N)->getFailureOrdering();
++    return Ordering == AtomicOrdering::Acquire;
++  }]>;
++  def NAME#_failure_release : PatFrag<(ops node:$ptr, node:$cmp, node:$val),
++      (!cast<SDPatternOperator>(NAME) node:$ptr, node:$cmp, node:$val), [{
++    AtomicOrdering Ordering = cast<AtomicSDNode>(N)->getFailureOrdering();
++    return Ordering == AtomicOrdering::Release;
++  }]>;
++  def NAME#_failure_acq_rel : PatFrag<(ops node:$ptr, node:$cmp, node:$val),
++      (!cast<SDPatternOperator>(NAME) node:$ptr, node:$cmp, node:$val), [{
++    AtomicOrdering Ordering = cast<AtomicSDNode>(N)->getFailureOrdering();
++    return Ordering == AtomicOrdering::AcquireRelease;
++  }]>;
++  def NAME#_failure_seq_cst : PatFrag<(ops node:$ptr, node:$cmp, node:$val),
++      (!cast<SDPatternOperator>(NAME) node:$ptr, node:$cmp, node:$val), [{
++    AtomicOrdering Ordering = cast<AtomicSDNode>(N)->getFailureOrdering();
++    return Ordering == AtomicOrdering::SequentiallyConsistent;
++  }]>;
++}
++
++defm atomic_cmp_swap_32 : ternary_atomic_op_failure_ord;
++defm atomic_cmp_swap_64 : ternary_atomic_op_failure_ord;
++
+ let Predicates = [IsLA64] in {
+ def : AtomicPat<int_loongarch_masked_atomicrmw_xchg_i64,
+                 PseudoMaskedAtomicSwap32>;
+@@ -1847,24 +1884,24 @@ def : AtomicPat<int_loongarch_masked_atomicrmw_umin_i64,
+ // AtomicOrdering.h.
+ multiclass PseudoCmpXchgPat<string Op, Pseudo CmpXchgInst,
+                             ValueType vt = GRLenVT> {
+-  def : Pat<(vt (!cast<PatFrag>(Op#"_monotonic") GPR:$addr, GPR:$cmp, GPR:$new)),
++  def : Pat<(vt (!cast<PatFrag>(Op#"_failure_monotonic") GPR:$addr, GPR:$cmp, GPR:$new)),
+             (CmpXchgInst GPR:$addr, GPR:$cmp, GPR:$new, 2)>;
+-  def : Pat<(vt (!cast<PatFrag>(Op#"_acquire") GPR:$addr, GPR:$cmp, GPR:$new)),
++  def : Pat<(vt (!cast<PatFrag>(Op#"_failure_acquire") GPR:$addr, GPR:$cmp, GPR:$new)),
+             (CmpXchgInst GPR:$addr, GPR:$cmp, GPR:$new, 4)>;
+-  def : Pat<(vt (!cast<PatFrag>(Op#"_release") GPR:$addr, GPR:$cmp, GPR:$new)),
++  def : Pat<(vt (!cast<PatFrag>(Op#"_failure_release") GPR:$addr, GPR:$cmp, GPR:$new)),
+             (CmpXchgInst GPR:$addr, GPR:$cmp, GPR:$new, 5)>;
+-  def : Pat<(vt (!cast<PatFrag>(Op#"_acq_rel") GPR:$addr, GPR:$cmp, GPR:$new)),
++  def : Pat<(vt (!cast<PatFrag>(Op#"_failure_acq_rel") GPR:$addr, GPR:$cmp, GPR:$new)),
+             (CmpXchgInst GPR:$addr, GPR:$cmp, GPR:$new, 6)>;
+-  def : Pat<(vt (!cast<PatFrag>(Op#"_seq_cst") GPR:$addr, GPR:$cmp, GPR:$new)),
++  def : Pat<(vt (!cast<PatFrag>(Op#"_failure_seq_cst") GPR:$addr, GPR:$cmp, GPR:$new)),
+             (CmpXchgInst GPR:$addr, GPR:$cmp, GPR:$new, 7)>;
+ }
+ 
+ defm : PseudoCmpXchgPat<"atomic_cmp_swap_32", PseudoCmpXchg32>;
+ defm : PseudoCmpXchgPat<"atomic_cmp_swap_64", PseudoCmpXchg64, i64>;
+ def : Pat<(int_loongarch_masked_cmpxchg_i64
+-            GPR:$addr, GPR:$cmpval, GPR:$newval, GPR:$mask, timm:$ordering),
++            GPR:$addr, GPR:$cmpval, GPR:$newval, GPR:$mask, timm:$fail_order),
+           (PseudoMaskedCmpXchg32
+-            GPR:$addr, GPR:$cmpval, GPR:$newval, GPR:$mask, timm:$ordering)>;
++            GPR:$addr, GPR:$cmpval, GPR:$newval, GPR:$mask, timm:$fail_order)>;
+ 
+ def : PseudoMaskedAMMinMaxPat<int_loongarch_masked_atomicrmw_max_i64,
+                               PseudoMaskedAtomicLoadMax32>;
+diff --git a/llvm/test/CodeGen/LoongArch/ir-instruction/atomic-cmpxchg.ll b/llvm/test/CodeGen/LoongArch/ir-instruction/atomic-cmpxchg.ll
+index 174bb9d0ff7d..1dd3f39852d8 100644
+--- a/llvm/test/CodeGen/LoongArch/ir-instruction/atomic-cmpxchg.ll
++++ b/llvm/test/CodeGen/LoongArch/ir-instruction/atomic-cmpxchg.ll
+@@ -132,7 +132,7 @@ define void @cmpxchg_i8_acquire_monotonic(ptr %ptr, i8 %cmp, i8 %val) nounwind {
+ ; LA64-NEXT:    beqz $a5, .LBB4_1
+ ; LA64-NEXT:    b .LBB4_4
+ ; LA64-NEXT:  .LBB4_3:
+-; LA64-NEXT:    dbar 20
++; LA64-NEXT:    dbar 1792
+ ; LA64-NEXT:  .LBB4_4:
+ ; LA64-NEXT:    ret
+   %res = cmpxchg ptr %ptr, i8 %cmp, i8 %val acquire monotonic
+@@ -166,7 +166,7 @@ define void @cmpxchg_i16_acquire_monotonic(ptr %ptr, i16 %cmp, i16 %val) nounwin
+ ; LA64-NEXT:    beqz $a5, .LBB5_1
+ ; LA64-NEXT:    b .LBB5_4
+ ; LA64-NEXT:  .LBB5_3:
+-; LA64-NEXT:    dbar 20
++; LA64-NEXT:    dbar 1792
+ ; LA64-NEXT:  .LBB5_4:
+ ; LA64-NEXT:    ret
+   %res = cmpxchg ptr %ptr, i16 %cmp, i16 %val acquire monotonic
+@@ -185,7 +185,7 @@ define void @cmpxchg_i32_acquire_monotonic(ptr %ptr, i32 %cmp, i32 %val) nounwin
+ ; LA64-NEXT:    beqz $a4, .LBB6_1
+ ; LA64-NEXT:    b .LBB6_4
+ ; LA64-NEXT:  .LBB6_3:
+-; LA64-NEXT:    dbar 20
++; LA64-NEXT:    dbar 1792
+ ; LA64-NEXT:  .LBB6_4:
+ ; LA64-NEXT:    ret
+   %res = cmpxchg ptr %ptr, i32 %cmp, i32 %val acquire monotonic
+@@ -204,7 +204,7 @@ define void @cmpxchg_i64_acquire_monotonic(ptr %ptr, i64 %cmp, i64 %val) nounwin
+ ; LA64-NEXT:    beqz $a4, .LBB7_1
+ ; LA64-NEXT:    b .LBB7_4
+ ; LA64-NEXT:  .LBB7_3:
+-; LA64-NEXT:    dbar 20
++; LA64-NEXT:    dbar 1792
+ ; LA64-NEXT:  .LBB7_4:
+ ; LA64-NEXT:    ret
+   %res = cmpxchg ptr %ptr, i64 %cmp, i64 %val acquire monotonic
+-- 
+2.20.1
+

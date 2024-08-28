@@ -1,0 +1,62 @@
+From 2f22695f7be1f9c5b2a09901efd5a2268ef22c87 Mon Sep 17 00:00:00 2001
+From: Nathan Chancellor <nathan@kernel.org>
+Date: Fri, 8 Sep 2023 10:54:35 -0700
+Subject: [PATCH 01/20] [Clang][LoongArch] Generate _mcount instead of mcount
+ (#65657)
+
+When building the LoongArch Linux kernel without
+`CONFIG_DYNAMIC_FTRACE`, the build fails to link because the mcount
+symbol is `mcount`, not `_mcount` like GCC generates and the kernel
+expects:
+
+```
+ld.lld: error: undefined symbol: mcount
+>>> referenced by version.c
+>>>               init/version.o:(early_hostname) in archive vmlinux.a
+>>> referenced by do_mounts.c
+>>>               init/do_mounts.o:(rootfs_init_fs_context) in archive vmlinux.a
+>>> referenced by main.c
+>>>               init/main.o:(__traceiter_initcall_level) in archive vmlinux.a
+>>> referenced 97011 more times
+>>> did you mean: _mcount
+>>> defined in: vmlinux.a(arch/loongarch/kernel/mcount.o)
+```
+
+Set `MCountName` in `LoongArchTargetInfo` to `_mcount`, which resolves
+the build failure.
+
+(cherry picked from commit cc2b09bee017147527e7bd1eb5272f4f70a7b900)
+Change-Id: I7d8b9b50c22471688b577ca434f8654cdfd0d1da
+---
+ clang/lib/Basic/Targets/LoongArch.h | 1 +
+ clang/test/CodeGen/mcount.c         | 2 ++
+ 2 files changed, 3 insertions(+)
+
+diff --git a/clang/lib/Basic/Targets/LoongArch.h b/clang/lib/Basic/Targets/LoongArch.h
+index 8f4150b2539d..3313102492cb 100644
+--- a/clang/lib/Basic/Targets/LoongArch.h
++++ b/clang/lib/Basic/Targets/LoongArch.h
+@@ -40,6 +40,7 @@ public:
+     LongDoubleWidth = 128;
+     LongDoubleAlign = 128;
+     LongDoubleFormat = &llvm::APFloat::IEEEquad();
++    MCountName = "_mcount";
+     SuitableAlign = 128;
+     WCharType = SignedInt;
+     WIntType = UnsignedInt;
+diff --git a/clang/test/CodeGen/mcount.c b/clang/test/CodeGen/mcount.c
+index 8f994ab4e754..bdd609c1dfc5 100644
+--- a/clang/test/CodeGen/mcount.c
++++ b/clang/test/CodeGen/mcount.c
+@@ -7,6 +7,8 @@
+ // RUN: %clang_cc1 -pg -triple x86_64-netbsd -emit-llvm -o - %s | FileCheck -check-prefixes=CHECK-DOUBLE-PREFIXED,NO-MCOUNT1 %s
+ // RUN: %clang_cc1 -pg -triple arm-netbsd-eabi -emit-llvm -o - %s | FileCheck -check-prefixes=CHECK-DOUBLE-PREFIXED,NO-MCOUNT1 %s
+ // RUN: %clang_cc1 -pg -triple aarch64-netbsd -emit-llvm -o - %s | FileCheck -check-prefixes=CHECK-DOUBLE-PREFIXED,NO-MCOUNT1 %s
++// RUN: %clang_cc1 -pg -triple loongarch32 -emit-llvm -o - %s | FileCheck -check-prefixes=CHECK-PREFIXED,NO-MCOUNT1 %s
++// RUN: %clang_cc1 -pg -triple loongarch64 -emit-llvm -o - %s | FileCheck -check-prefixes=CHECK-PREFIXED,NO-MCOUNT1 %s
+ // RUN: %clang_cc1 -pg -triple mips-netbsd -emit-llvm -o - %s | FileCheck -check-prefixes=CHECK-DOUBLE-PREFIXED,NO-MCOUNT1 %s
+ // RUN: %clang_cc1 -pg -triple mips-unknown-gnu-linux -emit-llvm -o - %s | FileCheck -check-prefixes=CHECK-PREFIXED,NO-MCOUNT1 %s
+ // RUN: %clang_cc1 -pg -triple mipsel-unknown-gnu-linux -emit-llvm -o - %s | FileCheck -check-prefixes=CHECK-PREFIXED,NO-MCOUNT1 %s
+-- 
+2.20.1
+

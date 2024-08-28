@@ -1,0 +1,31 @@
+From 43d78731b1d4c7419d82b6fab2ae479652cd2b58 Mon Sep 17 00:00:00 2001
+From: Weining Lu <luweining@loongson.cn>
+Date: Wed, 3 Jan 2024 13:59:12 +0800
+Subject: [PATCH 17/20] [LoongArch] Fix the procossor series mask
+
+Refer PRID_SERIES_MASK definition in linux kernel:
+arch/loongarch/include/asm/cpu.h.
+
+(cherry picked from commit 7e186d366d6c7def0543acc255931f617e76dff0)
+Change-Id: I32a641e85329b0dec7d538af6471f4c40775e0a5
+---
+ llvm/lib/TargetParser/Host.cpp | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/llvm/lib/TargetParser/Host.cpp b/llvm/lib/TargetParser/Host.cpp
+index 81309280a44b..d11dc605e188 100644
+--- a/llvm/lib/TargetParser/Host.cpp
++++ b/llvm/lib/TargetParser/Host.cpp
+@@ -1462,7 +1462,8 @@ StringRef sys::getHostCPUName() {
+   // Use processor id to detect cpu name.
+   uint32_t processor_id;
+   __asm__("cpucfg %[prid], $zero\n\t" : [prid] "=r"(processor_id));
+-  switch (processor_id & 0xff00) {
++  // Refer PRID_SERIES_MASK in linux kernel: arch/loongarch/include/asm/cpu.h.
++  switch (processor_id & 0xf000) {
+   case 0xc000: // Loongson 64bit, 4-issue
+     return "la464";
+   // TODO: Others.
+-- 
+2.20.1
+

@@ -1,0 +1,154 @@
+From 857dc000141b237da73a43d59e22672750501559 Mon Sep 17 00:00:00 2001
+From: zhanglimin <zhanglimin@loongson.cn>
+Date: Tue, 12 Sep 2023 09:51:16 +0800
+Subject: [PATCH 1/7] [sanitizer][msan] VarArgHelper for loongarch64
+
+This patch adds support for variadic argument for loongarch64,
+which is based on MIPS64. And `check-msan` all pass.
+
+Reviewed By: vitalybuka
+
+Differential Revision: https://reviews.llvm.org/D158587
+
+(cherry picked from commit ec42c78cc43ac1e8364e5a0941aa5fc91b813dd3)
+Change-Id: I8dbd46aa86ddc847538bc70fc556424dc9a8e23b
+---
+ compiler-rt/test/msan/signal_stress_test.cpp  |  3 -
+ .../Instrumentation/MemorySanitizer.cpp       |  7 ++
+ .../LoongArch/vararg-loongarch64.ll           | 78 +++++++++++++++++++
+ 3 files changed, 85 insertions(+), 3 deletions(-)
+ create mode 100644 llvm/test/Instrumentation/MemorySanitizer/LoongArch/vararg-loongarch64.ll
+
+diff --git a/compiler-rt/test/msan/signal_stress_test.cpp b/compiler-rt/test/msan/signal_stress_test.cpp
+index aade0f1f4051..043393fce6de 100644
+--- a/compiler-rt/test/msan/signal_stress_test.cpp
++++ b/compiler-rt/test/msan/signal_stress_test.cpp
+@@ -5,9 +5,6 @@
+ // Reported deadly signal due to stack-overflow
+ // XFAIL: target={{.*netbsd.*}}
+ 
+-// VarArg implementation on LoongArch isn't supported yet.
+-// UNSUPPORTED: target=loongarch{{.*}}
+-
+ #include <signal.h>
+ #include <stdarg.h>
+ #include <sanitizer/msan_interface.h>
+diff --git a/llvm/lib/Transforms/Instrumentation/MemorySanitizer.cpp b/llvm/lib/Transforms/Instrumentation/MemorySanitizer.cpp
+index 83d90049abc3..362fd6e4151f 100644
+--- a/llvm/lib/Transforms/Instrumentation/MemorySanitizer.cpp
++++ b/llvm/lib/Transforms/Instrumentation/MemorySanitizer.cpp
+@@ -4945,6 +4945,7 @@ struct VarArgAMD64Helper : public VarArgHelper {
+ };
+ 
+ /// MIPS64-specific implementation of VarArgHelper.
++/// NOTE: This is also used for LoongArch64.
+ struct VarArgMIPS64Helper : public VarArgHelper {
+   Function &F;
+   MemorySanitizer &MS;
+@@ -5836,6 +5837,10 @@ struct VarArgSystemZHelper : public VarArgHelper {
+   }
+ };
+ 
++// Loongarch64 is not a MIPS, but the current vargs calling convention matches
++// the MIPS.
++using VarArgLoongArch64Helper = VarArgMIPS64Helper;
++
+ /// A no-op implementation of VarArgHelper.
+ struct VarArgNoOpHelper : public VarArgHelper {
+   VarArgNoOpHelper(Function &F, MemorySanitizer &MS,
+@@ -5868,6 +5873,8 @@ static VarArgHelper *CreateVarArgHelper(Function &Func, MemorySanitizer &Msan,
+     return new VarArgPowerPC64Helper(Func, Msan, Visitor);
+   else if (TargetTriple.getArch() == Triple::systemz)
+     return new VarArgSystemZHelper(Func, Msan, Visitor);
++  else if (TargetTriple.isLoongArch64())
++    return new VarArgLoongArch64Helper(Func, Msan, Visitor);
+   else
+     return new VarArgNoOpHelper(Func, Msan, Visitor);
+ }
+diff --git a/llvm/test/Instrumentation/MemorySanitizer/LoongArch/vararg-loongarch64.ll b/llvm/test/Instrumentation/MemorySanitizer/LoongArch/vararg-loongarch64.ll
+new file mode 100644
+index 000000000000..8a4ab59588ad
+--- /dev/null
++++ b/llvm/test/Instrumentation/MemorySanitizer/LoongArch/vararg-loongarch64.ll
+@@ -0,0 +1,78 @@
++; RUN: opt < %s -S -passes=msan 2>&1 | FileCheck %s
++
++target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n64-S128"
++target triple = "loongarch64-unknown-linux-gnu"
++
++;; First, check allocation of the save area.
++declare void @llvm.lifetime.start.p0(i64, ptr nocapture) #1
++declare void @llvm.va_start(ptr) #2
++declare void @llvm.va_end(ptr) #2
++declare void @llvm.lifetime.end.p0(i64, ptr nocapture) #1
++define i32 @foo(i32 %guard, ...) {
++; CHECK-LABEL: @foo
++; CHECK:    [[TMP1:%.*]] = load {{.*}} @__msan_va_arg_overflow_size_tls
++; CHECK:    [[TMP2:%.*]] = add i64 0, [[TMP1]]
++; CHECK:    [[TMP3:%.*]] = alloca {{.*}} [[TMP2]]
++; CHECK:    call void @llvm.memset.p0.i64(ptr align 8 [[TMP3]], i8 0, i64 [[TMP2]], i1 false)
++; CHECK:    [[TMP4:%.*]] = call i64 @llvm.umin.i64(i64 [[TMP2]], i64 800)
++; CHECK:    call void @llvm.memcpy.p0.p0.i64(ptr align 8 [[TMP3]], ptr align 8 @__msan_va_arg_tls, i64 [[TMP4]], i1 false)
++;
++  %vl = alloca ptr, align 8
++  call void @llvm.lifetime.start.p0(i64 32, ptr %vl)
++  call void @llvm.va_start(ptr %vl)
++  call void @llvm.va_end(ptr %vl)
++  call void @llvm.lifetime.end.p0(i64 32, ptr %vl)
++  ret i32 0
++}
++
++;; Save the incoming shadow value from the arguments in the __msan_va_arg_tls
++;; array.
++define i32 @bar() {
++; CHECK-LABEL: @bar
++; CHECK:    store i32 0, ptr @__msan_va_arg_tls, align 8
++; CHECK:    store i64 0, ptr inttoptr (i64 add (i64 ptrtoint (ptr @__msan_va_arg_tls to i64), i64 8) to ptr), align 8
++; CHECK:    store i64 0, ptr inttoptr (i64 add (i64 ptrtoint (ptr @__msan_va_arg_tls to i64), i64 16) to ptr), align 8
++; CHECK:    store {{.*}} 24, {{.*}} @__msan_va_arg_overflow_size_tls
++;
++  %1 = call i32 (i32, ...) @foo(i32 0, i32 1, i64 2, double 3.000000e+00)
++  ret i32 %1
++}
++
++;; Check multiple fixed arguments.
++declare i32 @foo2(i32 %g1, i32 %g2, ...)
++define i32 @bar2() {
++; CHECK-LABEL: @bar2
++; CHECK:    store i64 0, ptr @__msan_va_arg_tls, align 8
++; CHECK:    store i64 0, ptr inttoptr (i64 add (i64 ptrtoint (ptr @__msan_va_arg_tls to i64), i64 8) to ptr), align 8
++; CHECK:    store {{.*}} 16, {{.*}} @__msan_va_arg_overflow_size_tls
++;
++  %1 = call i32 (i32, i32, ...) @foo2(i32 0, i32 1, i64 2, double 3.000000e+00)
++  ret i32 %1
++}
++
++;; Test that MSan doesn't generate code overflowing __msan_va_arg_tls when too many arguments are
++;; passed to a variadic function.
++declare i64 @sum(i64 %n, ...)
++define dso_local i64 @many_args() {
++;; If the size of __msan_va_arg_tls changes the second argument of `add` must also be changed.
++; CHECK-LABEL: @many_args
++; CHECK:    i64 add (i64 ptrtoint (ptr @__msan_va_arg_tls to i64), i64 792)
++; CHECK-NOT: i64 add (i64 ptrtoint (ptr @__msan_va_arg_tls to i64), i64 800)
++;
++entry:
++  %ret = call i64 (i64, ...) @sum(i64 120,
++  i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1,
++  i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1,
++  i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1,
++  i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1,
++  i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1,
++  i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1,
++  i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1,
++  i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1,
++  i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1,
++  i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1,
++  i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1,
++  i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1, i64 1
++  )
++  ret i64 %ret
++}
+-- 
+2.20.1
+

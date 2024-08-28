@@ -1,0 +1,60 @@
+From 758014af0c9b2a54a57a8dc9dfa206be6be4161e Mon Sep 17 00:00:00 2001
+From: wanglei <wanglei@loongson.cn>
+Date: Mon, 11 Mar 2024 08:59:17 +0800
+Subject: [PATCH 18/20] [LoongArch] Make sure that the LoongArchISD::BSTRINS
+ node uses the correct `MSB` value (#84454)
+
+The `MSB` must not be greater than `GRLen`. Without this patch, newly
+added test cases will crash with LoongArch32, resulting in a 'cannot
+select' error.
+
+(cherry picked from commit edd4c6c6dca4c556de22b2ab73d5bfc02d28e59b)
+(cherry picked from commit d77c5c3830d925b3795e2f1535a6568399fe6626)
+Change-Id: Idef25dd69d27324c2a90e3ed4ed0b39073e812b0
+---
+ llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp |  4 +++-
+ llvm/test/CodeGen/LoongArch/bstrins_w.ll            | 13 +++++++++++++
+ 2 files changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+index ed106cb766bc..5affaf37ad5a 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+@@ -2310,7 +2310,9 @@ Retry:
+     return DAG.getNode(
+         LoongArchISD::BSTRINS, DL, ValTy, N0.getOperand(0),
+         DAG.getConstant(CN1->getSExtValue() >> MaskIdx0, DL, ValTy),
+-        DAG.getConstant((MaskIdx0 + MaskLen0 - 1), DL, GRLenVT),
++        DAG.getConstant(ValBits == 32 ? (MaskIdx0 + (MaskLen0 & 31) - 1)
++                                      : (MaskIdx0 + MaskLen0 - 1),
++                        DL, GRLenVT),
+         DAG.getConstant(MaskIdx0, DL, GRLenVT));
+   }
+ 
+diff --git a/llvm/test/CodeGen/LoongArch/bstrins_w.ll b/llvm/test/CodeGen/LoongArch/bstrins_w.ll
+index dfbe000841cd..e008caacad2a 100644
+--- a/llvm/test/CodeGen/LoongArch/bstrins_w.ll
++++ b/llvm/test/CodeGen/LoongArch/bstrins_w.ll
+@@ -145,6 +145,19 @@ define i32 @pat5(i32 %a) nounwind {
+   ret i32 %or
+ }
+ 
++;; The high bits of `const` are zero.
++define i32 @pat5_high_zeros(i32 %a) nounwind {
++; CHECK-LABEL: pat5_high_zeros:
++; CHECK:       # %bb.0:
++; CHECK-NEXT:    lu12i.w $a1, 1
++; CHECK-NEXT:    ori $a1, $a1, 564
++; CHECK-NEXT:    bstrins.w $a0, $a1, 31, 16
++; CHECK-NEXT:    ret
++  %and = and i32 %a, 65535      ; 0x0000ffff
++  %or = or i32 %and, 305397760  ; 0x12340000
++  ret i32 %or
++}
++
+ ;; Pattern 6: a = b | ((c & mask) << shamt)
+ ;; In this testcase b is 0x10000002, but in fact we do not require b being a
+ ;; constant. As long as all positions in b to be overwritten by the incoming
+-- 
+2.20.1
+

@@ -1,0 +1,840 @@
+From 90a416b90dca40241fcf6429bd14b88e40128038 Mon Sep 17 00:00:00 2001
+From: WANG Xuerui <git@xen0n.name>
+Date: Wed, 11 Oct 2023 10:39:13 +0800
+Subject: [PATCH 3/7] [LoongArch] Support finer-grained DBAR hints for LA664+
+ (#68787)
+
+These are treated as DBAR 0 on older uarchs, so we can start to
+unconditionally emit the new hints right away.
+
+Co-authored-by: WANG Rui <wangrui@loongson.cn>
+(cherry picked from commit 956482de13107b640cffedd08610fcccd98f708f)
+
+Change-Id: I98ec3538aba6658b47521917847d1a3632bc1567
+---
+ .../LoongArchExpandAtomicPseudoInsts.cpp      |  4 +-
+ .../LoongArch/LoongArchISelLowering.cpp       | 20 +++++++
+ .../Target/LoongArch/LoongArchISelLowering.h  |  1 +
+ .../Target/LoongArch/LoongArchInstrInfo.td    | 24 +++++++-
+ .../LoongArch/atomicrmw-uinc-udec-wrap.ll     | 16 ++---
+ .../ir-instruction/atomic-cmpxchg.ll          | 24 ++++----
+ .../LoongArch/ir-instruction/atomicrmw-fp.ll  | 48 +++++++--------
+ .../ir-instruction/fence-singlethread.ll      |  4 +-
+ .../CodeGen/LoongArch/ir-instruction/fence.ll | 16 ++---
+ .../ir-instruction/load-store-atomic.ll       | 58 +++++++++----------
+ 10 files changed, 129 insertions(+), 86 deletions(-)
+
+diff --git a/llvm/lib/Target/LoongArch/LoongArchExpandAtomicPseudoInsts.cpp b/llvm/lib/Target/LoongArch/LoongArchExpandAtomicPseudoInsts.cpp
+index eb78ef065b21..b348cb56c136 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchExpandAtomicPseudoInsts.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchExpandAtomicPseudoInsts.cpp
+@@ -579,8 +579,8 @@ bool LoongArchExpandAtomicPseudo::expandAtomicCmpXchg(
+   case AtomicOrdering::Acquire:
+   case AtomicOrdering::AcquireRelease:
+   case AtomicOrdering::SequentiallyConsistent:
+-    // TODO: acquire
+-    hint = 0;
++    // acquire
++    hint = 0b10100;
+     break;
+   default:
+     hint = 0x700;
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+index 5affaf37ad5a..33a3197013cc 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+@@ -159,6 +159,8 @@ LoongArchTargetLowering::LoongArchTargetLowering(const TargetMachine &TM,
+   // The MULO libcall is not part of libgcc, only compiler-rt.
+   setLibcallName(RTLIB::MULO_I128, nullptr);
+ 
++  setOperationAction(ISD::ATOMIC_FENCE, MVT::Other, Custom);
++
+   static const ISD::CondCode FPCCToExpand[] = {
+       ISD::SETOGT, ISD::SETOGE, ISD::SETUGT, ISD::SETUGE,
+       ISD::SETGE,  ISD::SETNE,  ISD::SETGT};
+@@ -366,6 +368,8 @@ bool LoongArchTargetLowering::isOffsetFoldingLegal(
+ SDValue LoongArchTargetLowering::LowerOperation(SDValue Op,
+                                                 SelectionDAG &DAG) const {
+   switch (Op.getOpcode()) {
++  case ISD::ATOMIC_FENCE:
++    return lowerATOMIC_FENCE(Op, DAG);
+   case ISD::EH_DWARF_CFA:
+     return lowerEH_DWARF_CFA(Op, DAG);
+   case ISD::GlobalAddress:
+@@ -542,6 +546,22 @@ LoongArchTargetLowering::lowerINSERT_VECTOR_ELT(SDValue Op,
+   return SDValue();
+ }
+ 
++SDValue LoongArchTargetLowering::lowerATOMIC_FENCE(SDValue Op,
++                                                   SelectionDAG &DAG) const {
++  SDLoc DL(Op);
++  SyncScope::ID FenceSSID =
++      static_cast<SyncScope::ID>(Op.getConstantOperandVal(2));
++
++  // singlethread fences only synchronize with signal handlers on the same
++  // thread and thus only need to preserve instruction order, not actually
++  // enforce memory ordering.
++  if (FenceSSID == SyncScope::SingleThread)
++    // MEMBARRIER is a compiler barrier; it codegens to a no-op.
++    return DAG.getNode(ISD::MEMBARRIER, DL, MVT::Other, Op.getOperand(0));
++
++  return Op;
++}
++
+ SDValue LoongArchTargetLowering::lowerWRITE_REGISTER(SDValue Op,
+                                                      SelectionDAG &DAG) const {
+ 
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelLowering.h b/llvm/lib/Target/LoongArch/LoongArchISelLowering.h
+index 6b5a851ec55d..23b90640a690 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelLowering.h
++++ b/llvm/lib/Target/LoongArch/LoongArchISelLowering.h
+@@ -266,6 +266,7 @@ private:
+   MachineBasicBlock *
+   EmitInstrWithCustomInserter(MachineInstr &MI,
+                               MachineBasicBlock *BB) const override;
++  SDValue lowerATOMIC_FENCE(SDValue Op, SelectionDAG &DAG) const;
+   SDValue lowerConstantPool(SDValue Op, SelectionDAG &DAG) const;
+   SDValue lowerEH_DWARF_CFA(SDValue Op, SelectionDAG &DAG) const;
+   SDValue lowerFP_TO_SINT(SDValue Op, SelectionDAG &DAG) const;
+diff --git a/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
+index a9b0db30c2f6..fcbd314507a5 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
+@@ -1590,7 +1590,29 @@ def : RegRegStPat<store, STX_D, GPR, i64>;
+ 
+ /// Atomic loads and stores
+ 
+-def : Pat<(atomic_fence timm, timm), (DBAR 0)>;
++// DBAR hint encoding for LA664 and later micro-architectures, paraphrased from
++// the Linux patch revealing it [1]:
++//
++// - Bit 4: kind of constraint (0: completion, 1: ordering)
++// - Bit 3: barrier for previous read (0: true, 1: false)
++// - Bit 2: barrier for previous write (0: true, 1: false)
++// - Bit 1: barrier for succeeding read (0: true, 1: false)
++// - Bit 0: barrier for succeeding write (0: true, 1: false)
++//
++// Hint 0x700: barrier for "read after read" from the same address, which is
++// e.g. needed by LL-SC loops on older models. (DBAR 0x700 behaves the same as
++// nop if such reordering is disabled on supporting newer models.)
++//
++// [1]: https://lore.kernel.org/loongarch/20230516124536.535343-1-chenhuacai@loongson.cn/
++//
++// Implementations without support for the finer-granularity hints simply treat
++// all as the full barrier (DBAR 0), so we can unconditionally start emiting the
++// more precise hints right away.
++
++def : Pat<(atomic_fence 4, timm), (DBAR 0b10100)>; // acquire
++def : Pat<(atomic_fence 5, timm), (DBAR 0b10010)>; // release
++def : Pat<(atomic_fence 6, timm), (DBAR 0b10000)>; // acqrel
++def : Pat<(atomic_fence 7, timm), (DBAR 0b10000)>; // seqcst
+ 
+ defm : LdPat<atomic_load_8, LD_B>;
+ defm : LdPat<atomic_load_16, LD_H>;
+diff --git a/llvm/test/CodeGen/LoongArch/atomicrmw-uinc-udec-wrap.ll b/llvm/test/CodeGen/LoongArch/atomicrmw-uinc-udec-wrap.ll
+index 32106886c783..d8908acbc945 100644
+--- a/llvm/test/CodeGen/LoongArch/atomicrmw-uinc-udec-wrap.ll
++++ b/llvm/test/CodeGen/LoongArch/atomicrmw-uinc-udec-wrap.ll
+@@ -40,7 +40,7 @@ define i8 @atomicrmw_uinc_wrap_i8(ptr %ptr, i8 %val) {
+ ; LA64-NEXT:    b .LBB0_6
+ ; LA64-NEXT:  .LBB0_5: # %atomicrmw.start
+ ; LA64-NEXT:    # in Loop: Header=BB0_1 Depth=1
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB0_6: # %atomicrmw.start
+ ; LA64-NEXT:    # in Loop: Header=BB0_1 Depth=1
+ ; LA64-NEXT:    addi.w $a6, $a3, 0
+@@ -93,7 +93,7 @@ define i16 @atomicrmw_uinc_wrap_i16(ptr %ptr, i16 %val) {
+ ; LA64-NEXT:    b .LBB1_6
+ ; LA64-NEXT:  .LBB1_5: # %atomicrmw.start
+ ; LA64-NEXT:    # in Loop: Header=BB1_1 Depth=1
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB1_6: # %atomicrmw.start
+ ; LA64-NEXT:    # in Loop: Header=BB1_1 Depth=1
+ ; LA64-NEXT:    addi.w $a6, $a3, 0
+@@ -133,7 +133,7 @@ define i32 @atomicrmw_uinc_wrap_i32(ptr %ptr, i32 %val) {
+ ; LA64-NEXT:    b .LBB2_6
+ ; LA64-NEXT:  .LBB2_5: # %atomicrmw.start
+ ; LA64-NEXT:    # in Loop: Header=BB2_1 Depth=1
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB2_6: # %atomicrmw.start
+ ; LA64-NEXT:    # in Loop: Header=BB2_1 Depth=1
+ ; LA64-NEXT:    move $a3, $a1
+@@ -171,7 +171,7 @@ define i64 @atomicrmw_uinc_wrap_i64(ptr %ptr, i64 %val) {
+ ; LA64-NEXT:    b .LBB3_6
+ ; LA64-NEXT:  .LBB3_5: # %atomicrmw.start
+ ; LA64-NEXT:    # in Loop: Header=BB3_1 Depth=1
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB3_6: # %atomicrmw.start
+ ; LA64-NEXT:    # in Loop: Header=BB3_1 Depth=1
+ ; LA64-NEXT:    bne $a2, $a3, .LBB3_1
+@@ -226,7 +226,7 @@ define i8 @atomicrmw_udec_wrap_i8(ptr %ptr, i8 %val) {
+ ; LA64-NEXT:    b .LBB4_6
+ ; LA64-NEXT:  .LBB4_5: # %atomicrmw.start
+ ; LA64-NEXT:    # in Loop: Header=BB4_1 Depth=1
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB4_6: # %atomicrmw.start
+ ; LA64-NEXT:    # in Loop: Header=BB4_1 Depth=1
+ ; LA64-NEXT:    addi.w $a7, $a3, 0
+@@ -284,7 +284,7 @@ define i16 @atomicrmw_udec_wrap_i16(ptr %ptr, i16 %val) {
+ ; LA64-NEXT:    b .LBB5_6
+ ; LA64-NEXT:  .LBB5_5: # %atomicrmw.start
+ ; LA64-NEXT:    # in Loop: Header=BB5_1 Depth=1
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB5_6: # %atomicrmw.start
+ ; LA64-NEXT:    # in Loop: Header=BB5_1 Depth=1
+ ; LA64-NEXT:    addi.w $a7, $a3, 0
+@@ -329,7 +329,7 @@ define i32 @atomicrmw_udec_wrap_i32(ptr %ptr, i32 %val) {
+ ; LA64-NEXT:    b .LBB6_6
+ ; LA64-NEXT:  .LBB6_5: # %atomicrmw.start
+ ; LA64-NEXT:    # in Loop: Header=BB6_1 Depth=1
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB6_6: # %atomicrmw.start
+ ; LA64-NEXT:    # in Loop: Header=BB6_1 Depth=1
+ ; LA64-NEXT:    move $a4, $a2
+@@ -372,7 +372,7 @@ define i64 @atomicrmw_udec_wrap_i64(ptr %ptr, i64 %val) {
+ ; LA64-NEXT:    b .LBB7_6
+ ; LA64-NEXT:  .LBB7_5: # %atomicrmw.start
+ ; LA64-NEXT:    # in Loop: Header=BB7_1 Depth=1
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB7_6: # %atomicrmw.start
+ ; LA64-NEXT:    # in Loop: Header=BB7_1 Depth=1
+ ; LA64-NEXT:    bne $a2, $a3, .LBB7_1
+diff --git a/llvm/test/CodeGen/LoongArch/ir-instruction/atomic-cmpxchg.ll b/llvm/test/CodeGen/LoongArch/ir-instruction/atomic-cmpxchg.ll
+index 1ac20d10e587..4f25a1d69af1 100644
+--- a/llvm/test/CodeGen/LoongArch/ir-instruction/atomic-cmpxchg.ll
++++ b/llvm/test/CodeGen/LoongArch/ir-instruction/atomic-cmpxchg.ll
+@@ -27,7 +27,7 @@ define void @cmpxchg_i8_acquire_acquire(ptr %ptr, i8 %cmp, i8 %val) nounwind {
+ ; LA64-NEXT:    beqz $a5, .LBB0_1
+ ; LA64-NEXT:    b .LBB0_4
+ ; LA64-NEXT:  .LBB0_3:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB0_4:
+ ; LA64-NEXT:    ret
+   %res = cmpxchg ptr %ptr, i8 %cmp, i8 %val acquire acquire
+@@ -61,7 +61,7 @@ define void @cmpxchg_i16_acquire_acquire(ptr %ptr, i16 %cmp, i16 %val) nounwind
+ ; LA64-NEXT:    beqz $a5, .LBB1_1
+ ; LA64-NEXT:    b .LBB1_4
+ ; LA64-NEXT:  .LBB1_3:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB1_4:
+ ; LA64-NEXT:    ret
+   %res = cmpxchg ptr %ptr, i16 %cmp, i16 %val acquire acquire
+@@ -80,7 +80,7 @@ define void @cmpxchg_i32_acquire_acquire(ptr %ptr, i32 %cmp, i32 %val) nounwind
+ ; LA64-NEXT:    beqz $a4, .LBB2_1
+ ; LA64-NEXT:    b .LBB2_4
+ ; LA64-NEXT:  .LBB2_3:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB2_4:
+ ; LA64-NEXT:    ret
+   %res = cmpxchg ptr %ptr, i32 %cmp, i32 %val acquire acquire
+@@ -99,7 +99,7 @@ define void @cmpxchg_i64_acquire_acquire(ptr %ptr, i64 %cmp, i64 %val) nounwind
+ ; LA64-NEXT:    beqz $a4, .LBB3_1
+ ; LA64-NEXT:    b .LBB3_4
+ ; LA64-NEXT:  .LBB3_3:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB3_4:
+ ; LA64-NEXT:    ret
+   %res = cmpxchg ptr %ptr, i64 %cmp, i64 %val acquire acquire
+@@ -132,7 +132,7 @@ define i8 @cmpxchg_i8_acquire_acquire_reti8(ptr %ptr, i8 %cmp, i8 %val) nounwind
+ ; LA64-NEXT:    beqz $a6, .LBB4_1
+ ; LA64-NEXT:    b .LBB4_4
+ ; LA64-NEXT:  .LBB4_3:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB4_4:
+ ; LA64-NEXT:    srl.w $a0, $a5, $a0
+ ; LA64-NEXT:    ret
+@@ -168,7 +168,7 @@ define i16 @cmpxchg_i16_acquire_acquire_reti16(ptr %ptr, i16 %cmp, i16 %val) nou
+ ; LA64-NEXT:    beqz $a6, .LBB5_1
+ ; LA64-NEXT:    b .LBB5_4
+ ; LA64-NEXT:  .LBB5_3:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB5_4:
+ ; LA64-NEXT:    srl.w $a0, $a5, $a0
+ ; LA64-NEXT:    ret
+@@ -189,7 +189,7 @@ define i32 @cmpxchg_i32_acquire_acquire_reti32(ptr %ptr, i32 %cmp, i32 %val) nou
+ ; LA64-NEXT:    beqz $a4, .LBB6_1
+ ; LA64-NEXT:    b .LBB6_4
+ ; LA64-NEXT:  .LBB6_3:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB6_4:
+ ; LA64-NEXT:    move $a0, $a3
+ ; LA64-NEXT:    ret
+@@ -210,7 +210,7 @@ define i64 @cmpxchg_i64_acquire_acquire_reti64(ptr %ptr, i64 %cmp, i64 %val) nou
+ ; LA64-NEXT:    beqz $a4, .LBB7_1
+ ; LA64-NEXT:    b .LBB7_4
+ ; LA64-NEXT:  .LBB7_3:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB7_4:
+ ; LA64-NEXT:    move $a0, $a3
+ ; LA64-NEXT:    ret
+@@ -245,7 +245,7 @@ define i1 @cmpxchg_i8_acquire_acquire_reti1(ptr %ptr, i8 %cmp, i8 %val) nounwind
+ ; LA64-NEXT:    beqz $a6, .LBB8_1
+ ; LA64-NEXT:    b .LBB8_4
+ ; LA64-NEXT:  .LBB8_3:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB8_4:
+ ; LA64-NEXT:    and $a0, $a5, $a4
+ ; LA64-NEXT:    addi.w $a0, $a0, 0
+@@ -284,7 +284,7 @@ define i1 @cmpxchg_i16_acquire_acquire_reti1(ptr %ptr, i16 %cmp, i16 %val) nounw
+ ; LA64-NEXT:    beqz $a6, .LBB9_1
+ ; LA64-NEXT:    b .LBB9_4
+ ; LA64-NEXT:  .LBB9_3:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB9_4:
+ ; LA64-NEXT:    and $a0, $a5, $a4
+ ; LA64-NEXT:    addi.w $a0, $a0, 0
+@@ -308,7 +308,7 @@ define i1 @cmpxchg_i32_acquire_acquire_reti1(ptr %ptr, i32 %cmp, i32 %val) nounw
+ ; LA64-NEXT:    beqz $a4, .LBB10_1
+ ; LA64-NEXT:    b .LBB10_4
+ ; LA64-NEXT:  .LBB10_3:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB10_4:
+ ; LA64-NEXT:    addi.w $a0, $a1, 0
+ ; LA64-NEXT:    xor $a0, $a3, $a0
+@@ -331,7 +331,7 @@ define i1 @cmpxchg_i64_acquire_acquire_reti1(ptr %ptr, i64 %cmp, i64 %val) nounw
+ ; LA64-NEXT:    beqz $a4, .LBB11_1
+ ; LA64-NEXT:    b .LBB11_4
+ ; LA64-NEXT:  .LBB11_3:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:  .LBB11_4:
+ ; LA64-NEXT:    xor $a0, $a3, $a1
+ ; LA64-NEXT:    sltui $a0, $a0, 1
+diff --git a/llvm/test/CodeGen/LoongArch/ir-instruction/atomicrmw-fp.ll b/llvm/test/CodeGen/LoongArch/ir-instruction/atomicrmw-fp.ll
+index 02d481cb3865..589360823b14 100644
+--- a/llvm/test/CodeGen/LoongArch/ir-instruction/atomicrmw-fp.ll
++++ b/llvm/test/CodeGen/LoongArch/ir-instruction/atomicrmw-fp.ll
+@@ -29,7 +29,7 @@ define float @float_fadd_acquire(ptr %p) nounwind {
+ ; LA64F-NEXT:    b .LBB0_6
+ ; LA64F-NEXT:  .LBB0_5: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB0_1 Depth=1
+-; LA64F-NEXT:    dbar 0
++; LA64F-NEXT:    dbar 20
+ ; LA64F-NEXT:  .LBB0_6: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB0_1 Depth=1
+ ; LA64F-NEXT:    movgr2fr.w $fa0, $a3
+@@ -64,7 +64,7 @@ define float @float_fadd_acquire(ptr %p) nounwind {
+ ; LA64D-NEXT:    b .LBB0_6
+ ; LA64D-NEXT:  .LBB0_5: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB0_1 Depth=1
+-; LA64D-NEXT:    dbar 0
++; LA64D-NEXT:    dbar 20
+ ; LA64D-NEXT:  .LBB0_6: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB0_1 Depth=1
+ ; LA64D-NEXT:    movgr2fr.w $fa0, $a3
+@@ -103,7 +103,7 @@ define float @float_fsub_acquire(ptr %p) nounwind {
+ ; LA64F-NEXT:    b .LBB1_6
+ ; LA64F-NEXT:  .LBB1_5: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB1_1 Depth=1
+-; LA64F-NEXT:    dbar 0
++; LA64F-NEXT:    dbar 20
+ ; LA64F-NEXT:  .LBB1_6: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB1_1 Depth=1
+ ; LA64F-NEXT:    movgr2fr.w $fa0, $a3
+@@ -138,7 +138,7 @@ define float @float_fsub_acquire(ptr %p) nounwind {
+ ; LA64D-NEXT:    b .LBB1_6
+ ; LA64D-NEXT:  .LBB1_5: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB1_1 Depth=1
+-; LA64D-NEXT:    dbar 0
++; LA64D-NEXT:    dbar 20
+ ; LA64D-NEXT:  .LBB1_6: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB1_1 Depth=1
+ ; LA64D-NEXT:    movgr2fr.w $fa0, $a3
+@@ -178,7 +178,7 @@ define float @float_fmin_acquire(ptr %p) nounwind {
+ ; LA64F-NEXT:    b .LBB2_6
+ ; LA64F-NEXT:  .LBB2_5: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB2_1 Depth=1
+-; LA64F-NEXT:    dbar 0
++; LA64F-NEXT:    dbar 20
+ ; LA64F-NEXT:  .LBB2_6: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB2_1 Depth=1
+ ; LA64F-NEXT:    movgr2fr.w $fa0, $a3
+@@ -214,7 +214,7 @@ define float @float_fmin_acquire(ptr %p) nounwind {
+ ; LA64D-NEXT:    b .LBB2_6
+ ; LA64D-NEXT:  .LBB2_5: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB2_1 Depth=1
+-; LA64D-NEXT:    dbar 0
++; LA64D-NEXT:    dbar 20
+ ; LA64D-NEXT:  .LBB2_6: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB2_1 Depth=1
+ ; LA64D-NEXT:    movgr2fr.w $fa0, $a3
+@@ -254,7 +254,7 @@ define float @float_fmax_acquire(ptr %p) nounwind {
+ ; LA64F-NEXT:    b .LBB3_6
+ ; LA64F-NEXT:  .LBB3_5: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB3_1 Depth=1
+-; LA64F-NEXT:    dbar 0
++; LA64F-NEXT:    dbar 20
+ ; LA64F-NEXT:  .LBB3_6: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB3_1 Depth=1
+ ; LA64F-NEXT:    movgr2fr.w $fa0, $a3
+@@ -290,7 +290,7 @@ define float @float_fmax_acquire(ptr %p) nounwind {
+ ; LA64D-NEXT:    b .LBB3_6
+ ; LA64D-NEXT:  .LBB3_5: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB3_1 Depth=1
+-; LA64D-NEXT:    dbar 0
++; LA64D-NEXT:    dbar 20
+ ; LA64D-NEXT:  .LBB3_6: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB3_1 Depth=1
+ ; LA64D-NEXT:    movgr2fr.w $fa0, $a3
+@@ -1385,7 +1385,7 @@ define float @float_fadd_acq_rel(ptr %p) nounwind {
+ ; LA64F-NEXT:    b .LBB16_6
+ ; LA64F-NEXT:  .LBB16_5: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB16_1 Depth=1
+-; LA64F-NEXT:    dbar 0
++; LA64F-NEXT:    dbar 20
+ ; LA64F-NEXT:  .LBB16_6: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB16_1 Depth=1
+ ; LA64F-NEXT:    movgr2fr.w $fa0, $a3
+@@ -1420,7 +1420,7 @@ define float @float_fadd_acq_rel(ptr %p) nounwind {
+ ; LA64D-NEXT:    b .LBB16_6
+ ; LA64D-NEXT:  .LBB16_5: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB16_1 Depth=1
+-; LA64D-NEXT:    dbar 0
++; LA64D-NEXT:    dbar 20
+ ; LA64D-NEXT:  .LBB16_6: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB16_1 Depth=1
+ ; LA64D-NEXT:    movgr2fr.w $fa0, $a3
+@@ -1459,7 +1459,7 @@ define float @float_fsub_acq_rel(ptr %p) nounwind {
+ ; LA64F-NEXT:    b .LBB17_6
+ ; LA64F-NEXT:  .LBB17_5: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB17_1 Depth=1
+-; LA64F-NEXT:    dbar 0
++; LA64F-NEXT:    dbar 20
+ ; LA64F-NEXT:  .LBB17_6: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB17_1 Depth=1
+ ; LA64F-NEXT:    movgr2fr.w $fa0, $a3
+@@ -1494,7 +1494,7 @@ define float @float_fsub_acq_rel(ptr %p) nounwind {
+ ; LA64D-NEXT:    b .LBB17_6
+ ; LA64D-NEXT:  .LBB17_5: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB17_1 Depth=1
+-; LA64D-NEXT:    dbar 0
++; LA64D-NEXT:    dbar 20
+ ; LA64D-NEXT:  .LBB17_6: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB17_1 Depth=1
+ ; LA64D-NEXT:    movgr2fr.w $fa0, $a3
+@@ -1534,7 +1534,7 @@ define float @float_fmin_acq_rel(ptr %p) nounwind {
+ ; LA64F-NEXT:    b .LBB18_6
+ ; LA64F-NEXT:  .LBB18_5: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB18_1 Depth=1
+-; LA64F-NEXT:    dbar 0
++; LA64F-NEXT:    dbar 20
+ ; LA64F-NEXT:  .LBB18_6: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB18_1 Depth=1
+ ; LA64F-NEXT:    movgr2fr.w $fa0, $a3
+@@ -1570,7 +1570,7 @@ define float @float_fmin_acq_rel(ptr %p) nounwind {
+ ; LA64D-NEXT:    b .LBB18_6
+ ; LA64D-NEXT:  .LBB18_5: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB18_1 Depth=1
+-; LA64D-NEXT:    dbar 0
++; LA64D-NEXT:    dbar 20
+ ; LA64D-NEXT:  .LBB18_6: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB18_1 Depth=1
+ ; LA64D-NEXT:    movgr2fr.w $fa0, $a3
+@@ -1610,7 +1610,7 @@ define float @float_fmax_acq_rel(ptr %p) nounwind {
+ ; LA64F-NEXT:    b .LBB19_6
+ ; LA64F-NEXT:  .LBB19_5: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB19_1 Depth=1
+-; LA64F-NEXT:    dbar 0
++; LA64F-NEXT:    dbar 20
+ ; LA64F-NEXT:  .LBB19_6: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB19_1 Depth=1
+ ; LA64F-NEXT:    movgr2fr.w $fa0, $a3
+@@ -1646,7 +1646,7 @@ define float @float_fmax_acq_rel(ptr %p) nounwind {
+ ; LA64D-NEXT:    b .LBB19_6
+ ; LA64D-NEXT:  .LBB19_5: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB19_1 Depth=1
+-; LA64D-NEXT:    dbar 0
++; LA64D-NEXT:    dbar 20
+ ; LA64D-NEXT:  .LBB19_6: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB19_1 Depth=1
+ ; LA64D-NEXT:    movgr2fr.w $fa0, $a3
+@@ -2087,7 +2087,7 @@ define float @float_fadd_seq_cst(ptr %p) nounwind {
+ ; LA64F-NEXT:    b .LBB24_6
+ ; LA64F-NEXT:  .LBB24_5: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB24_1 Depth=1
+-; LA64F-NEXT:    dbar 0
++; LA64F-NEXT:    dbar 20
+ ; LA64F-NEXT:  .LBB24_6: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB24_1 Depth=1
+ ; LA64F-NEXT:    movgr2fr.w $fa0, $a3
+@@ -2122,7 +2122,7 @@ define float @float_fadd_seq_cst(ptr %p) nounwind {
+ ; LA64D-NEXT:    b .LBB24_6
+ ; LA64D-NEXT:  .LBB24_5: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB24_1 Depth=1
+-; LA64D-NEXT:    dbar 0
++; LA64D-NEXT:    dbar 20
+ ; LA64D-NEXT:  .LBB24_6: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB24_1 Depth=1
+ ; LA64D-NEXT:    movgr2fr.w $fa0, $a3
+@@ -2161,7 +2161,7 @@ define float @float_fsub_seq_cst(ptr %p) nounwind {
+ ; LA64F-NEXT:    b .LBB25_6
+ ; LA64F-NEXT:  .LBB25_5: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB25_1 Depth=1
+-; LA64F-NEXT:    dbar 0
++; LA64F-NEXT:    dbar 20
+ ; LA64F-NEXT:  .LBB25_6: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB25_1 Depth=1
+ ; LA64F-NEXT:    movgr2fr.w $fa0, $a3
+@@ -2196,7 +2196,7 @@ define float @float_fsub_seq_cst(ptr %p) nounwind {
+ ; LA64D-NEXT:    b .LBB25_6
+ ; LA64D-NEXT:  .LBB25_5: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB25_1 Depth=1
+-; LA64D-NEXT:    dbar 0
++; LA64D-NEXT:    dbar 20
+ ; LA64D-NEXT:  .LBB25_6: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB25_1 Depth=1
+ ; LA64D-NEXT:    movgr2fr.w $fa0, $a3
+@@ -2236,7 +2236,7 @@ define float @float_fmin_seq_cst(ptr %p) nounwind {
+ ; LA64F-NEXT:    b .LBB26_6
+ ; LA64F-NEXT:  .LBB26_5: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB26_1 Depth=1
+-; LA64F-NEXT:    dbar 0
++; LA64F-NEXT:    dbar 20
+ ; LA64F-NEXT:  .LBB26_6: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB26_1 Depth=1
+ ; LA64F-NEXT:    movgr2fr.w $fa0, $a3
+@@ -2272,7 +2272,7 @@ define float @float_fmin_seq_cst(ptr %p) nounwind {
+ ; LA64D-NEXT:    b .LBB26_6
+ ; LA64D-NEXT:  .LBB26_5: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB26_1 Depth=1
+-; LA64D-NEXT:    dbar 0
++; LA64D-NEXT:    dbar 20
+ ; LA64D-NEXT:  .LBB26_6: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB26_1 Depth=1
+ ; LA64D-NEXT:    movgr2fr.w $fa0, $a3
+@@ -2312,7 +2312,7 @@ define float @float_fmax_seq_cst(ptr %p) nounwind {
+ ; LA64F-NEXT:    b .LBB27_6
+ ; LA64F-NEXT:  .LBB27_5: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB27_1 Depth=1
+-; LA64F-NEXT:    dbar 0
++; LA64F-NEXT:    dbar 20
+ ; LA64F-NEXT:  .LBB27_6: # %atomicrmw.start
+ ; LA64F-NEXT:    # in Loop: Header=BB27_1 Depth=1
+ ; LA64F-NEXT:    movgr2fr.w $fa0, $a3
+@@ -2348,7 +2348,7 @@ define float @float_fmax_seq_cst(ptr %p) nounwind {
+ ; LA64D-NEXT:    b .LBB27_6
+ ; LA64D-NEXT:  .LBB27_5: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB27_1 Depth=1
+-; LA64D-NEXT:    dbar 0
++; LA64D-NEXT:    dbar 20
+ ; LA64D-NEXT:  .LBB27_6: # %atomicrmw.start
+ ; LA64D-NEXT:    # in Loop: Header=BB27_1 Depth=1
+ ; LA64D-NEXT:    movgr2fr.w $fa0, $a3
+diff --git a/llvm/test/CodeGen/LoongArch/ir-instruction/fence-singlethread.ll b/llvm/test/CodeGen/LoongArch/ir-instruction/fence-singlethread.ll
+index 8d6056bc7677..a8b164a4cd3c 100644
+--- a/llvm/test/CodeGen/LoongArch/ir-instruction/fence-singlethread.ll
++++ b/llvm/test/CodeGen/LoongArch/ir-instruction/fence-singlethread.ll
+@@ -5,12 +5,12 @@
+ define void @fence_singlethread() {
+ ; LA32-LABEL: fence_singlethread:
+ ; LA32:       # %bb.0:
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    #MEMBARRIER
+ ; LA32-NEXT:    ret
+ ;
+ ; LA64-LABEL: fence_singlethread:
+ ; LA64:       # %bb.0:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    #MEMBARRIER
+ ; LA64-NEXT:    ret
+   fence syncscope("singlethread") seq_cst
+   ret void
+diff --git a/llvm/test/CodeGen/LoongArch/ir-instruction/fence.ll b/llvm/test/CodeGen/LoongArch/ir-instruction/fence.ll
+index 724639f3c6fb..c5b2232f9b80 100644
+--- a/llvm/test/CodeGen/LoongArch/ir-instruction/fence.ll
++++ b/llvm/test/CodeGen/LoongArch/ir-instruction/fence.ll
+@@ -5,12 +5,12 @@
+ define void @fence_acquire() nounwind {
+ ; LA32-LABEL: fence_acquire:
+ ; LA32:       # %bb.0:
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 20
+ ; LA32-NEXT:    ret
+ ;
+ ; LA64-LABEL: fence_acquire:
+ ; LA64:       # %bb.0:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:    ret
+   fence acquire
+   ret void
+@@ -19,12 +19,12 @@ define void @fence_acquire() nounwind {
+ define void @fence_release() nounwind {
+ ; LA32-LABEL: fence_release:
+ ; LA32:       # %bb.0:
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 18
+ ; LA32-NEXT:    ret
+ ;
+ ; LA64-LABEL: fence_release:
+ ; LA64:       # %bb.0:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 18
+ ; LA64-NEXT:    ret
+   fence release
+   ret void
+@@ -33,12 +33,12 @@ define void @fence_release() nounwind {
+ define void @fence_acq_rel() nounwind {
+ ; LA32-LABEL: fence_acq_rel:
+ ; LA32:       # %bb.0:
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 16
+ ; LA32-NEXT:    ret
+ ;
+ ; LA64-LABEL: fence_acq_rel:
+ ; LA64:       # %bb.0:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 16
+ ; LA64-NEXT:    ret
+   fence acq_rel
+   ret void
+@@ -47,12 +47,12 @@ define void @fence_acq_rel() nounwind {
+ define void @fence_seq_cst() nounwind {
+ ; LA32-LABEL: fence_seq_cst:
+ ; LA32:       # %bb.0:
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 16
+ ; LA32-NEXT:    ret
+ ;
+ ; LA64-LABEL: fence_seq_cst:
+ ; LA64:       # %bb.0:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 16
+ ; LA64-NEXT:    ret
+   fence seq_cst
+   ret void
+diff --git a/llvm/test/CodeGen/LoongArch/ir-instruction/load-store-atomic.ll b/llvm/test/CodeGen/LoongArch/ir-instruction/load-store-atomic.ll
+index deff11723d27..8b170c479eed 100644
+--- a/llvm/test/CodeGen/LoongArch/ir-instruction/load-store-atomic.ll
++++ b/llvm/test/CodeGen/LoongArch/ir-instruction/load-store-atomic.ll
+@@ -6,13 +6,13 @@ define i8 @load_acquire_i8(ptr %ptr) {
+ ; LA32-LABEL: load_acquire_i8:
+ ; LA32:       # %bb.0:
+ ; LA32-NEXT:    ld.b $a0, $a0, 0
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 20
+ ; LA32-NEXT:    ret
+ ;
+ ; LA64-LABEL: load_acquire_i8:
+ ; LA64:       # %bb.0:
+ ; LA64-NEXT:    ld.b $a0, $a0, 0
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:    ret
+   %val = load atomic i8, ptr %ptr acquire, align 1
+   ret i8 %val
+@@ -22,13 +22,13 @@ define i16 @load_acquire_i16(ptr %ptr) {
+ ; LA32-LABEL: load_acquire_i16:
+ ; LA32:       # %bb.0:
+ ; LA32-NEXT:    ld.h $a0, $a0, 0
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 20
+ ; LA32-NEXT:    ret
+ ;
+ ; LA64-LABEL: load_acquire_i16:
+ ; LA64:       # %bb.0:
+ ; LA64-NEXT:    ld.h $a0, $a0, 0
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:    ret
+   %val = load atomic i16, ptr %ptr acquire, align 2
+   ret i16 %val
+@@ -38,13 +38,13 @@ define i32 @load_acquire_i32(ptr %ptr) {
+ ; LA32-LABEL: load_acquire_i32:
+ ; LA32:       # %bb.0:
+ ; LA32-NEXT:    ld.w $a0, $a0, 0
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 20
+ ; LA32-NEXT:    ret
+ ;
+ ; LA64-LABEL: load_acquire_i32:
+ ; LA64:       # %bb.0:
+ ; LA64-NEXT:    ld.w $a0, $a0, 0
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:    ret
+   %val = load atomic i32, ptr %ptr acquire, align 4
+   ret i32 %val
+@@ -66,7 +66,7 @@ define i64 @load_acquire_i64(ptr %ptr) {
+ ; LA64-LABEL: load_acquire_i64:
+ ; LA64:       # %bb.0:
+ ; LA64-NEXT:    ld.d $a0, $a0, 0
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 20
+ ; LA64-NEXT:    ret
+   %val = load atomic i64, ptr %ptr acquire, align 8
+   ret i64 %val
+@@ -202,13 +202,13 @@ define i8 @load_seq_cst_i8(ptr %ptr) {
+ ; LA32-LABEL: load_seq_cst_i8:
+ ; LA32:       # %bb.0:
+ ; LA32-NEXT:    ld.b $a0, $a0, 0
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 16
+ ; LA32-NEXT:    ret
+ ;
+ ; LA64-LABEL: load_seq_cst_i8:
+ ; LA64:       # %bb.0:
+ ; LA64-NEXT:    ld.b $a0, $a0, 0
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 16
+ ; LA64-NEXT:    ret
+   %val = load atomic i8, ptr %ptr seq_cst, align 1
+   ret i8 %val
+@@ -218,13 +218,13 @@ define i16 @load_seq_cst_i16(ptr %ptr) {
+ ; LA32-LABEL: load_seq_cst_i16:
+ ; LA32:       # %bb.0:
+ ; LA32-NEXT:    ld.h $a0, $a0, 0
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 16
+ ; LA32-NEXT:    ret
+ ;
+ ; LA64-LABEL: load_seq_cst_i16:
+ ; LA64:       # %bb.0:
+ ; LA64-NEXT:    ld.h $a0, $a0, 0
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 16
+ ; LA64-NEXT:    ret
+   %val = load atomic i16, ptr %ptr seq_cst, align 2
+   ret i16 %val
+@@ -234,13 +234,13 @@ define i32 @load_seq_cst_i32(ptr %ptr) {
+ ; LA32-LABEL: load_seq_cst_i32:
+ ; LA32:       # %bb.0:
+ ; LA32-NEXT:    ld.w $a0, $a0, 0
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 16
+ ; LA32-NEXT:    ret
+ ;
+ ; LA64-LABEL: load_seq_cst_i32:
+ ; LA64:       # %bb.0:
+ ; LA64-NEXT:    ld.w $a0, $a0, 0
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 16
+ ; LA64-NEXT:    ret
+   %val = load atomic i32, ptr %ptr seq_cst, align 4
+   ret i32 %val
+@@ -262,7 +262,7 @@ define i64 @load_seq_cst_i64(ptr %ptr) {
+ ; LA64-LABEL: load_seq_cst_i64:
+ ; LA64:       # %bb.0:
+ ; LA64-NEXT:    ld.d $a0, $a0, 0
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 16
+ ; LA64-NEXT:    ret
+   %val = load atomic i64, ptr %ptr seq_cst, align 8
+   ret i64 %val
+@@ -271,13 +271,13 @@ define i64 @load_seq_cst_i64(ptr %ptr) {
+ define void @store_release_i8(ptr %ptr, i8 signext %v) {
+ ; LA32-LABEL: store_release_i8:
+ ; LA32:       # %bb.0:
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 18
+ ; LA32-NEXT:    st.b $a1, $a0, 0
+ ; LA32-NEXT:    ret
+ ;
+ ; LA64-LABEL: store_release_i8:
+ ; LA64:       # %bb.0:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 18
+ ; LA64-NEXT:    st.b $a1, $a0, 0
+ ; LA64-NEXT:    ret
+   store atomic i8 %v, ptr %ptr release, align 1
+@@ -287,13 +287,13 @@ define void @store_release_i8(ptr %ptr, i8 signext %v) {
+ define void @store_release_i16(ptr %ptr, i16 signext %v) {
+ ; LA32-LABEL: store_release_i16:
+ ; LA32:       # %bb.0:
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 18
+ ; LA32-NEXT:    st.h $a1, $a0, 0
+ ; LA32-NEXT:    ret
+ ;
+ ; LA64-LABEL: store_release_i16:
+ ; LA64:       # %bb.0:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 18
+ ; LA64-NEXT:    st.h $a1, $a0, 0
+ ; LA64-NEXT:    ret
+   store atomic i16 %v, ptr %ptr release, align 2
+@@ -303,7 +303,7 @@ define void @store_release_i16(ptr %ptr, i16 signext %v) {
+ define void @store_release_i32(ptr %ptr, i32 signext %v) {
+ ; LA32-LABEL: store_release_i32:
+ ; LA32:       # %bb.0:
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 18
+ ; LA32-NEXT:    st.w $a1, $a0, 0
+ ; LA32-NEXT:    ret
+ ;
+@@ -465,16 +465,16 @@ define void @store_monotonic_i64(ptr %ptr, i64 %v) {
+ define void @store_seq_cst_i8(ptr %ptr, i8 signext %v) {
+ ; LA32-LABEL: store_seq_cst_i8:
+ ; LA32:       # %bb.0:
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 16
+ ; LA32-NEXT:    st.b $a1, $a0, 0
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 16
+ ; LA32-NEXT:    ret
+ ;
+ ; LA64-LABEL: store_seq_cst_i8:
+ ; LA64:       # %bb.0:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 16
+ ; LA64-NEXT:    st.b $a1, $a0, 0
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 16
+ ; LA64-NEXT:    ret
+   store atomic i8 %v, ptr %ptr seq_cst, align 1
+   ret void
+@@ -483,16 +483,16 @@ define void @store_seq_cst_i8(ptr %ptr, i8 signext %v) {
+ define void @store_seq_cst_i16(ptr %ptr, i16 signext %v) {
+ ; LA32-LABEL: store_seq_cst_i16:
+ ; LA32:       # %bb.0:
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 16
+ ; LA32-NEXT:    st.h $a1, $a0, 0
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 16
+ ; LA32-NEXT:    ret
+ ;
+ ; LA64-LABEL: store_seq_cst_i16:
+ ; LA64:       # %bb.0:
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 16
+ ; LA64-NEXT:    st.h $a1, $a0, 0
+-; LA64-NEXT:    dbar 0
++; LA64-NEXT:    dbar 16
+ ; LA64-NEXT:    ret
+   store atomic i16 %v, ptr %ptr seq_cst, align 2
+   ret void
+@@ -501,9 +501,9 @@ define void @store_seq_cst_i16(ptr %ptr, i16 signext %v) {
+ define void @store_seq_cst_i32(ptr %ptr, i32 signext %v) {
+ ; LA32-LABEL: store_seq_cst_i32:
+ ; LA32:       # %bb.0:
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 16
+ ; LA32-NEXT:    st.w $a1, $a0, 0
+-; LA32-NEXT:    dbar 0
++; LA32-NEXT:    dbar 16
+ ; LA32-NEXT:    ret
+ ;
+ ; LA64-LABEL: store_seq_cst_i32:
+-- 
+2.20.1
+

@@ -215,3 +215,43 @@ loongarch/vector/0039-CodeGen-LoongArch-Set-FP_TO_SINT-FP_TO_UINT-to-legal.patch
 loongarch/vector/0040-LoongArch-Fixing-the-incorrect-return-value-of-Loong.patch
 loongarch/vector/0041-LoongArch-Pre-commit-test-for-76913.-NFC.patch
 loongarch/vector/0042-LoongArch-Implement-LoongArchRegisterInfo-canRealign.patch
+
+# Backport some support for compiler-rt on LoongArch from LLVM 18.
+loongarch/compilerRT/0001-sanitizer-msan-VarArgHelper-for-loongarch64.patch
+loongarch/compilerRT/0002-Driver-Support-fsanitize-cfi-icall-on-loongarch64-67.patch
+loongarch/compilerRT/0003-LowerTypeTests-Add-loongarch64-to-CFI-jumptables-673.patch
+loongarch/compilerRT/0004-CFI-Allow-LoongArch-67314.patch
+loongarch/compilerRT/0005-test-compiler-rt-Mark-several-tests-as-UNSUPPORTED-o.patch
+loongarch/compilerRT/0006-tsan-Add-support-for-linux-loongarch64-in-lib-tsan-g.patch
+loongarch/compilerRT/0007-tsan-Refine-fstat-64-interceptors-86625.patch
+
+# Backport some bugfixes on LoongArch from LLVM 18.
+loongarch/bugfix/0001-Clang-LoongArch-Generate-_mcount-instead-of-mcount-6.patch
+loongarch/bugfix/0002-LoongArch-Fix-td-pattern-for-CACOP-LDPTE-and-LDDIR.patch
+loongarch/bugfix/0003-LoongArch-test-Add-some-ABI-regression-tests-for-emp.patch
+loongarch/bugfix/0004-LoongArch-Fix-ABI-mismatch-with-gcc-g-about-empty-st.patch
+loongarch/bugfix/0005-LoongArch-Pre-commit-test-for-issue-70890.patch
+loongarch/bugfix/0006-LoongArch-Fix-ABI-mismatch-with-g-when-handling-empt.patch
+loongarch/bugfix/0007-Driver-Default-LoongArch-to-fno-direct-access-extern.patch
+loongarch/bugfix/0008-LoongArch-MC-Refine-MCInstrAnalysis-based-on-registe.patch
+loongarch/bugfix/0009-LoongArch-NFC-Pre-commit-MCInstrAnalysis-tests-for-i.patch
+loongarch/bugfix/0010-LoongArch-Set-isBarrier-to-true-for-instruction-b-72.patch
+loongarch/bugfix/0011-LoongArch-MC-Pre-commit-tests-for-instr-bl-fixupkind.patch
+loongarch/bugfix/0012-LoongArch-MC-Support-to-get-the-FixupKind-for-BL-729.patch
+loongarch/bugfix/0013-LoongArch-MC-Modify-branch-evaluation-for-MCInstrAna.patch
+loongarch/bugfix/0014-LoongArch-Precommit-a-test-for-smul-with-overflow-NF.patch
+loongarch/bugfix/0015-LoongArch-Disable-mulodi4-and-muloti4-libcalls-73199.patch
+loongarch/bugfix/0016-LoongArch-Fix-pattern-for-FNMSUB_-S-D-instructions-7.patch
+loongarch/bugfix/0017-LoongArch-Fix-the-procossor-series-mask.patch
+loongarch/bugfix/0018-LoongArch-Make-sure-that-the-LoongArchISD-BSTRINS-no.patch
+loongarch/bugfix/0019-Clang-LoongArch-Precommit-test-for-fix-wrong-return-.patch
+loongarch/bugfix/0020-Clang-LoongArch-Fix-wrong-return-value-type-of-__ioc.patch
+
+# Backport some significant improvements on LoongArch from LLVM 18.
+loongarch/improve/0001-LoongArch-Improve-codegen-for-atomic-ops-67391.patch
+loongarch/improve/0002-LoongArch-Add-some-atomic-tests-68766.patch
+loongarch/improve/0003-LoongArch-Support-finer-grained-DBAR-hints-for-LA664.patch
+loongarch/improve/0004-LoongArch-Precommit-a-test-for-atomic-cmpxchg-optmiz.patch
+loongarch/improve/0005-LoongArch-Improve-codegen-for-atomic-cmpxchg-ops-693.patch
+loongarch/improve/0006-LoongArch-Override-LoongArchTargetLowering-getExtend.patch
+loongarch/improve/0007-Memory-Call-__clear_cache-in-InvalidateInstructionCa.patch

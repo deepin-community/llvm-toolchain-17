@@ -1,3 +1,11 @@
+llvm-toolchain-17 (1:17.0.6-5deepin4) unstable; urgency=medium
+
+  * Backport some support for compiler-rt on LoongArch from LLVM 18
+  * Backport some bugfixes on LoongArch from LLVM 18
+  * Backport some significant improvements on LoongArch from LLVM 18
+
+ -- Ami-zhang <zhanglimin@loongson.cn>  Wed, 28 Aug 2024 16:09:20 +0800
+
 llvm-toolchain-17 (1:17.0.6-5deepin3) unstable; urgency=medium
 
   [ wanglei licongtian ]

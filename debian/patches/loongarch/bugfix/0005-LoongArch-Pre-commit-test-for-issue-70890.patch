@@ -1,0 +1,47 @@
+From 8a6049b9d4baf0df5abe7f156bf6ec4b3fb7a256 Mon Sep 17 00:00:00 2001
+From: Weining Lu <luweining@loongson.cn>
+Date: Thu, 2 Nov 2023 09:29:43 +0800
+Subject: [PATCH 05/20] [LoongArch] Pre-commit test for issue #70890
+
+(cherry picked from commit 749083b91f31f370cf64831d3e7e6215b6d51442)
+Change-Id: I33985b8a736f50767071a46116be36f8e719df56
+---
+ .../LoongArch/abi-lp64d-empty-unions.c        | 26 +++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+ create mode 100644 clang/test/CodeGen/LoongArch/abi-lp64d-empty-unions.c
+
+diff --git a/clang/test/CodeGen/LoongArch/abi-lp64d-empty-unions.c b/clang/test/CodeGen/LoongArch/abi-lp64d-empty-unions.c
+new file mode 100644
+index 000000000000..b0607425336e
+--- /dev/null
++++ b/clang/test/CodeGen/LoongArch/abi-lp64d-empty-unions.c
+@@ -0,0 +1,26 @@
++// RUN: %clang_cc1 -triple loongarch64 -target-feature +f -target-feature +d -target-abi lp64d -emit-llvm %s -o - | \
++// RUN:   FileCheck --check-prefix=CHECK-C %s
++// RUN: %clang_cc1 -triple loongarch64 -target-feature +f -target-feature +d -target-abi lp64d -emit-llvm %s -o - -x c++ | \
++// RUN:   FileCheck --check-prefix=CHECK-CXX %s
++
++#include <stdint.h>
++
++// CHECK-C: define{{.*}} void @test1()
++// CHECK-CXX: define{{.*}} i64 @_Z5test12u1(i64{{[^,]*}})
++union u1 { };
++union u1 test1(union u1 a) {
++  return a;
++}
++
++struct s1 {
++  union u1 u;
++  int i;
++  float f;
++};
++
++// CHECK-C: define{{.*}} { i32, float } @test2(i32{{[^,]*}}, float{{[^,]*}})
++/// FIXME: This doesn't match g++.
++// CHECK-CXX: define{{.*}} { i32, float } @_Z5test22s1(i32{{[^,]*}}, float{{[^,]*}})
++struct s1 test2(struct s1 a) {
++  return a;
++}
+-- 
+2.20.1
+

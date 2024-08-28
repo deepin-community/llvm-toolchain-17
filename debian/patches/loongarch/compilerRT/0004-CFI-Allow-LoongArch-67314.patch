@@ -1,0 +1,101 @@
+From 9e977e153a4b7d69fe9e2d6b6defa7f3bb518b75 Mon Sep 17 00:00:00 2001
+From: Ami-zhang <96056515+Ami-zhang@users.noreply.github.com>
+Date: Thu, 28 Sep 2023 15:40:42 +0800
+Subject: [PATCH 4/7] [CFI] Allow LoongArch (#67314)
+
+Enable icall tests on loongarch64 and `check-cfi` all pass.
+
+(cherry picked from commit adb555ea369a3a989a9db619c784aa76cccdb823)
+Change-Id: Ic074cca26885d7529fc659a50e5abbe7969991e4
+---
+ compiler-rt/cmake/Modules/AllSupportedArchDefs.cmake  |  2 +-
+ compiler-rt/lib/cfi/cfi.cpp                           |  4 ++++
+ compiler-rt/test/cfi/cross-dso/icall/dlopen.cpp       | 11 +++++++++--
+ compiler-rt/test/cfi/cross-dso/icall/lit.local.cfg.py |  2 +-
+ compiler-rt/test/cfi/icall/lit.local.cfg.py           |  2 +-
+ 5 files changed, 16 insertions(+), 5 deletions(-)
+
+diff --git a/compiler-rt/cmake/Modules/AllSupportedArchDefs.cmake b/compiler-rt/cmake/Modules/AllSupportedArchDefs.cmake
+index d14745ef9d13..9b0a4655cd65 100644
+--- a/compiler-rt/cmake/Modules/AllSupportedArchDefs.cmake
++++ b/compiler-rt/cmake/Modules/AllSupportedArchDefs.cmake
+@@ -73,7 +73,7 @@ set(ALL_UBSAN_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM32} ${ARM64} ${RISCV64}
+ set(ALL_SAFESTACK_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM64} ${MIPS32} ${MIPS64}
+     ${HEXAGON} ${LOONGARCH64})
+ set(ALL_CFI_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM32} ${ARM64} ${MIPS64}
+-    ${HEXAGON})
++    ${HEXAGON} ${LOONGARCH64})
+ set(ALL_SCUDO_STANDALONE_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM32} ${ARM64}
+     ${MIPS32} ${MIPS64} ${PPC64} ${HEXAGON} ${LOONGARCH64} ${RISCV64})
+ if(APPLE)
+diff --git a/compiler-rt/lib/cfi/cfi.cpp b/compiler-rt/lib/cfi/cfi.cpp
+index 22f0b175dd87..ad1c91623514 100644
+--- a/compiler-rt/lib/cfi/cfi.cpp
++++ b/compiler-rt/lib/cfi/cfi.cpp
+@@ -51,7 +51,11 @@ using namespace __sanitizer;
+ 
+ namespace __cfi {
+ 
++#if SANITIZER_LOONGARCH64
++#define kCfiShadowLimitsStorageSize 16384 // 16KiB on loongarch64 per page
++#else
+ #define kCfiShadowLimitsStorageSize 4096 // 1 page
++#endif
+ // Lets hope that the data segment is mapped with 4K pages.
+ // The pointer to the cfi shadow region is stored at the start of this page.
+ // The rest of the page is unused and re-mapped read-only.
+diff --git a/compiler-rt/test/cfi/cross-dso/icall/dlopen.cpp b/compiler-rt/test/cfi/cross-dso/icall/dlopen.cpp
+index c9674c3fb412..d04f7ba5dd0e 100644
+--- a/compiler-rt/test/cfi/cross-dso/icall/dlopen.cpp
++++ b/compiler-rt/test/cfi/cross-dso/icall/dlopen.cpp
+@@ -53,6 +53,13 @@ struct A {
+   virtual void f();
+ };
+ 
++// The page size of LoongArch is 16KiB, aligned to the memory page size.
++#ifdef __loongarch__
++#  define PAGESIZE 16384
++#else
++#  define PAGESIZE 4096
++#endif
++
+ #ifdef SHARED_LIB
+ 
+ #include "../../utils.h"
+@@ -66,13 +73,13 @@ extern "C" void *create_B() {
+   return (void *)(new B());
+ }
+ 
+-extern "C" __attribute__((aligned(4096))) void do_nothing() {}
++extern "C" __attribute__((aligned(PAGESIZE))) void do_nothing() {}
+ 
+ #else
+ 
+ void A::f() {}
+ 
+-static const int kCodeAlign = 4096;
++static const int kCodeAlign = PAGESIZE;
+ static const int kCodeSize = 4096;
+ static char saved_code[kCodeSize];
+ static char *real_start;
+diff --git a/compiler-rt/test/cfi/cross-dso/icall/lit.local.cfg.py b/compiler-rt/test/cfi/cross-dso/icall/lit.local.cfg.py
+index 749c265bbf1c..6e64199ed5c5 100644
+--- a/compiler-rt/test/cfi/cross-dso/icall/lit.local.cfg.py
++++ b/compiler-rt/test/cfi/cross-dso/icall/lit.local.cfg.py
+@@ -1,3 +1,3 @@
+ # The cfi-icall checker is only supported on x86 and x86_64 for now.
+-if config.root.host_arch not in ["x86", "x86_64"]:
++if config.root.host_arch not in ["x86", "x86_64", "loongarch64"]:
+     config.unsupported = True
+diff --git a/compiler-rt/test/cfi/icall/lit.local.cfg.py b/compiler-rt/test/cfi/icall/lit.local.cfg.py
+index 749c265bbf1c..6e64199ed5c5 100644
+--- a/compiler-rt/test/cfi/icall/lit.local.cfg.py
++++ b/compiler-rt/test/cfi/icall/lit.local.cfg.py
+@@ -1,3 +1,3 @@
+ # The cfi-icall checker is only supported on x86 and x86_64 for now.
+-if config.root.host_arch not in ["x86", "x86_64"]:
++if config.root.host_arch not in ["x86", "x86_64", "loongarch64"]:
+     config.unsupported = True
+-- 
+2.20.1
+

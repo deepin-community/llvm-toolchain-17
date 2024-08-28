@@ -1,0 +1,58 @@
+From 009145168af549b02d81777430bb4ed7cea3d1f5 Mon Sep 17 00:00:00 2001
+From: ZhaoQi <zhaoqi01@loongson.cn>
+Date: Thu, 16 Nov 2023 14:01:58 +0800
+Subject: [PATCH 10/20] [LoongArch] Set isBarrier to true for instruction 'b'
+ (#72339)
+
+Instr "b offs26" represent to an unconditional branch in LoongArch. Set
+isBarrier to 1 in tablegen for it, so that MCInstrAnalysis can return
+correctly.
+
+Fixes https://github.com/llvm/llvm-project/pull/71903.
+
+(cherry picked from commit 42a4d5e8cab1537515d92ed56d6e17b673ed352f)
+Change-Id: I1c43568374fa884f1dfa97b4f97483343812a24f
+---
+ llvm/lib/Target/LoongArch/LoongArchInstrInfo.td         | 1 +
+ llvm/unittests/Target/LoongArch/MCInstrAnalysisTest.cpp | 8 ++------
+ 2 files changed, 3 insertions(+), 6 deletions(-)
+
+diff --git a/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
+index 166379d7d592..05ae36a9781d 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
+@@ -586,6 +586,7 @@ class Br_I26<bits<32> op>
+     : FmtI26<op, (outs), (ins simm26_b:$imm26), "$imm26"> {
+   let isBranch = 1;
+   let isTerminator = 1;
++  let isBarrier = 1;
+ }
+ } // hasSideEffects = 0, mayLoad = 0, mayStore = 0
+ 
+diff --git a/llvm/unittests/Target/LoongArch/MCInstrAnalysisTest.cpp b/llvm/unittests/Target/LoongArch/MCInstrAnalysisTest.cpp
+index 6e1919fc2261..468ee79615d6 100644
+--- a/llvm/unittests/Target/LoongArch/MCInstrAnalysisTest.cpp
++++ b/llvm/unittests/Target/LoongArch/MCInstrAnalysisTest.cpp
+@@ -94,17 +94,13 @@ TEST_P(InstrAnalysisTest, IsBranch) {
+ 
+ TEST_P(InstrAnalysisTest, IsConditionalBranch) {
+   EXPECT_TRUE(Analysis->isConditionalBranch(beq()));
+-  // FIXME: Instr 'b' is not a ConditionalBranch, so the analysis here is
+-  // wrong. The following patch will fix it.
+-  EXPECT_TRUE(Analysis->isConditionalBranch(b()));
++  EXPECT_FALSE(Analysis->isConditionalBranch(b()));
+   EXPECT_FALSE(Analysis->isConditionalBranch(bl()));
+ }
+ 
+ TEST_P(InstrAnalysisTest, IsUnconditionalBranch) {
+   EXPECT_FALSE(Analysis->isUnconditionalBranch(beq()));
+-  // FIXME: Instr 'b' is an UnconditionalBranch, so the analysis here is
+-  // wrong. The following patch will fix it.
+-  EXPECT_FALSE(Analysis->isUnconditionalBranch(b()));
++  EXPECT_TRUE(Analysis->isUnconditionalBranch(b()));
+   EXPECT_FALSE(Analysis->isUnconditionalBranch(bl()));
+   EXPECT_TRUE(Analysis->isUnconditionalBranch(jirl(LoongArch::R0)));
+   EXPECT_FALSE(Analysis->isUnconditionalBranch(jirl(LoongArch::R1)));
+-- 
+2.20.1
+

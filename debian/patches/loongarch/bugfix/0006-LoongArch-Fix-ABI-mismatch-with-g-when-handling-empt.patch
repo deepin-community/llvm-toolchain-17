@@ -1,0 +1,69 @@
+From 313138921cd84f1be06e2ecbf0f6e854242bb8b9 Mon Sep 17 00:00:00 2001
+From: Lu Weining <luweining@loongson.cn>
+Date: Sat, 4 Nov 2023 10:04:37 +0800
+Subject: [PATCH 06/20] [LoongArch] Fix ABI mismatch with g++ when handling
+ empty unions (#71025)
+
+In g++, empty unions are not ignored like empty structs when flattening
+structs to examine whether the structs can be passed via FARs in C++.
+This patch aligns clang++ with g++.
+
+Fix https://github.com/llvm/llvm-project/issues/70890.
+
+(cherry picked from commit 4253fdc2c462da61cc0deb74a43265665720c828)
+Change-Id: Ib9b0cc6e74f8e52ff394fc53b7fc9f4602d64096
+---
+ clang/lib/CodeGen/Targets/LoongArch.cpp                | 7 ++++---
+ clang/test/CodeGen/LoongArch/abi-lp64d-empty-structs.c | 2 +-
+ clang/test/CodeGen/LoongArch/abi-lp64d-empty-unions.c  | 3 +--
+ 3 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/clang/lib/CodeGen/Targets/LoongArch.cpp b/clang/lib/CodeGen/Targets/LoongArch.cpp
+index bc508a99da9c..63b9a1fdb988 100644
+--- a/clang/lib/CodeGen/Targets/LoongArch.cpp
++++ b/clang/lib/CodeGen/Targets/LoongArch.cpp
+@@ -170,10 +170,11 @@ bool LoongArchABIInfo::detectFARsEligibleStructHelper(
+     // copy constructor are not eligible for the FP calling convention.
+     if (getRecordArgABI(Ty, CGT.getCXXABI()))
+       return false;
+-    if (isEmptyRecord(getContext(), Ty, true, true))
+-      return true;
+     const RecordDecl *RD = RTy->getDecl();
+-    // Unions aren't eligible unless they're empty (which is caught above).
++    if (isEmptyRecord(getContext(), Ty, true, true) &&
++        (!RD->isUnion() || !isa<CXXRecordDecl>(RD)))
++      return true;
++    // Unions aren't eligible unless they're empty in C (which is caught above).
+     if (RD->isUnion())
+       return false;
+     const ASTRecordLayout &Layout = getContext().getASTRecordLayout(RD);
+diff --git a/clang/test/CodeGen/LoongArch/abi-lp64d-empty-structs.c b/clang/test/CodeGen/LoongArch/abi-lp64d-empty-structs.c
+index 281b7b15841a..2f7596f0ebdc 100644
+--- a/clang/test/CodeGen/LoongArch/abi-lp64d-empty-structs.c
++++ b/clang/test/CodeGen/LoongArch/abi-lp64d-empty-structs.c
+@@ -3,7 +3,7 @@
+ // RUN: %clang_cc1 -triple loongarch64 -target-feature +f -target-feature +d -target-abi lp64d -emit-llvm %s -o - -x c++ | \
+ // RUN:   FileCheck --check-prefix=CHECK-CXX %s
+ 
+-// Fields containing empty structs or unions are ignored when flattening
++// Fields containing empty structs are ignored when flattening
+ // structs to examine whether the structs can be passed via FARs, even in C++.
+ // But there is an exception that non-zero-length array of empty structures are
+ // not ignored in C++. These rules are not documented in psABI <https://www.github.com/loongson/la-abi-specs>
+diff --git a/clang/test/CodeGen/LoongArch/abi-lp64d-empty-unions.c b/clang/test/CodeGen/LoongArch/abi-lp64d-empty-unions.c
+index b0607425336e..363e37efb646 100644
+--- a/clang/test/CodeGen/LoongArch/abi-lp64d-empty-unions.c
++++ b/clang/test/CodeGen/LoongArch/abi-lp64d-empty-unions.c
+@@ -19,8 +19,7 @@ struct s1 {
+ };
+ 
+ // CHECK-C: define{{.*}} { i32, float } @test2(i32{{[^,]*}}, float{{[^,]*}})
+-/// FIXME: This doesn't match g++.
+-// CHECK-CXX: define{{.*}} { i32, float } @_Z5test22s1(i32{{[^,]*}}, float{{[^,]*}})
++// CHECK-CXX: define{{.*}} [2 x i64] @_Z5test22s1([2 x i64]{{[^,]*}})
+ struct s1 test2(struct s1 a) {
+   return a;
+ }
+-- 
+2.20.1
+

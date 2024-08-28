@@ -1,0 +1,36 @@
+From 9ad8624e947a692ec9409fadebd946aaba5dc8f7 Mon Sep 17 00:00:00 2001
+From: Lu Weining <luweining@loongson.cn>
+Date: Thu, 19 Oct 2023 10:16:13 +0800
+Subject: [PATCH 7/7] [Memory] Call __clear_cache in InvalidateInstructionCache
+ on LoongArch (#67285)
+
+As the comments of `InvalidateInstructionCache`: Before the JIT can run
+a block of code that has been emitted it must invalidate the instruction
+cache on some platforms. I think it applies to LoongArch as LoongArch
+has a weak memory-model. But I'm not able to write a test to demonstrate
+this issue. Perhaps self-modifing code should be wrote?
+
+(cherry picked from commit fb366581e7d67df7d9a98605fd65a7e7908451e7)
+
+Change-Id: I05f81ed770bbc11e74f518d8930f9c538b5ffc50
+---
+ llvm/lib/Support/Unix/Memory.inc | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/llvm/lib/Support/Unix/Memory.inc b/llvm/lib/Support/Unix/Memory.inc
+index 4c8f6b2ea7d3..69bd1164343d 100644
+--- a/llvm/lib/Support/Unix/Memory.inc
++++ b/llvm/lib/Support/Unix/Memory.inc
+@@ -237,7 +237,8 @@ void Memory::InvalidateInstructionCache(const void *Addr, size_t Len) {
+   for (intptr_t Line = StartLine; Line < EndLine; Line += LineSize)
+     asm volatile("icbi 0, %0" : : "r"(Line));
+   asm volatile("isync");
+-#elif (defined(__arm__) || defined(__aarch64__) || defined(__mips__)) &&       \
++#elif (defined(__arm__) || defined(__aarch64__) || defined(__loongarch__) ||   \
++       defined(__mips__)) &&                                                   \
+     defined(__GNUC__)
+   // FIXME: Can we safely always call this for __GNUC__ everywhere?
+   const char *Start = static_cast<const char *>(Addr);
+-- 
+2.20.1
+
