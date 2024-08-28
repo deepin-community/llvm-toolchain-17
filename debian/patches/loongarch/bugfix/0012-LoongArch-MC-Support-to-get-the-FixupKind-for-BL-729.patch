@@ -1,0 +1,54 @@
+From ca4406226dec4a681a51aaee06dc1d6ba132c8a5 Mon Sep 17 00:00:00 2001
+From: ZhaoQi <zhaoqi01@loongson.cn>
+Date: Tue, 21 Nov 2023 19:00:29 +0800
+Subject: [PATCH 12/20] [LoongArch][MC] Support to get the FixupKind for BL
+ (#72938)
+
+Previously, bolt could not get FixupKind for BL correctly, because bolt
+cannot get target-flags for BL. Here just add support in MCCodeEmitter.
+
+Fixes https://github.com/llvm/llvm-project/pull/72826.
+
+(cherry picked from commit 775d2f3201cf7fb657aaf58d1b37c130bd9eb8f9)
+Change-Id: Ia7e4174f6fcc4a64f7d1d3b10ed24e457fc08886
+---
+ .../LoongArch/MCTargetDesc/LoongArchMCCodeEmitter.cpp     | 1 +
+ llvm/test/CodeGen/LoongArch/test_bl_fixupkind.mir         | 8 ++------
+ 2 files changed, 3 insertions(+), 6 deletions(-)
+
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCCodeEmitter.cpp b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCCodeEmitter.cpp
+index 08c0820cb862..09d92ac9aa3a 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCCodeEmitter.cpp
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCCodeEmitter.cpp
+@@ -263,6 +263,7 @@ LoongArchMCCodeEmitter::getExprOpValue(const MCInst &MI, const MCOperand &MO,
+       FixupKind = LoongArch::fixup_loongarch_b21;
+       break;
+     case LoongArch::B:
++    case LoongArch::BL:
+       FixupKind = LoongArch::fixup_loongarch_b26;
+       break;
+     }
+diff --git a/llvm/test/CodeGen/LoongArch/test_bl_fixupkind.mir b/llvm/test/CodeGen/LoongArch/test_bl_fixupkind.mir
+index 2c1d41be7711..70cd5fb8d7eb 100644
+--- a/llvm/test/CodeGen/LoongArch/test_bl_fixupkind.mir
++++ b/llvm/test/CodeGen/LoongArch/test_bl_fixupkind.mir
+@@ -1,14 +1,10 @@
+-## Tagged as "Expectedly Failed" until the following patch fix it
+-# XFAIL: *
+ # RUN: llc --mtriple=loongarch64 --filetype=obj %s -o - | \
+ # RUN: llvm-objdump -d - | FileCheck %s
+ 
+ # REQUIRES: asserts
+ 
+-## Check that bl can get fixupkind correctly.
+-## When BL has target-flags(loongarch-call), there is no error. But without
+-## this flag, an assertion error will appear:
+-## Assertion `FixupKind != LoongArch::fixup_loongarch_invalid && "Unhandled expression!"' failed.
++## Check that bl can get fixupkind correctly, whether BL contains
++## target-flags(loongarch-call) or not.
+ 
+ --- |
+   target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n64-S128"
+-- 
+2.20.1
+

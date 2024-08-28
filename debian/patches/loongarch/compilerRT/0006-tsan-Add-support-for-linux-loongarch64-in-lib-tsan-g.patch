@@ -1,0 +1,107 @@
+From 4021d30c75ac6af5e57bf0b77ef1d8e8dea00160 Mon Sep 17 00:00:00 2001
+From: abner chenc <chenguoqi@loongson.cn>
+Date: Thu, 28 Dec 2023 18:54:35 +0800
+Subject: [PATCH 6/7] [tsan] Add support for linux/loongarch64 in
+ lib/tsan/go/buildgo.sh (#72819)
+
+Co-authored-by: Xiaolin Zhao <zhaoxiaolin@loongson.cn>
+(cherry picked from commit 9d3fbf97bef3f19da4e0a047f017b8142f59b3fd)
+Change-Id: I2adc6314373337f3d87d3bffbb2357c991e95cf2
+---
+ compiler-rt/lib/tsan/go/buildgo.sh            |  2 ++
+ compiler-rt/lib/tsan/rtl/tsan_platform.h      | 32 +++++++++++++++++++
+ .../lib/tsan/rtl/tsan_platform_linux.cpp      |  8 ++++-
+ 3 files changed, 41 insertions(+), 1 deletion(-)
+
+diff --git a/compiler-rt/lib/tsan/go/buildgo.sh b/compiler-rt/lib/tsan/go/buildgo.sh
+index 0bd59368cc46..78ba41a0bdc6 100755
+--- a/compiler-rt/lib/tsan/go/buildgo.sh
++++ b/compiler-rt/lib/tsan/go/buildgo.sh
+@@ -10,6 +10,8 @@ if [ "`uname -a | grep Linux`" != "" ]; then
+ 		HOST_GOARCH="amd64"
+ 	elif [ "`uname -a | grep aarch64`" != "" ]; then
+ 		HOST_GOARCH="arm64"
++	elif [ "`uname -a | grep loongarch64`" != "" ]; then
++		HOST_GOARCH="loong64"
+ 	elif [ "`uname -a | grep -i mips64`" != "" ]; then
+ 		if [ "`lscpu | grep -i Little`" != "" ]; then
+ 			HOST_GOARCH="mips64le"
+diff --git a/compiler-rt/lib/tsan/rtl/tsan_platform.h b/compiler-rt/lib/tsan/rtl/tsan_platform.h
+index f0cdaf48eaa3..48dd56d15751 100644
+--- a/compiler-rt/lib/tsan/rtl/tsan_platform.h
++++ b/compiler-rt/lib/tsan/rtl/tsan_platform.h
+@@ -558,6 +558,35 @@ struct MappingGoAarch64 {
+   static const uptr kShadowAdd = 0x200000000000ull;
+ };
+ 
++/* Go on linux/loongarch64 (47-bit VMA)
++0000 0000 1000 - 0000 1000 0000: executable
++0000 1000 0000 - 00c0 0000 0000: -
++00c0 0000 0000 - 00e0 0000 0000: heap
++00e0 0000 0000 - 2000 0000 0000: -
++2000 0000 0000 - 2800 0000 0000: shadow
++2800 0000 0000 - 3000 0000 0000: -
++3000 0000 0000 - 3200 0000 0000: metainfo (memory blocks and sync objects)
++3200 0000 0000 - 8000 0000 0000: -
++*/
++struct MappingGoLoongArch64_47 {
++  static const uptr kMetaShadowBeg = 0x300000000000ull;
++  static const uptr kMetaShadowEnd = 0x320000000000ull;
++  static const uptr kShadowBeg = 0x200000000000ull;
++  static const uptr kShadowEnd = 0x280000000000ull;
++  static const uptr kLoAppMemBeg = 0x000000001000ull;
++  static const uptr kLoAppMemEnd = 0x00e000000000ull;
++  static const uptr kMidAppMemBeg = 0;
++  static const uptr kMidAppMemEnd = 0;
++  static const uptr kHiAppMemBeg = 0;
++  static const uptr kHiAppMemEnd = 0;
++  static const uptr kHeapMemBeg = 0;
++  static const uptr kHeapMemEnd = 0;
++  static const uptr kVdsoBeg = 0;
++  static const uptr kShadowMsk = 0;
++  static const uptr kShadowXor = 0;
++  static const uptr kShadowAdd = 0x200000000000ull;
++};
++
+ /*
+ Go on linux/mips64 (47-bit VMA)
+ 0000 0000 1000 - 0000 1000 0000: executable
+@@ -633,6 +662,8 @@ ALWAYS_INLINE auto SelectMapping(Arg arg) {
+   return Func::template Apply<MappingGoS390x>(arg);
+ #  elif defined(__aarch64__)
+   return Func::template Apply<MappingGoAarch64>(arg);
++#  elif defined(__loongarch_lp64)
++  return Func::template Apply<MappingGoLoongArch64_47>(arg);
+ #  elif SANITIZER_WINDOWS
+   return Func::template Apply<MappingGoWindows>(arg);
+ #  else
+@@ -692,6 +723,7 @@ void ForEachMapping() {
+   Func::template Apply<MappingGoPPC64_46>();
+   Func::template Apply<MappingGoPPC64_47>();
+   Func::template Apply<MappingGoAarch64>();
++  Func::template Apply<MappingGoLoongArch64_47>();
+   Func::template Apply<MappingGoMips64_47>();
+   Func::template Apply<MappingGoS390x>();
+ }
+diff --git a/compiler-rt/lib/tsan/rtl/tsan_platform_linux.cpp b/compiler-rt/lib/tsan/rtl/tsan_platform_linux.cpp
+index 384a443c16b0..3f4a3760794f 100644
+--- a/compiler-rt/lib/tsan/rtl/tsan_platform_linux.cpp
++++ b/compiler-rt/lib/tsan/rtl/tsan_platform_linux.cpp
+@@ -238,7 +238,13 @@ void InitializePlatformEarly() {
+     Printf("FATAL: Found %zd - Supported 47\n", vmaSize);
+     Die();
+   }
+-# endif
++#    else
++  if (vmaSize != 47) {
++    Printf("FATAL: ThreadSanitizer: unsupported VMA range\n");
++    Printf("FATAL: Found %zd - Supported 47\n", vmaSize);
++    Die();
++  }
++#    endif
+ #elif defined(__powerpc64__)
+ # if !SANITIZER_GO
+   if (vmaSize != 44 && vmaSize != 46 && vmaSize != 47) {
+-- 
+2.20.1
+

@@ -1,0 +1,241 @@
+From 0098ff513a67219cc9f647bf50e18505b264195c Mon Sep 17 00:00:00 2001
+From: ZhaoQi <zhaoqi01@loongson.cn>
+Date: Fri, 10 Nov 2023 15:54:33 +0800
+Subject: [PATCH 08/20] [LoongArch][MC] Refine MCInstrAnalysis based on
+ registers used (#71276)
+
+MCInstrAnalysis can return properties of instructions (e.g., isCall(),
+isBranch(),...) based on the informations that MCInstrDesc can get from
+*InstrInfo*.td files. These infos are based on opcodes only, but JIRL
+can have different properties based on different registers used.
+
+So this patch refines several MCInstrAnalysis methods: isTerminator,
+isCall,isReturn,isBranch,isUnconditionalBranch and isIndirectBranch.
+
+This patch also allows BOLT which will be supported on LoongArch later
+to get right instruction infos.
+
+(cherry picked from commit f7d784709673ca185f6fb0633fd53c72e81f2ae1)
+Change-Id: Ia1be413dd828826951a1b9909a5db2013c300441
+---
+ .../MCTargetDesc/LoongArchMCTargetDesc.cpp    |  76 +++++++++++++
+ .../unittests/Target/LoongArch/CMakeLists.txt |   1 +
+ .../Target/LoongArch/MCInstrAnalysisTest.cpp  | 107 ++++++++++++++++++
+ 3 files changed, 184 insertions(+)
+ create mode 100644 llvm/unittests/Target/LoongArch/MCInstrAnalysisTest.cpp
+
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCTargetDesc.cpp b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCTargetDesc.cpp
+index 942e667bc261..d580c3457fec 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCTargetDesc.cpp
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCTargetDesc.cpp
+@@ -104,6 +104,82 @@ public:
+ 
+     return false;
+   }
++
++  bool isTerminator(const MCInst &Inst) const override {
++    if (MCInstrAnalysis::isTerminator(Inst))
++      return true;
++
++    switch (Inst.getOpcode()) {
++    default:
++      return false;
++    case LoongArch::JIRL:
++      return Inst.getOperand(0).getReg() == LoongArch::R0;
++    }
++  }
++
++  bool isCall(const MCInst &Inst) const override {
++    if (MCInstrAnalysis::isCall(Inst))
++      return true;
++
++    switch (Inst.getOpcode()) {
++    default:
++      return false;
++    case LoongArch::JIRL:
++      return Inst.getOperand(0).getReg() != LoongArch::R0;
++    }
++  }
++
++  bool isReturn(const MCInst &Inst) const override {
++    if (MCInstrAnalysis::isReturn(Inst))
++      return true;
++
++    switch (Inst.getOpcode()) {
++    default:
++      return false;
++    case LoongArch::JIRL:
++      return Inst.getOperand(0).getReg() == LoongArch::R0 &&
++             Inst.getOperand(1).getReg() == LoongArch::R1;
++    }
++  }
++
++  bool isBranch(const MCInst &Inst) const override {
++    if (MCInstrAnalysis::isBranch(Inst))
++      return true;
++
++    switch (Inst.getOpcode()) {
++    default:
++      return false;
++    case LoongArch::JIRL:
++      return Inst.getOperand(0).getReg() == LoongArch::R0 &&
++             Inst.getOperand(1).getReg() != LoongArch::R1;
++    }
++  }
++
++  bool isUnconditionalBranch(const MCInst &Inst) const override {
++    if (MCInstrAnalysis::isUnconditionalBranch(Inst))
++      return true;
++
++    switch (Inst.getOpcode()) {
++    default:
++      return false;
++    case LoongArch::JIRL:
++      return Inst.getOperand(0).getReg() == LoongArch::R0 &&
++             Inst.getOperand(1).getReg() != LoongArch::R1;
++    }
++  }
++
++  bool isIndirectBranch(const MCInst &Inst) const override {
++    if (MCInstrAnalysis::isIndirectBranch(Inst))
++      return true;
++
++    switch (Inst.getOpcode()) {
++    default:
++      return false;
++    case LoongArch::JIRL:
++      return Inst.getOperand(0).getReg() == LoongArch::R0 &&
++             Inst.getOperand(1).getReg() != LoongArch::R1;
++    }
++  }
+ };
+ 
+ } // end namespace
+diff --git a/llvm/unittests/Target/LoongArch/CMakeLists.txt b/llvm/unittests/Target/LoongArch/CMakeLists.txt
+index fef4f8e15461..e6f8ec073721 100644
+--- a/llvm/unittests/Target/LoongArch/CMakeLists.txt
++++ b/llvm/unittests/Target/LoongArch/CMakeLists.txt
+@@ -20,6 +20,7 @@ set(LLVM_LINK_COMPONENTS
+ 
+ add_llvm_target_unittest(LoongArchTests
+   InstSizes.cpp
++  MCInstrAnalysisTest.cpp
+   )
+ 
+ set_property(TARGET LoongArchTests PROPERTY FOLDER "Tests/UnitTests/TargetTests")
+diff --git a/llvm/unittests/Target/LoongArch/MCInstrAnalysisTest.cpp b/llvm/unittests/Target/LoongArch/MCInstrAnalysisTest.cpp
+new file mode 100644
+index 000000000000..6a208d274a0d
+--- /dev/null
++++ b/llvm/unittests/Target/LoongArch/MCInstrAnalysisTest.cpp
+@@ -0,0 +1,107 @@
++//===- MCInstrAnalysisTest.cpp - LoongArchMCInstrAnalysis unit tests ------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#include "llvm/MC/MCInstrAnalysis.h"
++#include "MCTargetDesc/LoongArchMCTargetDesc.h"
++#include "llvm/MC/MCInstBuilder.h"
++#include "llvm/MC/TargetRegistry.h"
++#include "llvm/Support/TargetSelect.h"
++
++#include "gtest/gtest.h"
++
++#include <memory>
++
++using namespace llvm;
++
++namespace {
++
++class InstrAnalysisTest : public testing::TestWithParam<const char *> {
++protected:
++  std::unique_ptr<const MCInstrInfo> Info;
++  std::unique_ptr<const MCInstrAnalysis> Analysis;
++
++  static void SetUpTestSuite() {
++    LLVMInitializeLoongArchTargetInfo();
++    LLVMInitializeLoongArchTarget();
++    LLVMInitializeLoongArchTargetMC();
++  }
++
++  InstrAnalysisTest() {
++    std::string Error;
++    const Target *TheTarget =
++        TargetRegistry::lookupTarget(Triple::normalize(GetParam()), Error);
++    Info = std::unique_ptr<const MCInstrInfo>(TheTarget->createMCInstrInfo());
++    Analysis = std::unique_ptr<const MCInstrAnalysis>(
++        TheTarget->createMCInstrAnalysis(Info.get()));
++  }
++};
++
++} // namespace
++
++static MCInst beq() {
++  return MCInstBuilder(LoongArch::BEQ)
++      .addReg(LoongArch::R0)
++      .addReg(LoongArch::R1)
++      .addImm(32);
++}
++
++static MCInst bl() { return MCInstBuilder(LoongArch::BL).addImm(32); }
++
++static MCInst jirl(unsigned RD, unsigned RJ = LoongArch::R10) {
++  return MCInstBuilder(LoongArch::JIRL).addReg(RD).addReg(RJ).addImm(16);
++}
++
++TEST_P(InstrAnalysisTest, IsTerminator) {
++  EXPECT_TRUE(Analysis->isTerminator(beq()));
++  EXPECT_FALSE(Analysis->isTerminator(bl()));
++  EXPECT_TRUE(Analysis->isTerminator(jirl(LoongArch::R0)));
++  EXPECT_FALSE(Analysis->isTerminator(jirl(LoongArch::R5)));
++}
++
++TEST_P(InstrAnalysisTest, IsCall) {
++  EXPECT_FALSE(Analysis->isCall(beq()));
++  EXPECT_TRUE(Analysis->isCall(bl()));
++  EXPECT_TRUE(Analysis->isCall(jirl(LoongArch::R1)));
++  EXPECT_FALSE(Analysis->isCall(jirl(LoongArch::R0)));
++}
++
++TEST_P(InstrAnalysisTest, IsReturn) {
++  EXPECT_FALSE(Analysis->isReturn(beq()));
++  EXPECT_FALSE(Analysis->isReturn(bl()));
++  EXPECT_TRUE(Analysis->isReturn(jirl(LoongArch::R0, LoongArch::R1)));
++  EXPECT_FALSE(Analysis->isReturn(jirl(LoongArch::R0)));
++  EXPECT_FALSE(Analysis->isReturn(jirl(LoongArch::R1)));
++}
++
++TEST_P(InstrAnalysisTest, IsBranch) {
++  EXPECT_TRUE(Analysis->isBranch(beq()));
++  EXPECT_FALSE(Analysis->isBranch(bl()));
++  EXPECT_TRUE(Analysis->isBranch(jirl(LoongArch::R0)));
++  EXPECT_FALSE(Analysis->isBranch(jirl(LoongArch::R1)));
++  EXPECT_FALSE(Analysis->isBranch(jirl(LoongArch::R0, LoongArch::R1)));
++}
++
++TEST_P(InstrAnalysisTest, IsUnconditionalBranch) {
++  EXPECT_FALSE(Analysis->isUnconditionalBranch(beq()));
++  EXPECT_FALSE(Analysis->isUnconditionalBranch(bl()));
++  EXPECT_TRUE(Analysis->isUnconditionalBranch(jirl(LoongArch::R0)));
++  EXPECT_FALSE(Analysis->isUnconditionalBranch(jirl(LoongArch::R1)));
++  EXPECT_FALSE(
++      Analysis->isUnconditionalBranch(jirl(LoongArch::R0, LoongArch::R1)));
++}
++
++TEST_P(InstrAnalysisTest, IsIndirectBranch) {
++  EXPECT_FALSE(Analysis->isIndirectBranch(beq()));
++  EXPECT_FALSE(Analysis->isIndirectBranch(bl()));
++  EXPECT_TRUE(Analysis->isIndirectBranch(jirl(LoongArch::R0)));
++  EXPECT_FALSE(Analysis->isIndirectBranch(jirl(LoongArch::R1)));
++  EXPECT_FALSE(Analysis->isIndirectBranch(jirl(LoongArch::R0, LoongArch::R1)));
++}
++
++INSTANTIATE_TEST_SUITE_P(LA32And64, InstrAnalysisTest,
++                         testing::Values("loongarch32", "loongarch64"));
+-- 
+2.20.1
+

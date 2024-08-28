@@ -1,0 +1,135 @@
+From 12275717d661ac4692edaaa48da15622e27493ca Mon Sep 17 00:00:00 2001
+From: ZhaoQi <zhaoqi01@loongson.cn>
+Date: Thu, 23 Nov 2023 16:38:41 +0800
+Subject: [PATCH 13/20] [LoongArch][MC] Modify branch evaluation for
+ MCInstrAnalysis (#73205)
+
+Function evaluateBranch() is used to compute target address for a given
+branch instruction and return true on success. But target address of
+indirect branch cannot be simply added, so rule it out and just return
+false.
+
+This patch also add objdump tests which capture the current state of
+support for printing branch targets. Without this patch, the result of
+"jirl $zero, $a0, 4" is "jirl $zero, $a0, 4 <foo+0x64>". It is obviously
+incorrect, because this instruction represents an indirect branch whose
+target address depends on both the register value and the imm. After
+this patch, it will be right despite loss of details.
+
+(cherry picked from commit 1c68c4c57a65a67963264878bc4646be8b58854c)
+Change-Id: I326faea78b4c5fa68dc74cefa07e6195c7de6b51
+---
+ .../MCTargetDesc/LoongArchMCTargetDesc.cpp    |  3 +-
+ .../llvm-objdump/ELF/LoongArch/branches.s     | 76 +++++++++++++++++++
+ .../llvm-objdump/ELF/LoongArch/lit.local.cfg  |  2 +
+ 3 files changed, 80 insertions(+), 1 deletion(-)
+ create mode 100644 llvm/test/tools/llvm-objdump/ELF/LoongArch/branches.s
+ create mode 100644 llvm/test/tools/llvm-objdump/ELF/LoongArch/lit.local.cfg
+
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCTargetDesc.cpp b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCTargetDesc.cpp
+index d580c3457fec..a4e6a09863e6 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCTargetDesc.cpp
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCTargetDesc.cpp
+@@ -97,7 +97,8 @@ public:
+   bool evaluateBranch(const MCInst &Inst, uint64_t Addr, uint64_t Size,
+                       uint64_t &Target) const override {
+     unsigned NumOps = Inst.getNumOperands();
+-    if (isBranch(Inst) || Inst.getOpcode() == LoongArch::BL) {
++    if ((isBranch(Inst) && !isIndirectBranch(Inst)) ||
++        Inst.getOpcode() == LoongArch::BL) {
+       Target = Addr + Inst.getOperand(NumOps - 1).getImm();
+       return true;
+     }
+diff --git a/llvm/test/tools/llvm-objdump/ELF/LoongArch/branches.s b/llvm/test/tools/llvm-objdump/ELF/LoongArch/branches.s
+new file mode 100644
+index 000000000000..8cb00aef9954
+--- /dev/null
++++ b/llvm/test/tools/llvm-objdump/ELF/LoongArch/branches.s
+@@ -0,0 +1,76 @@
++# RUN: llvm-mc --triple=loongarch32 --filetype=obj < %s | \
++# RUN:   llvm-objdump -d --no-show-raw-insn - | FileCheck %s
++# RUN: llvm-mc --triple=loongarch64 --filetype=obj < %s | \
++# RUN:   llvm-objdump -d --no-show-raw-insn - | FileCheck %s
++
++# CHECK-LABEL: <foo>:
++foo:
++# CHECK: beq $a0, $a1, 108 <foo+0x6c>
++beq $a0, $a1, .Llocal
++# CHECK: bne $a0, $a1, 104 <foo+0x6c>
++bne $a0, $a1, .Llocal
++# CHECK: blt $a0, $a1, 100 <foo+0x6c>
++blt $a0, $a1, .Llocal
++# CHECK: bltu $a0, $a1, 96 <foo+0x6c>
++bltu $a0, $a1, .Llocal
++# CHECK: bge $a0, $a1, 92 <foo+0x6c>
++bge $a0, $a1, .Llocal
++# CHECK: bgeu $a0, $a1, 88 <foo+0x6c>
++bgeu $a0, $a1, .Llocal
++# CHECK: beqz $a0, 84 <foo+0x6c>
++beqz $a0, .Llocal
++# CHECK: bnez $a0, 80 <foo+0x6c>
++bnez $a0, .Llocal
++# CHECK: bceqz $fcc6, 76 <foo+0x6c>
++bceqz $fcc6, .Llocal
++# CHECK: bcnez $fcc6, 72 <foo+0x6c>
++bcnez $fcc6, .Llocal
++
++# CHECK: beq $a0, $a1, 76 <bar>
++beq $a0, $a1, bar
++# CHECK: bne $a0, $a1, 72 <bar>
++bne $a0, $a1, bar
++# CHECK: blt $a0, $a1, 68 <bar>
++blt $a0, $a1, bar
++# CHECK: bltu $a0, $a1, 64 <bar>
++bltu $a0, $a1, bar
++# CHECK: bge $a0, $a1, 60 <bar>
++bge $a0, $a1, bar
++# CHECK: bgeu $a0, $a1, 56 <bar>
++bgeu $a0, $a1, bar
++# CHECK: beqz $a0, 52 <bar>
++beqz $a0, bar
++# CHECK: bnez $a0, 48 <bar>
++bnez $a0, bar
++# CHECK: bceqz $fcc6, 44 <bar>
++bceqz $fcc6, bar
++# CHECK: bcnez $fcc6, 40 <bar>
++bcnez $fcc6, bar
++
++# CHECK: b 28 <foo+0x6c>
++b .Llocal
++# CHECK: b 32 <bar>
++b bar
++
++# CHECK: bl 20 <foo+0x6c>
++bl .Llocal
++# CHECK: bl 24 <bar>
++bl bar
++
++# CHECK: jirl $zero, $a0, 4{{$}}
++jirl $zero, $a0, 4
++# CHECK: jirl $ra, $a0, 4{{$}}
++jirl $ra, $a0, 4
++# CHECK: ret
++ret
++
++.Llocal:
++# CHECK: 6c: nop
++# CHECK: nop
++nop
++nop
++
++# CHECK-LABEL: <bar>:
++bar:
++# CHECK: 74: nop
++nop
+diff --git a/llvm/test/tools/llvm-objdump/ELF/LoongArch/lit.local.cfg b/llvm/test/tools/llvm-objdump/ELF/LoongArch/lit.local.cfg
+new file mode 100644
+index 000000000000..cc24278acbb4
+--- /dev/null
++++ b/llvm/test/tools/llvm-objdump/ELF/LoongArch/lit.local.cfg
+@@ -0,0 +1,2 @@
++if not "LoongArch" in config.root.targets:
++    config.unsupported = True
+-- 
+2.20.1
+

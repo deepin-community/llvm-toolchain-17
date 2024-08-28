@@ -1,0 +1,42 @@
+From fe9da4afce8f001e9e62ff1a84fe274a2f65c063 Mon Sep 17 00:00:00 2001
+From: Ami-zhang <96056515+Ami-zhang@users.noreply.github.com>
+Date: Thu, 28 Sep 2023 15:20:27 +0800
+Subject: [PATCH 2/7] [Driver] Support -fsanitize=cfi-icall on loongarch64
+ (#67310)
+
+(cherry picked from commit 55accc82bec48acae769b086ad9a5dc29da77f02)
+Change-Id: I5f3640da5a96c37e13665bfa2c3edb1e497fa09e
+---
+ clang/lib/Driver/ToolChain.cpp | 3 ++-
+ clang/test/Driver/fsanitize.c  | 1 +
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/clang/lib/Driver/ToolChain.cpp b/clang/lib/Driver/ToolChain.cpp
+index 8dafc3d481c2..138f4135b7a1 100644
+--- a/clang/lib/Driver/ToolChain.cpp
++++ b/clang/lib/Driver/ToolChain.cpp
+@@ -1273,7 +1273,8 @@ SanitizerMask ToolChain::getSupportedSanitizers() const {
+   if (getTriple().getArch() == llvm::Triple::x86 ||
+       getTriple().getArch() == llvm::Triple::x86_64 ||
+       getTriple().getArch() == llvm::Triple::arm || getTriple().isWasm() ||
+-      getTriple().isAArch64() || getTriple().isRISCV())
++      getTriple().isAArch64() || getTriple().isRISCV() ||
++      getTriple().isLoongArch64())
+     Res |= SanitizerKind::CFIICall;
+   if (getTriple().getArch() == llvm::Triple::x86_64 ||
+       getTriple().isAArch64(64) || getTriple().isRISCV())
+diff --git a/clang/test/Driver/fsanitize.c b/clang/test/Driver/fsanitize.c
+index 9442f6b91471..4a525d75ea11 100644
+--- a/clang/test/Driver/fsanitize.c
++++ b/clang/test/Driver/fsanitize.c
+@@ -600,6 +600,7 @@
+ // RUN: %clang --target=aarch64_be -fvisibility=hidden -fsanitize=cfi -flto -c %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-CFI
+ // RUN: %clang --target=riscv32 -fvisibility=hidden -fsanitize=cfi -flto -c %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-CFI
+ // RUN: %clang --target=riscv64 -fvisibility=hidden -fsanitize=cfi -flto -c %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-CFI
++// RUN: %clang --target=loongarch64 -fvisibility=hidden -fsanitize=cfi -flto -c %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-CFI
+ // CHECK-CFI: -emit-llvm-bc{{.*}}-fsanitize=cfi-derived-cast,cfi-icall,cfi-mfcall,cfi-unrelated-cast,cfi-nvcall,cfi-vcall
+ // CHECK-CFI-NOMFCALL: -emit-llvm-bc{{.*}}-fsanitize=cfi-derived-cast,cfi-icall,cfi-unrelated-cast,cfi-nvcall,cfi-vcall
+ // CHECK-CFI-DCAST: -emit-llvm-bc{{.*}}-fsanitize=cfi-derived-cast
+-- 
+2.20.1
+

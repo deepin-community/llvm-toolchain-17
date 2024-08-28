@@ -1,0 +1,86 @@
+From 98951b297f1a6635e9533d677fbdff4496d5bb8e Mon Sep 17 00:00:00 2001
+From: Lu Weining <luweining@loongson.cn>
+Date: Tue, 31 Oct 2023 21:18:06 +0800
+Subject: [PATCH 04/20] [LoongArch] Fix ABI mismatch with gcc/g++ about empty
+ structs passing (#70320)
+
+How empty structs (not as fields of container struct) are passed in C++
+is not explicitly documented in psABI. However, this patch fixes the
+mismatch with g++.
+
+Note that the unnamed bitfield case `struct { int : 1; }` in C is also
+fixed. Previously clang regards it as an empty struct and then ignores
+it when passing. Now size of the struct is counted; since it's size is
+not 0, clang will not ignore it even in C.
+
+While https://reviews.llvm.org/D156116 fixed the handling of empty
+struct when considering eligibility of the container struct for the FP
+calling convention ('flattening'), this patch fixes the handling of
+passing the empty struct itself.
+
+Fix https://github.com/llvm/llvm-project/issues/70319
+
+(cherry picked from commit 9ca6bf3fb7b7df373723b3275730f101f9ff816b)
+Change-Id: I9cfa77d6cdba31406349ac88d12e20ef96662d90
+---
+ clang/lib/CodeGen/Targets/LoongArch.cpp                | 10 ++++++----
+ clang/test/CodeGen/LoongArch/abi-lp64d-empty-structs.c |  8 ++++----
+ 2 files changed, 10 insertions(+), 8 deletions(-)
+
+diff --git a/clang/lib/CodeGen/Targets/LoongArch.cpp b/clang/lib/CodeGen/Targets/LoongArch.cpp
+index 7483bf6d6d1e..bc508a99da9c 100644
+--- a/clang/lib/CodeGen/Targets/LoongArch.cpp
++++ b/clang/lib/CodeGen/Targets/LoongArch.cpp
+@@ -308,12 +308,14 @@ ABIArgInfo LoongArchABIInfo::classifyArgumentType(QualType Ty, bool IsFixed,
+                                            CGCXXABI::RAA_DirectInMemory);
+   }
+ 
+-  // Ignore empty structs/unions.
+-  if (isEmptyRecord(getContext(), Ty, true))
+-    return ABIArgInfo::getIgnore();
+-
+   uint64_t Size = getContext().getTypeSize(Ty);
+ 
++  // Ignore empty struct or union whose size is zero, e.g. `struct { }` in C or
++  // `struct { int a[0]; }` in C++. In C++, `struct { }` is empty but it's size
++  // is 1 byte and g++ doesn't ignore it; clang++ matches this behaviour.
++  if (isEmptyRecord(getContext(), Ty, true) && Size == 0)
++    return ABIArgInfo::getIgnore();
++
+   // Pass floating point values via FARs if possible.
+   if (IsFixed && Ty->isFloatingType() && !Ty->isComplexType() &&
+       FRLen >= Size && FARsLeft) {
+diff --git a/clang/test/CodeGen/LoongArch/abi-lp64d-empty-structs.c b/clang/test/CodeGen/LoongArch/abi-lp64d-empty-structs.c
+index d0daafac336e..281b7b15841a 100644
+--- a/clang/test/CodeGen/LoongArch/abi-lp64d-empty-structs.c
++++ b/clang/test/CodeGen/LoongArch/abi-lp64d-empty-structs.c
+@@ -93,7 +93,7 @@ struct s9 test_s9(struct s9 a) {
+ }
+ 
+ // CHECK-C: define{{.*}} void @test_s10()
+-// CHECK-CXX: define{{.*}} void @_Z8test_s103s10()
++// CHECK-CXX: define{{.*}} i64 @_Z8test_s103s10(i64 {{.*}})
+ struct s10 { };
+ struct s10 test_s10(struct s10 a) {
+   return a;
+@@ -128,14 +128,14 @@ struct s14 test_s14(struct s14 a) {
+ }
+ 
+ // CHECK-C: define{{.*}} void @test_s15()
+-// CHECK-CXX: define{{.*}} void @_Z8test_s153s15()
++// CHECK-CXX: define{{.*}} i64 @_Z8test_s153s15(i64 {{.*}})
+ struct s15 { int : 0; };
+ struct s15 test_s15(struct s15 a) {
+   return a;
+ }
+ 
+-// CHECK-C: define{{.*}} void @test_s16()
+-// CHECK-CXX: define{{.*}} void @_Z8test_s163s16()
++// CHECK-C: define{{.*}} i64 @test_s16(i64 {{.*}})
++// CHECK-CXX: define{{.*}} i64 @_Z8test_s163s16(i64 {{.*}})
+ struct s16 { int : 1; };
+ struct s16 test_s16(struct s16 a) {
+   return a;
+-- 
+2.20.1
+

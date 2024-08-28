@@ -1,0 +1,70 @@
+From b26071a4f4be011b6b3707025e9a5147b33683bf Mon Sep 17 00:00:00 2001
+From: Ami-zhang <zhanglimin@loongson.cn>
+Date: Fri, 27 Oct 2023 16:52:10 +0800
+Subject: [PATCH 5/7] [test][compiler-rt] Mark several tests as UNSUPPORTED on
+ LoongArch (#69699)
+
+(cherry picked from commit 75b0a99668cef7abaf36e09c41bb1eb91234bbf3)
+Change-Id: Ic02e8afed0ed91d62a8f2b4d0058e3fb6742c1ea
+---
+ compiler-rt/test/fuzzer/exit_on_src_pos.test                    | 2 ++
+ .../test/sanitizer_common/TestCases/Linux/odd_stack_size.cpp    | 2 ++
+ .../sanitizer_common/TestCases/Linux/release_to_os_test.cpp     | 2 +-
+ compiler-rt/test/xray/TestCases/Posix/fdr-mode.cpp              | 2 ++
+ 4 files changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/compiler-rt/test/fuzzer/exit_on_src_pos.test b/compiler-rt/test/fuzzer/exit_on_src_pos.test
+index 541e0c4c6e42..020424e2d9fd 100644
+--- a/compiler-rt/test/fuzzer/exit_on_src_pos.test
++++ b/compiler-rt/test/fuzzer/exit_on_src_pos.test
+@@ -6,6 +6,8 @@
+ 
+ # Test does not complete on Armv7 Thumb build bot
+ UNSUPPORTED: target=thumb{{.*}}
++# Timeout on loongarch64 machine
++UNSUPPORTED: target=loongarch64{{.*}}
+ 
+ RUN: %cpp_compiler -O0 %S/SimpleTest.cpp -o %t-SimpleTest.exe -mllvm -use-unknown-locations=Disable
+ RUN: %cpp_compiler -O0 %S/ShrinkControlFlowTest.cpp -o %t-ShrinkControlFlowTest.exe
+diff --git a/compiler-rt/test/sanitizer_common/TestCases/Linux/odd_stack_size.cpp b/compiler-rt/test/sanitizer_common/TestCases/Linux/odd_stack_size.cpp
+index fc31212b7f18..9d7d46b462a8 100644
+--- a/compiler-rt/test/sanitizer_common/TestCases/Linux/odd_stack_size.cpp
++++ b/compiler-rt/test/sanitizer_common/TestCases/Linux/odd_stack_size.cpp
+@@ -5,6 +5,8 @@
+ // AddressSanitizer: CHECK failed: asan_thread.cpp:315 "((AddrIsInStack((uptr)&local))) != (0)"
+ // https://lab.llvm.org/buildbot/#/builders/18/builds/8162
+ // UNSUPPORTED: target=powerpc64{{.*}}
++/// Occasionally fail on loongarch64 machine
++// UNSUPPORTED: target=loongarch64{{.*}}
+ 
+ #include <assert.h>
+ #include <stdlib.h>
+diff --git a/compiler-rt/test/sanitizer_common/TestCases/Linux/release_to_os_test.cpp b/compiler-rt/test/sanitizer_common/TestCases/Linux/release_to_os_test.cpp
+index 67351a916441..0fa77200bf1c 100644
+--- a/compiler-rt/test/sanitizer_common/TestCases/Linux/release_to_os_test.cpp
++++ b/compiler-rt/test/sanitizer_common/TestCases/Linux/release_to_os_test.cpp
+@@ -3,7 +3,7 @@
+ 
+ // Temporarily disable test
+ // UNSUPPORTED: tsan
+-// UNSUPPORTED: target=powerpc64{{.*}}
++// UNSUPPORTED: target={{(powerpc64|loongarch64).*}}
+ 
+ // Not needed, no allocator.
+ // UNSUPPORTED: ubsan
+diff --git a/compiler-rt/test/xray/TestCases/Posix/fdr-mode.cpp b/compiler-rt/test/xray/TestCases/Posix/fdr-mode.cpp
+index 3065981a2c9a..0ee8aaa755d5 100644
+--- a/compiler-rt/test/xray/TestCases/Posix/fdr-mode.cpp
++++ b/compiler-rt/test/xray/TestCases/Posix/fdr-mode.cpp
+@@ -19,6 +19,8 @@
+ // RUN: rm fdr-logging-test-*
+ // RUN: rm fdr-unwrite-test-*
+ // UNSUPPORTED: target=powerpc64le-{{.*}}
++/// TODO: FDR logging arg1 handler(__xray_ArgLoggerEntry) hasn't implemented yet on LoongArch
++// UNSUPPORTED: target=loongarch64{{.*}}
+ // REQUIRES: built-in-llvm-tree
+ 
+ #include "xray/xray_log_interface.h"
+-- 
+2.20.1
+
