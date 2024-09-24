@@ -1,0 +1,36 @@
+From 6accc3e17550f87c2e5154fdee4056e21f680542 Mon Sep 17 00:00:00 2001
+From: Weining Lu <luweining@loongson.cn>
+Date: Mon, 25 Dec 2023 18:28:19 +0800
+Subject: [PATCH 04/23] [lld][test][LoongArch] Remove the test for
+ R_LARCH_CALL36 range checking
+
+Several buildbots report:
+ld.lld: error: failed to open /dev/null: Cannot allocate memory
+
+For example:
+- https://lab.llvm.org/buildbot/#/builders/184/builds/8842
+- https://lab.llvm.org/buildbot/#/builders/247/builds/12559
+
+(cherry picked from commit 0fbc728dba97149e530cfb7f2ada0283c398a7ce)
+---
+ lld/test/ELF/loongarch-call36.s | 4 ----
+ 1 file changed, 4 deletions(-)
+
+diff --git a/lld/test/ELF/loongarch-call36.s b/lld/test/ELF/loongarch-call36.s
+index 2d25a2ac64ed..0a00adacbd6a 100644
+--- a/lld/test/ELF/loongarch-call36.s
++++ b/lld/test/ELF/loongarch-call36.s
+@@ -40,10 +40,6 @@
+ # GOTPLT-NEXT: 0x01274730 00000000 00000000 00000000 00000000
+ # GOTPLT-NEXT: 0x01274740 00452301 00000000
+ 
+-# RUN: not ld.lld %t/a.o --section-start=.text=0x20000 --section-start=.sec.foo=0x2000020000 -o /dev/null 2>&1 | \
+-# RUN:   FileCheck -DFILE=%t/a.o --check-prefix=ERROR-RANGE %s
+-# ERROR-RANGE: error: [[FILE]]:(.text+0x0): relocation R_LARCH_CALL36 out of range: 137438953472 is not in [-137439084544, 137438822399]; references 'foo'
+-
+ ## Impossible case in reality becasue all LoongArch instructions are fixed 4-bytes long.
+ # RUN: not ld.lld %t/a.o --section-start=.text=0x20000 --section-start=.sec.foo=0x40001 -o /dev/null 2>&1 | \
+ # RUN:   FileCheck -DFILE=%t/a.o --check-prefix=ERROR-ALIGN %s
+-- 
+2.20.1
+

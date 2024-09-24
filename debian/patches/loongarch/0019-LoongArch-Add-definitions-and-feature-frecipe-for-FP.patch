@@ -1,0 +1,876 @@
+From 57eaecf7bdb7a7502580076b365b4f70dde1185d Mon Sep 17 00:00:00 2001
+From: Ami-zhang <zhanglimin@loongson.cn>
+Date: Tue, 23 Jan 2024 14:24:58 +0800
+Subject: [PATCH 19/23] [LoongArch] Add definitions and feature 'frecipe' for
+ FP approximation intrinsics/builtins (#78962)
+
+This PR adds definitions and 'frecipe' feature for FP approximation
+intrinsics/builtins. In additions, this adds and complements relative
+testcases.
+
+(cherry picked from commit fcb8342a219ada8ec641790a4c8a9f969d7d64ee)
+---
+ .../clang/Basic/BuiltinsLoongArchBase.def     |  5 +++
+ .../clang/Basic/BuiltinsLoongArchLASX.def     |  6 +++
+ .../clang/Basic/BuiltinsLoongArchLSX.def      |  6 +++
+ clang/lib/Headers/larchintrin.h               | 12 +++++
+ clang/lib/Headers/lasxintrin.h                | 24 ++++++++++
+ clang/lib/Headers/lsxintrin.h                 | 24 ++++++++++
+ .../LoongArch/builtin-dbl-approximate.c       | 45 +++++++++++++++++++
+ .../LoongArch/builtin-flt-approximate.c       | 45 +++++++++++++++++++
+ .../CodeGen/LoongArch/intrinsic-la64-error.c  | 21 +++++++++
+ .../lasx/builtin-approximate-alias.c          | 37 +++++++++++++++
+ .../LoongArch/lasx/builtin-approximate.c      | 38 ++++++++++++++++
+ .../LoongArch/lsx/builtin-approximate-alias.c | 37 +++++++++++++++
+ .../LoongArch/lsx/builtin-approximate.c       | 38 ++++++++++++++++
+ llvm/include/llvm/IR/IntrinsicsLoongArch.td   | 13 ++++++
+ llvm/lib/Target/LoongArch/LoongArch.td        |  7 +++
+ .../LoongArch/LoongArchFloat32InstrInfo.td    |  6 +++
+ .../LoongArch/LoongArchFloat64InstrInfo.td    |  6 +++
+ .../LoongArch/LoongArchLASXInstrInfo.td       | 10 +++++
+ .../Target/LoongArch/LoongArchLSXInstrInfo.td | 10 +++++
+ .../lib/Target/LoongArch/LoongArchSubtarget.h |  2 +
+ .../LoongArch/intrinsic-frecipe-dbl.ll        | 26 +++++++++++
+ .../LoongArch/intrinsic-frecipe-flt.ll        | 26 +++++++++++
+ .../LoongArch/lasx/intrinsic-frecipe.ll       | 26 +++++++++++
+ .../LoongArch/lasx/intrinsic-frsqrte.ll       | 26 +++++++++++
+ .../LoongArch/lsx/intrinsic-frecipe.ll        | 26 +++++++++++
+ .../LoongArch/lsx/intrinsic-frsqrte.ll        | 26 +++++++++++
+ 26 files changed, 548 insertions(+)
+ create mode 100644 clang/test/CodeGen/LoongArch/builtin-dbl-approximate.c
+ create mode 100644 clang/test/CodeGen/LoongArch/builtin-flt-approximate.c
+ create mode 100644 clang/test/CodeGen/LoongArch/lasx/builtin-approximate-alias.c
+ create mode 100644 clang/test/CodeGen/LoongArch/lasx/builtin-approximate.c
+ create mode 100644 clang/test/CodeGen/LoongArch/lsx/builtin-approximate-alias.c
+ create mode 100644 clang/test/CodeGen/LoongArch/lsx/builtin-approximate.c
+ create mode 100644 llvm/test/CodeGen/LoongArch/intrinsic-frecipe-dbl.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/intrinsic-frecipe-flt.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lasx/intrinsic-frecipe.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lasx/intrinsic-frsqrte.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lsx/intrinsic-frecipe.ll
+ create mode 100644 llvm/test/CodeGen/LoongArch/lsx/intrinsic-frsqrte.ll
+
+diff --git a/clang/include/clang/Basic/BuiltinsLoongArchBase.def b/clang/include/clang/Basic/BuiltinsLoongArchBase.def
+index cbb239223aae..a5a07c167908 100644
+--- a/clang/include/clang/Basic/BuiltinsLoongArchBase.def
++++ b/clang/include/clang/Basic/BuiltinsLoongArchBase.def
+@@ -51,3 +51,8 @@ TARGET_BUILTIN(__builtin_loongarch_iocsrwr_d, "vUWiUi", "nc", "64bit")
+ 
+ TARGET_BUILTIN(__builtin_loongarch_lddir_d, "WiWiIUWi", "nc", "64bit")
+ TARGET_BUILTIN(__builtin_loongarch_ldpte_d, "vWiIUWi", "nc", "64bit")
++
++TARGET_BUILTIN(__builtin_loongarch_frecipe_s, "ff", "nc", "f,frecipe")
++TARGET_BUILTIN(__builtin_loongarch_frecipe_d, "dd", "nc", "d,frecipe")
++TARGET_BUILTIN(__builtin_loongarch_frsqrte_s, "ff", "nc", "f,frecipe")
++TARGET_BUILTIN(__builtin_loongarch_frsqrte_d, "dd", "nc", "d,frecipe")
+diff --git a/clang/include/clang/Basic/BuiltinsLoongArchLASX.def b/clang/include/clang/Basic/BuiltinsLoongArchLASX.def
+index 3de200f665b6..4cf51cc000f6 100644
+--- a/clang/include/clang/Basic/BuiltinsLoongArchLASX.def
++++ b/clang/include/clang/Basic/BuiltinsLoongArchLASX.def
+@@ -657,9 +657,15 @@ TARGET_BUILTIN(__builtin_lasx_xvfsqrt_d, "V4dV4d", "nc", "lasx")
+ TARGET_BUILTIN(__builtin_lasx_xvfrecip_s, "V8fV8f", "nc", "lasx")
+ TARGET_BUILTIN(__builtin_lasx_xvfrecip_d, "V4dV4d", "nc", "lasx")
+ 
++TARGET_BUILTIN(__builtin_lasx_xvfrecipe_s, "V8fV8f", "nc", "lasx,frecipe")
++TARGET_BUILTIN(__builtin_lasx_xvfrecipe_d, "V4dV4d", "nc", "lasx,frecipe")
++
+ TARGET_BUILTIN(__builtin_lasx_xvfrsqrt_s, "V8fV8f", "nc", "lasx")
+ TARGET_BUILTIN(__builtin_lasx_xvfrsqrt_d, "V4dV4d", "nc", "lasx")
+ 
++TARGET_BUILTIN(__builtin_lasx_xvfrsqrte_s, "V8fV8f", "nc", "lasx,frecipe")
++TARGET_BUILTIN(__builtin_lasx_xvfrsqrte_d, "V4dV4d", "nc", "lasx,frecipe")
++
+ TARGET_BUILTIN(__builtin_lasx_xvfcvtl_s_h, "V8fV16s", "nc", "lasx")
+ TARGET_BUILTIN(__builtin_lasx_xvfcvth_s_h, "V8fV16s", "nc", "lasx")
+ TARGET_BUILTIN(__builtin_lasx_xvfcvtl_d_s, "V4dV8f", "nc", "lasx")
+diff --git a/clang/include/clang/Basic/BuiltinsLoongArchLSX.def b/clang/include/clang/Basic/BuiltinsLoongArchLSX.def
+index 8e6aec886c50..c90f4dc5458f 100644
+--- a/clang/include/clang/Basic/BuiltinsLoongArchLSX.def
++++ b/clang/include/clang/Basic/BuiltinsLoongArchLSX.def
+@@ -641,9 +641,15 @@ TARGET_BUILTIN(__builtin_lsx_vfsqrt_d, "V2dV2d", "nc", "lsx")
+ TARGET_BUILTIN(__builtin_lsx_vfrecip_s, "V4fV4f", "nc", "lsx")
+ TARGET_BUILTIN(__builtin_lsx_vfrecip_d, "V2dV2d", "nc", "lsx")
+ 
++TARGET_BUILTIN(__builtin_lsx_vfrecipe_s, "V4fV4f", "nc", "lsx,frecipe")
++TARGET_BUILTIN(__builtin_lsx_vfrecipe_d, "V2dV2d", "nc", "lsx,frecipe")
++
+ TARGET_BUILTIN(__builtin_lsx_vfrsqrt_s, "V4fV4f", "nc", "lsx")
+ TARGET_BUILTIN(__builtin_lsx_vfrsqrt_d, "V2dV2d", "nc", "lsx")
+ 
++TARGET_BUILTIN(__builtin_lsx_vfrsqrte_s, "V4fV4f", "nc", "lsx,frecipe")
++TARGET_BUILTIN(__builtin_lsx_vfrsqrte_d, "V2dV2d", "nc", "lsx,frecipe")
++
+ TARGET_BUILTIN(__builtin_lsx_vfcvtl_s_h, "V4fV8s", "nc", "lsx")
+ TARGET_BUILTIN(__builtin_lsx_vfcvtl_d_s, "V2dV4f", "nc", "lsx")
+ 
+diff --git a/clang/lib/Headers/larchintrin.h b/clang/lib/Headers/larchintrin.h
+index 24dd29ce91ff..f4218295919a 100644
+--- a/clang/lib/Headers/larchintrin.h
++++ b/clang/lib/Headers/larchintrin.h
+@@ -228,6 +228,18 @@ extern __inline void
+   ((void)__builtin_loongarch_ldpte_d((long int)(_1), (_2)))
+ #endif
+ 
++#define __frecipe_s(/*float*/ _1)                                              \
++  (float)__builtin_loongarch_frecipe_s((float)_1)
++
++#define __frecipe_d(/*double*/ _1)                                             \
++  (double)__builtin_loongarch_frecipe_d((double)_1)
++
++#define __frsqrte_s(/*float*/ _1)                                              \
++  (float)__builtin_loongarch_frsqrte_s((float)_1)
++
++#define __frsqrte_d(/*double*/ _1)                                             \
++  (double)__builtin_loongarch_frsqrte_d((double)_1)
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/clang/lib/Headers/lasxintrin.h b/clang/lib/Headers/lasxintrin.h
+index 6b4d5012a24b..dafc2a2f3e6a 100644
+--- a/clang/lib/Headers/lasxintrin.h
++++ b/clang/lib/Headers/lasxintrin.h
+@@ -1726,6 +1726,18 @@ extern __inline
+   return (__m256d)__builtin_lasx_xvfrecip_d((v4f64)_1);
+ }
+ 
++extern __inline
++    __attribute__((__gnu_inline__, __always_inline__, __artificial__)) __m256
++    __lasx_xvfrecipe_s(__m256 _1) {
++  return (__m256)__builtin_lasx_xvfrecipe_s((v8f32)_1);
++}
++
++extern __inline
++    __attribute__((__gnu_inline__, __always_inline__, __artificial__)) __m256d
++    __lasx_xvfrecipe_d(__m256d _1) {
++  return (__m256d)__builtin_lasx_xvfrecipe_d((v4f64)_1);
++}
++
+ extern __inline
+     __attribute__((__gnu_inline__, __always_inline__, __artificial__)) __m256
+     __lasx_xvfrint_s(__m256 _1) {
+@@ -1750,6 +1762,18 @@ extern __inline
+   return (__m256d)__builtin_lasx_xvfrsqrt_d((v4f64)_1);
+ }
+ 
++extern __inline
++    __attribute__((__gnu_inline__, __always_inline__, __artificial__)) __m256
++    __lasx_xvfrsqrte_s(__m256 _1) {
++  return (__m256)__builtin_lasx_xvfrsqrte_s((v8f32)_1);
++}
++
++extern __inline
++    __attribute__((__gnu_inline__, __always_inline__, __artificial__)) __m256d
++    __lasx_xvfrsqrte_d(__m256d _1) {
++  return (__m256d)__builtin_lasx_xvfrsqrte_d((v4f64)_1);
++}
++
+ extern __inline
+     __attribute__((__gnu_inline__, __always_inline__, __artificial__)) __m256
+     __lasx_xvflogb_s(__m256 _1) {
+diff --git a/clang/lib/Headers/lsxintrin.h b/clang/lib/Headers/lsxintrin.h
+index a29bc7757ab5..f347955ce6fb 100644
+--- a/clang/lib/Headers/lsxintrin.h
++++ b/clang/lib/Headers/lsxintrin.h
+@@ -1776,6 +1776,18 @@ extern __inline
+   return (__m128d)__builtin_lsx_vfrecip_d((v2f64)_1);
+ }
+ 
++extern __inline
++    __attribute__((__gnu_inline__, __always_inline__, __artificial__)) __m128
++    __lsx_vfrecipe_s(__m128 _1) {
++  return (__m128)__builtin_lsx_vfrecipe_s((v4f32)_1);
++}
++
++extern __inline
++    __attribute__((__gnu_inline__, __always_inline__, __artificial__)) __m128d
++    __lsx_vfrecipe_d(__m128d _1) {
++  return (__m128d)__builtin_lsx_vfrecipe_d((v2f64)_1);
++}
++
+ extern __inline
+     __attribute__((__gnu_inline__, __always_inline__, __artificial__)) __m128
+     __lsx_vfrint_s(__m128 _1) {
+@@ -1800,6 +1812,18 @@ extern __inline
+   return (__m128d)__builtin_lsx_vfrsqrt_d((v2f64)_1);
+ }
+ 
++extern __inline
++    __attribute__((__gnu_inline__, __always_inline__, __artificial__)) __m128
++    __lsx_vfrsqrte_s(__m128 _1) {
++  return (__m128)__builtin_lsx_vfrsqrte_s((v4f32)_1);
++}
++
++extern __inline
++    __attribute__((__gnu_inline__, __always_inline__, __artificial__)) __m128d
++    __lsx_vfrsqrte_d(__m128d _1) {
++  return (__m128d)__builtin_lsx_vfrsqrte_d((v2f64)_1);
++}
++
+ extern __inline
+     __attribute__((__gnu_inline__, __always_inline__, __artificial__)) __m128
+     __lsx_vflogb_s(__m128 _1) {
+diff --git a/clang/test/CodeGen/LoongArch/builtin-dbl-approximate.c b/clang/test/CodeGen/LoongArch/builtin-dbl-approximate.c
+new file mode 100644
+index 000000000000..e5fe684346c0
+--- /dev/null
++++ b/clang/test/CodeGen/LoongArch/builtin-dbl-approximate.c
+@@ -0,0 +1,45 @@
++// NOTE: Assertions have been autogenerated by utils/update_cc_test_checks.py UTC_ARGS: --version 4
++// RUN: %clang_cc1 -triple loongarch32 -target-feature +d -target-feature +frecipe -O2 -emit-llvm %s -o - | FileCheck %s
++// RUN: %clang_cc1 -triple loongarch64 -target-feature +d -target-feature +frecipe -O2 -emit-llvm %s -o - | FileCheck %s
++
++#include <larchintrin.h>
++
++// CHECK-LABEL: @frecipe_d
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[TMP0:%.*]] = tail call double @llvm.loongarch.frecipe.d(double [[A:%.*]])
++// CHECK-NEXT:    ret double [[TMP0]]
++//
++double frecipe_d (double _1)
++{
++  return __builtin_loongarch_frecipe_d (_1);
++}
++
++// CHECK-LABEL: @frsqrte_d
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[TMP0:%.*]] = tail call double @llvm.loongarch.frsqrte.d(double [[A:%.*]])
++// CHECK-NEXT:    ret double [[TMP0]]
++//
++double frsqrte_d (double _1)
++{
++  return __builtin_loongarch_frsqrte_d (_1);
++}
++
++// CHECK-LABEL: @frecipe_d_alia
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[TMP0:%.*]] = tail call double @llvm.loongarch.frecipe.d(double [[A:%.*]])
++// CHECK-NEXT:    ret double [[TMP0]]
++//
++double frecipe_d_alia (double _1)
++{
++  return __frecipe_d (_1);
++}
++
++// CHECK-LABEL: @frsqrte_d_alia
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[TMP0:%.*]] = tail call double @llvm.loongarch.frsqrte.d(double [[A:%.*]])
++// CHECK-NEXT:    ret double [[TMP0]]
++//
++double frsqrte_d_alia (double _1)
++{
++  return __frsqrte_d (_1);
++}
+diff --git a/clang/test/CodeGen/LoongArch/builtin-flt-approximate.c b/clang/test/CodeGen/LoongArch/builtin-flt-approximate.c
+new file mode 100644
+index 000000000000..47bb47084364
+--- /dev/null
++++ b/clang/test/CodeGen/LoongArch/builtin-flt-approximate.c
+@@ -0,0 +1,45 @@
++// NOTE: Assertions have been autogenerated by utils/update_cc_test_checks.py UTC_ARGS: --version 4
++// RUN: %clang_cc1 -triple loongarch32 -target-feature +f -target-feature +frecipe -O2 -emit-llvm %s -o - | FileCheck %s
++// RUN: %clang_cc1 -triple loongarch64 -target-feature +f -target-feature +frecipe -O2 -emit-llvm %s -o - | FileCheck %s
++
++#include <larchintrin.h>
++
++// CHECK-LABEL: @frecipe_s
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[TMP0:%.*]] = tail call float @llvm.loongarch.frecipe.s(float [[A:%.*]])
++// CHECK-NEXT:    ret float [[TMP0]]
++//
++float frecipe_s (float _1)
++{
++  return __builtin_loongarch_frecipe_s (_1);
++}
++
++// CHECK-LABEL: @frsqrte_s
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[TMP0:%.*]] = tail call float @llvm.loongarch.frsqrte.s(float [[A:%.*]])
++// CHECK-NEXT:    ret float [[TMP0]]
++//
++float frsqrte_s (float _1)
++{
++  return __builtin_loongarch_frsqrte_s (_1);
++}
++
++// CHECK-LABEL: @frecipe_s_alia
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[TMP0:%.*]] = tail call float @llvm.loongarch.frecipe.s(float [[A:%.*]])
++// CHECK-NEXT:    ret float [[TMP0]]
++//
++float frecipe_s_alia (float _1)
++{
++  return __frecipe_s (_1);
++}
++
++// CHECK-LABEL: @frsqrte_s_alia
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[TMP0:%.*]] = tail call float @llvm.loongarch.frsqrte.s(float [[A:%.*]])
++// CHECK-NEXT:    ret float [[TMP0]]
++//
++float frsqrte_s_alia (float _1)
++{
++  return __frsqrte_s (_1);
++}
+diff --git a/clang/test/CodeGen/LoongArch/intrinsic-la64-error.c b/clang/test/CodeGen/LoongArch/intrinsic-la64-error.c
+index efb3b94175cf..a3242dfd41e9 100644
+--- a/clang/test/CodeGen/LoongArch/intrinsic-la64-error.c
++++ b/clang/test/CodeGen/LoongArch/intrinsic-la64-error.c
+@@ -1,7 +1,28 @@
+ // RUN: %clang_cc1 -triple loongarch64 -emit-llvm -S -verify %s -o /dev/null
++// RUN: not %clang_cc1 -triple loongarch64 -DFEATURE_CHECK -emit-llvm %s -o /dev/null 2>&1 \
++// RUN:   | FileCheck %s
+ 
+ #include <larchintrin.h>
+ 
++#ifdef FEATURE_CHECK
++void test_feature(unsigned long *v_ul, int *v_i, float a, double b) {
++// CHECK: error: '__builtin_loongarch_cacop_w' needs target feature 32bit
++  __builtin_loongarch_cacop_w(1, v_ul[0], 1024);
++// CHECK: error: '__builtin_loongarch_movfcsr2gr' needs target feature f
++  v_i[0] = __builtin_loongarch_movfcsr2gr(1);
++// CHECK: error: '__builtin_loongarch_movgr2fcsr' needs target feature f
++  __builtin_loongarch_movgr2fcsr(1, v_i[1]);
++// CHECK: error: '__builtin_loongarch_frecipe_s' needs target feature f,frecipe
++  float f1 = __builtin_loongarch_frecipe_s(a);
++// CHECK: error: '__builtin_loongarch_frsqrte_s' needs target feature f,frecipe
++  float f2 = __builtin_loongarch_frsqrte_s(a);
++// CHECK: error: '__builtin_loongarch_frecipe_d' needs target feature d,frecipe
++  double d1 = __builtin_loongarch_frecipe_d(b);
++// CHECK: error: '__builtin_loongarch_frsqrte_d' needs target feature d,frecipe
++  double d2 = __builtin_loongarch_frsqrte_d(b);
++}
++#endif
++
+ void csrrd_d(int a) {
+   __builtin_loongarch_csrrd_d(16384); // expected-error {{argument value 16384 is outside the valid range [0, 16383]}}
+   __builtin_loongarch_csrrd_d(-1); // expected-error {{argument value 4294967295 is outside the valid range [0, 16383]}}
+diff --git a/clang/test/CodeGen/LoongArch/lasx/builtin-approximate-alias.c b/clang/test/CodeGen/LoongArch/lasx/builtin-approximate-alias.c
+new file mode 100644
+index 000000000000..b79f93940399
+--- /dev/null
++++ b/clang/test/CodeGen/LoongArch/lasx/builtin-approximate-alias.c
+@@ -0,0 +1,37 @@
++// NOTE: Assertions have been autogenerated by utils/update_cc_test_checks.py
++// RUN: %clang_cc1 -triple loongarch64 -target-feature +lasx -target-feature +frecipe -O2 -emit-llvm %s -o - | FileCheck %s
++
++#include <lasxintrin.h>
++
++// CHECK-LABEL: @xvfrecipe_s(
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[_1:%.*]] = load <8 x float>, ptr [[TMP0:%.*]], align 32, !tbaa [[TBAA2:![0-9]+]]
++// CHECK-NEXT:    [[TMP1:%.*]] = tail call <8 x float> @llvm.loongarch.lasx.xvfrecipe.s(<8 x float> [[_1]])
++// CHECK-NEXT:    store <8 x float> [[TMP1]], ptr [[AGG_RESULT:%.*]], align 32, !tbaa [[TBAA2]]
++// CHECK-NEXT:    ret void
++//
++v8f32 xvfrecipe_s(v8f32 _1) { return __lasx_xvfrecipe_s(_1); }
++// CHECK-LABEL: @xvfrecipe_d(
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[_1:%.*]] = load <4 x double>, ptr [[TMP0:%.*]], align 32, !tbaa [[TBAA2:![0-9]+]]
++// CHECK-NEXT:    [[TMP1:%.*]] = tail call <4 x double> @llvm.loongarch.lasx.xvfrecipe.d(<4 x double> [[_1]])
++// CHECK-NEXT:    store <4 x double> [[TMP1]], ptr [[AGG_RESULT:%.*]], align 32, !tbaa [[TBAA2]]
++// CHECK-NEXT:    ret void
++//
++v4f64 xvfrecipe_d(v4f64 _1) { return __lasx_xvfrecipe_d(_1); }
++// CHECK-LABEL: @xvfrsqrte_s(
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[_1:%.*]] = load <8 x float>, ptr [[TMP0:%.*]], align 32, !tbaa [[TBAA2:![0-9]+]]
++// CHECK-NEXT:    [[TMP1:%.*]] = tail call <8 x float> @llvm.loongarch.lasx.xvfrsqrte.s(<8 x float> [[_1]])
++// CHECK-NEXT:    store <8 x float> [[TMP1]], ptr [[AGG_RESULT:%.*]], align 32, !tbaa [[TBAA2]]
++// CHECK-NEXT:    ret void
++//
++v8f32 xvfrsqrte_s(v8f32 _1) { return __lasx_xvfrsqrte_s(_1); }
++// CHECK-LABEL: @xvfrsqrte_d(
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[_1:%.*]] = load <4 x double>, ptr [[TMP0:%.*]], align 32, !tbaa [[TBAA2:![0-9]+]]
++// CHECK-NEXT:    [[TMP1:%.*]] = tail call <4 x double> @llvm.loongarch.lasx.xvfrsqrte.d(<4 x double> [[_1]])
++// CHECK-NEXT:    store <4 x double> [[TMP1]], ptr [[AGG_RESULT:%.*]], align 32, !tbaa [[TBAA2]]
++// CHECK-NEXT:    ret void
++//
++v4f64 xvfrsqrte_d(v4f64 _1) { return __lasx_xvfrsqrte_d(_1); }
+diff --git a/clang/test/CodeGen/LoongArch/lasx/builtin-approximate.c b/clang/test/CodeGen/LoongArch/lasx/builtin-approximate.c
+new file mode 100644
+index 000000000000..63e9ba639ea2
+--- /dev/null
++++ b/clang/test/CodeGen/LoongArch/lasx/builtin-approximate.c
+@@ -0,0 +1,38 @@
++// NOTE: Assertions have been autogenerated by utils/update_cc_test_checks.py
++// RUN: %clang_cc1 -triple loongarch64 -target-feature +lasx -target-feature +frecipe -O2 -emit-llvm %s -o - | FileCheck %s
++
++typedef float v8f32 __attribute__((vector_size(32), aligned(32)));
++typedef double v4f64 __attribute__((vector_size(32), aligned(32)));
++
++// CHECK-LABEL: @xvfrecipe_s
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[_1:%.*]] = load <8 x float>, ptr [[TMP0:%.*]], align 32, !tbaa [[TBAA2:![0-9]+]]
++// CHECK-NEXT:    [[TMP1:%.*]] = tail call <8 x float> @llvm.loongarch.lasx.xvfrecipe.s(<8 x float> [[_1]])
++// CHECK-NEXT:    store <8 x float> [[TMP1]], ptr [[AGG_RESULT:%.*]], align 32, !tbaa [[TBAA2]]
++// CHECK-NEXT:    ret void
++//
++v8f32 xvfrecipe_s(v8f32 _1) { return __builtin_lasx_xvfrecipe_s(_1); }
++// CHECK-LABEL: @xvfrecipe_d
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[_1:%.*]] = load <4 x double>, ptr [[TMP0:%.*]], align 32, !tbaa [[TBAA2:![0-9]+]]
++// CHECK-NEXT:    [[TMP1:%.*]] = tail call <4 x double> @llvm.loongarch.lasx.xvfrecipe.d(<4 x double> [[_1]])
++// CHECK-NEXT:    store <4 x double> [[TMP1]], ptr [[AGG_RESULT:%.*]], align 32, !tbaa [[TBAA2]]
++// CHECK-NEXT:    ret void
++//
++v4f64 xvfrecipe_d(v4f64 _1) { return __builtin_lasx_xvfrecipe_d(_1); }
++// CHECK-LABEL: @xvfrsqrte_s
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[_1:%.*]] = load <8 x float>, ptr [[TMP0:%.*]], align 32, !tbaa [[TBAA2:![0-9]+]]
++// CHECK-NEXT:    [[TMP1:%.*]] = tail call <8 x float> @llvm.loongarch.lasx.xvfrsqrte.s(<8 x float> [[_1]])
++// CHECK-NEXT:    store <8 x float> [[TMP1]], ptr [[AGG_RESULT:%.*]], align 32, !tbaa [[TBAA2]]
++// CHECK-NEXT:    ret void
++//
++v8f32 xvfrsqrte_s(v8f32 _1) { return __builtin_lasx_xvfrsqrte_s(_1); }
++// CHECK-LABEL: @xvfrsqrte_d
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[_1:%.*]] = load <4 x double>, ptr [[TMP0:%.*]], align 32, !tbaa [[TBAA2:![0-9]+]]
++// CHECK-NEXT:    [[TMP1:%.*]] = tail call <4 x double> @llvm.loongarch.lasx.xvfrsqrte.d(<4 x double> [[_1]])
++// CHECK-NEXT:    store <4 x double> [[TMP1]], ptr [[AGG_RESULT:%.*]], align 32, !tbaa [[TBAA2]]
++// CHECK-NEXT:    ret void
++//
++v4f64 xvfrsqrte_d(v4f64 _1) { return __builtin_lasx_xvfrsqrte_d(_1); }
+diff --git a/clang/test/CodeGen/LoongArch/lsx/builtin-approximate-alias.c b/clang/test/CodeGen/LoongArch/lsx/builtin-approximate-alias.c
+new file mode 100644
+index 000000000000..f26f032c878e
+--- /dev/null
++++ b/clang/test/CodeGen/LoongArch/lsx/builtin-approximate-alias.c
+@@ -0,0 +1,37 @@
++// NOTE: Assertions have been autogenerated by utils/update_cc_test_checks.py
++// RUN: %clang_cc1 -triple loongarch64 -target-feature +lsx -target-feature +frecipe -O2 -emit-llvm %s -o - | FileCheck %s
++
++#include <lsxintrin.h>
++
++// CHECK-LABEL: @vfrecipe_s(
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[TMP0:%.*]] = bitcast i128 [[_1_COERCE:%.*]] to <4 x float>
++// CHECK-NEXT:    [[TMP1:%.*]] = tail call <4 x float> @llvm.loongarch.lsx.vfrecipe.s(<4 x float> [[TMP0]])
++// CHECK-NEXT:    [[TMP2:%.*]] = bitcast <4 x float> [[TMP1]] to i128
++// CHECK-NEXT:    ret i128 [[TMP2]]
++//
++v4f32 vfrecipe_s(v4f32 _1) { return __lsx_vfrecipe_s(_1); }
++// CHECK-LABEL: @vfrecipe_d(
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[TMP0:%.*]] = bitcast i128 [[_1_COERCE:%.*]] to <2 x double>
++// CHECK-NEXT:    [[TMP1:%.*]] = tail call <2 x double> @llvm.loongarch.lsx.vfrecipe.d(<2 x double> [[TMP0]])
++// CHECK-NEXT:    [[TMP2:%.*]] = bitcast <2 x double> [[TMP1]] to i128
++// CHECK-NEXT:    ret i128 [[TMP2]]
++//
++v2f64 vfrecipe_d(v2f64 _1) { return __lsx_vfrecipe_d(_1); }
++// CHECK-LABEL: @vfrsqrte_s(
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[TMP0:%.*]] = bitcast i128 [[_1_COERCE:%.*]] to <4 x float>
++// CHECK-NEXT:    [[TMP1:%.*]] = tail call <4 x float> @llvm.loongarch.lsx.vfrsqrte.s(<4 x float> [[TMP0]])
++// CHECK-NEXT:    [[TMP2:%.*]] = bitcast <4 x float> [[TMP1]] to i128
++// CHECK-NEXT:    ret i128 [[TMP2]]
++//
++v4f32 vfrsqrte_s(v4f32 _1) { return __lsx_vfrsqrte_s(_1); }
++// CHECK-LABEL: @vfrsqrte_d(
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[TMP0:%.*]] = bitcast i128 [[_1_COERCE:%.*]] to <2 x double>
++// CHECK-NEXT:    [[TMP1:%.*]] = tail call <2 x double> @llvm.loongarch.lsx.vfrsqrte.d(<2 x double> [[TMP0]])
++// CHECK-NEXT:    [[TMP2:%.*]] = bitcast <2 x double> [[TMP1]] to i128
++// CHECK-NEXT:    ret i128 [[TMP2]]
++//
++v2f64 vfrsqrte_d(v2f64 _1) { return __lsx_vfrsqrte_d(_1); }
+diff --git a/clang/test/CodeGen/LoongArch/lsx/builtin-approximate.c b/clang/test/CodeGen/LoongArch/lsx/builtin-approximate.c
+new file mode 100644
+index 000000000000..39fa1663db34
+--- /dev/null
++++ b/clang/test/CodeGen/LoongArch/lsx/builtin-approximate.c
+@@ -0,0 +1,38 @@
++// NOTE: Assertions have been autogenerated by utils/update_cc_test_checks.py
++// RUN: %clang_cc1 -triple loongarch64 -target-feature +lsx -target-feature +frecipe -O2 -emit-llvm %s -o - | FileCheck %s
++
++typedef float v4f32 __attribute__ ((vector_size(16), aligned(16)));
++typedef double v2f64 __attribute__ ((vector_size(16), aligned(16)));
++
++// CHECK-LABEL: @vfrecipe_s
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[TMP0:%.*]] = bitcast i128 [[_1_COERCE:%.*]] to <4 x float>
++// CHECK-NEXT:    [[TMP1:%.*]] = tail call <4 x float> @llvm.loongarch.lsx.vfrecipe.s(<4 x float> [[TMP0]])
++// CHECK-NEXT:    [[TMP2:%.*]] = bitcast <4 x float> [[TMP1]] to i128
++// CHECK-NEXT:    ret i128 [[TMP2]]
++//
++v4f32 vfrecipe_s (v4f32 _1) { return __builtin_lsx_vfrecipe_s (_1); }
++// CHECK-LABEL: @vfrecipe_d
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[TMP0:%.*]] = bitcast i128 [[_1_COERCE:%.*]] to <2 x double>
++// CHECK-NEXT:    [[TMP1:%.*]] = tail call <2 x double> @llvm.loongarch.lsx.vfrecipe.d(<2 x double> [[TMP0]])
++// CHECK-NEXT:    [[TMP2:%.*]] = bitcast <2 x double> [[TMP1]] to i128
++// CHECK-NEXT:    ret i128 [[TMP2]]
++//
++v2f64 vfrecipe_d (v2f64 _1) { return __builtin_lsx_vfrecipe_d (_1); }
++// CHECK-LABEL: @vfrsqrte_s
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[TMP0:%.*]] = bitcast i128 [[_1_COERCE:%.*]] to <4 x float>
++// CHECK-NEXT:    [[TMP1:%.*]] = tail call <4 x float> @llvm.loongarch.lsx.vfrsqrte.s(<4 x float> [[TMP0]])
++// CHECK-NEXT:    [[TMP2:%.*]] = bitcast <4 x float> [[TMP1]] to i128
++// CHECK-NEXT:    ret i128 [[TMP2]]
++//
++v4f32 vfrsqrte_s (v4f32 _1) { return __builtin_lsx_vfrsqrte_s (_1); }
++// CHECK-LABEL: @vfrsqrte_d
++// CHECK-NEXT:  entry:
++// CHECK-NEXT:    [[TMP0:%.*]] = bitcast i128 [[_1_COERCE:%.*]] to <2 x double>
++// CHECK-NEXT:    [[TMP1:%.*]] = tail call <2 x double> @llvm.loongarch.lsx.vfrsqrte.d(<2 x double> [[TMP0]])
++// CHECK-NEXT:    [[TMP2:%.*]] = bitcast <2 x double> [[TMP1]] to i128
++// CHECK-NEXT:    ret i128 [[TMP2]]
++//
++v2f64 vfrsqrte_d (v2f64 _1) { return __builtin_lsx_vfrsqrte_d (_1); }
+diff --git a/llvm/include/llvm/IR/IntrinsicsLoongArch.td b/llvm/include/llvm/IR/IntrinsicsLoongArch.td
+index 685deaec7709..9002076e7aec 100644
+--- a/llvm/include/llvm/IR/IntrinsicsLoongArch.td
++++ b/llvm/include/llvm/IR/IntrinsicsLoongArch.td
+@@ -122,6 +122,15 @@ def int_loongarch_lddir_d : BaseInt<[llvm_i64_ty], [llvm_i64_ty, llvm_i64_ty],
+                                     [ImmArg<ArgIndex<1>>]>;
+ def int_loongarch_ldpte_d : BaseInt<[], [llvm_i64_ty, llvm_i64_ty],
+                                     [ImmArg<ArgIndex<1>>]>;
++
++def int_loongarch_frecipe_s : BaseInt<[llvm_float_ty], [llvm_float_ty],
++                                      [IntrNoMem]>;
++def int_loongarch_frecipe_d : BaseInt<[llvm_double_ty], [llvm_double_ty],
++                                      [IntrNoMem]>;
++def int_loongarch_frsqrte_s : BaseInt<[llvm_float_ty], [llvm_float_ty],
++                                      [IntrNoMem]>;
++def int_loongarch_frsqrte_d : BaseInt<[llvm_double_ty], [llvm_double_ty],
++                                      [IntrNoMem]>;
+ } // TargetPrefix = "loongarch"
+ 
+ /// Vector intrinsic
+@@ -527,10 +536,12 @@ foreach inst = ["vfmadd_d", "vfmsub_d", "vfnmadd_d", "vfnmsub_d"] in
+              [IntrNoMem]>;
+ 
+ foreach inst = ["vflogb_s", "vfsqrt_s", "vfrecip_s", "vfrsqrt_s", "vfrint_s",
++                "vfrecipe_s", "vfrsqrte_s",
+                 "vfrintrne_s", "vfrintrz_s", "vfrintrp_s", "vfrintrm_s"] in
+   def int_loongarch_lsx_#inst : VecInt<[llvm_v4f32_ty], [llvm_v4f32_ty],
+                                        [IntrNoMem]>;
+ foreach inst = ["vflogb_d", "vfsqrt_d", "vfrecip_d", "vfrsqrt_d", "vfrint_d",
++                "vfrecipe_d", "vfrsqrte_d",
+                 "vfrintrne_d", "vfrintrz_d", "vfrintrp_d", "vfrintrm_d"] in
+   def int_loongarch_lsx_#inst : VecInt<[llvm_v2f64_ty], [llvm_v2f64_ty],
+                                        [IntrNoMem]>;
+@@ -1044,10 +1055,12 @@ foreach inst = ["xvfmadd_d", "xvfmsub_d", "xvfnmadd_d", "xvfnmsub_d"] in
+              [IntrNoMem]>;
+ 
+ foreach inst = ["xvflogb_s", "xvfsqrt_s", "xvfrecip_s", "xvfrsqrt_s", "xvfrint_s",
++                "xvfrecipe_s", "xvfrsqrte_s",
+                 "xvfrintrne_s", "xvfrintrz_s", "xvfrintrp_s", "xvfrintrm_s"] in
+   def int_loongarch_lasx_#inst : VecInt<[llvm_v8f32_ty], [llvm_v8f32_ty],
+                                         [IntrNoMem]>;
+ foreach inst = ["xvflogb_d", "xvfsqrt_d", "xvfrecip_d", "xvfrsqrt_d", "xvfrint_d",
++                "xvfrecipe_d", "xvfrsqrte_d",
+                 "xvfrintrne_d", "xvfrintrz_d", "xvfrintrp_d", "xvfrintrm_d"] in
+   def int_loongarch_lasx_#inst : VecInt<[llvm_v4f64_ty], [llvm_v4f64_ty],
+                                         [IntrNoMem]>;
+diff --git a/llvm/lib/Target/LoongArch/LoongArch.td b/llvm/lib/Target/LoongArch/LoongArch.td
+index 2a4c991a43b0..5573e5415d26 100644
+--- a/llvm/lib/Target/LoongArch/LoongArch.td
++++ b/llvm/lib/Target/LoongArch/LoongArch.td
+@@ -110,6 +110,13 @@ def FeatureAutoVec
+     : SubtargetFeature<"auto-vec", "HasExpAutoVec", "true",
+                        "Experimental auto vectorization">;
+ 
++// Floating point approximation operation
++def FeatureFrecipe
++    : SubtargetFeature<"frecipe", "HasFrecipe", "true",
++                       "Support frecipe.{s/d} and frsqrte.{s/d} instructions.">;
++def HasFrecipe : Predicate<"Subtarget->hasFrecipe()">;
++
++
+ //===----------------------------------------------------------------------===//
+ // Registers, instruction descriptions ...
+ //===----------------------------------------------------------------------===//
+diff --git a/llvm/lib/Target/LoongArch/LoongArchFloat32InstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchFloat32InstrInfo.td
+index f30837912e75..e27896768818 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchFloat32InstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchFloat32InstrInfo.td
+@@ -281,6 +281,12 @@ def : Pat<(loongarch_ftint FPR32:$src), (FTINTRZ_W_S FPR32:$src)>;
+ // FP reciprocal operation
+ def : Pat<(fdiv fpimm1, FPR32:$src), (FRECIP_S $src)>;
+ 
++let Predicates = [HasFrecipe] in {
++// FP approximate reciprocal operation
++def : Pat<(int_loongarch_frecipe_s FPR32:$src), (FRECIPE_S FPR32:$src)>;
++def : Pat<(int_loongarch_frsqrte_s FPR32:$src), (FRSQRTE_S FPR32:$src)>;
++}
++
+ // fmadd.s: fj * fk + fa
+ def : Pat<(fma FPR32:$fj, FPR32:$fk, FPR32:$fa), (FMADD_S $fj, $fk, $fa)>;
+ 
+diff --git a/llvm/lib/Target/LoongArch/LoongArchFloat64InstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchFloat64InstrInfo.td
+index 0ea4c564b045..26bed67ac222 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchFloat64InstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchFloat64InstrInfo.td
+@@ -242,6 +242,12 @@ def : Pat<(f64 (fpextend FPR32:$src)), (FCVT_D_S FPR32:$src)>;
+ // FP reciprocal operation
+ def : Pat<(fdiv fpimm1, FPR64:$src), (FRECIP_D $src)>;
+ 
++let Predicates = [HasFrecipe] in {
++// FP approximate reciprocal operation
++def : Pat<(int_loongarch_frecipe_d FPR64:$src), (FRECIPE_D FPR64:$src)>;
++def : Pat<(int_loongarch_frsqrte_d FPR64:$src), (FRSQRTE_D FPR64:$src)>;
++}
++
+ // fmadd.d: fj * fk + fa
+ def : Pat<(fma FPR64:$fj, FPR64:$fk, FPR64:$fa), (FMADD_D $fj, $fk, $fa)>;
+ 
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+index 454915ac8c0a..6f1969bf8cae 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+@@ -2080,6 +2080,16 @@ foreach Inst = ["XVFLOGB_D", "XVFCLASS_D", "XVFSQRT_D", "XVFRECIP_D", "XVFRSQRT_
+   def : Pat<(deriveLASXIntrinsic<Inst>.ret (v4f64 LASX256:$xj)),
+             (!cast<LAInst>(Inst) LASX256:$xj)>;
+ 
++// 256-Bit vector FP approximate reciprocal operation
++let Predicates = [HasFrecipe] in {
++foreach Inst = ["XVFRECIPE_S", "XVFRSQRTE_S"] in
++  def : Pat<(deriveLASXIntrinsic<Inst>.ret (v8f32 LASX256:$xj)),
++            (!cast<LAInst>(Inst) LASX256:$xj)>;
++foreach Inst = ["XVFRECIPE_D", "XVFRSQRTE_D"] in
++  def : Pat<(deriveLASXIntrinsic<Inst>.ret (v4f64 LASX256:$xj)),
++            (!cast<LAInst>(Inst) LASX256:$xj)>;
++}
++
+ def : Pat<(int_loongarch_lasx_xvpickve_w_f v8f32:$xj, timm:$imm),
+           (XVPICKVE_W v8f32:$xj, (to_valid_timm timm:$imm))>;
+ def : Pat<(int_loongarch_lasx_xvpickve_d_f v4f64:$xj, timm:$imm),
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+index 6d60d7074ec3..0580683c3ce3 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+@@ -2195,6 +2195,16 @@ foreach Inst = ["VFLOGB_D", "VFCLASS_D", "VFSQRT_D", "VFRECIP_D", "VFRSQRT_D",
+   def : Pat<(deriveLSXIntrinsic<Inst>.ret (v2f64 LSX128:$vj)),
+             (!cast<LAInst>(Inst) LSX128:$vj)>;
+ 
++// 128-Bit vector FP approximate reciprocal operation
++let Predicates = [HasFrecipe] in {
++foreach Inst = ["VFRECIPE_S", "VFRSQRTE_S"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret (v4f32 LSX128:$vj)),
++            (!cast<LAInst>(Inst) LSX128:$vj)>;
++foreach Inst = ["VFRECIPE_D", "VFRSQRTE_D"] in
++  def : Pat<(deriveLSXIntrinsic<Inst>.ret (v2f64 LSX128:$vj)),
++            (!cast<LAInst>(Inst) LSX128:$vj)>;
++}
++
+ // load
+ def : Pat<(int_loongarch_lsx_vld GPR:$rj, timm:$imm),
+           (VLD GPR:$rj, (to_valid_timm timm:$imm))>;
+diff --git a/llvm/lib/Target/LoongArch/LoongArchSubtarget.h b/llvm/lib/Target/LoongArch/LoongArchSubtarget.h
+index 174e4cba8326..11c0b39e176e 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchSubtarget.h
++++ b/llvm/lib/Target/LoongArch/LoongArchSubtarget.h
+@@ -45,6 +45,7 @@ class LoongArchSubtarget : public LoongArchGenSubtargetInfo {
+   bool HasUAL = false;
+   bool HasLinkerRelax = false;
+   bool HasExpAutoVec = false;
++  bool HasFrecipe = false;
+   unsigned GRLen = 32;
+   MVT GRLenVT = MVT::i32;
+   LoongArchABI::ABI TargetABI = LoongArchABI::ABI_Unknown;
+@@ -104,6 +105,7 @@ public:
+   bool hasUAL() const { return HasUAL; }
+   bool hasLinkerRelax() const { return HasLinkerRelax; }
+   bool hasExpAutoVec() const { return HasExpAutoVec; }
++  bool hasFrecipe() const { return HasFrecipe; }
+   MVT getGRLenVT() const { return GRLenVT; }
+   unsigned getGRLen() const { return GRLen; }
+   LoongArchABI::ABI getTargetABI() const { return TargetABI; }
+diff --git a/llvm/test/CodeGen/LoongArch/intrinsic-frecipe-dbl.ll b/llvm/test/CodeGen/LoongArch/intrinsic-frecipe-dbl.ll
+new file mode 100644
+index 000000000000..9f572500caa0
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/intrinsic-frecipe-dbl.ll
+@@ -0,0 +1,26 @@
++; RUN: llc --mtriple=loongarch32 --mattr=+d,+frecipe < %s | FileCheck %s
++; RUN: llc --mtriple=loongarch64 --mattr=+d,+frecipe < %s | FileCheck %s
++
++declare double @llvm.loongarch.frecipe.d(double)
++
++define double @frecipe_d(double %a) {
++; CHECK-LABEL: frecipe_d:
++; CHECK:       # %bb.0: # %entry
++; CHECK-NEXT:    frecipe.d $fa0, $fa0
++; CHECK-NEXT:    ret
++entry:
++  %res = call double @llvm.loongarch.frecipe.d(double %a)
++  ret double %res
++}
++
++declare double @llvm.loongarch.frsqrte.d(double)
++
++define double @frsqrte_d(double %a) {
++; CHECK-LABEL: frsqrte_d:
++; CHECK:       # %bb.0: # %entry
++; CHECK-NEXT:    frsqrte.d $fa0, $fa0
++; CHECK-NEXT:    ret
++entry:
++  %res = call double @llvm.loongarch.frsqrte.d(double %a)
++  ret double %res
++}
+diff --git a/llvm/test/CodeGen/LoongArch/intrinsic-frecipe-flt.ll b/llvm/test/CodeGen/LoongArch/intrinsic-frecipe-flt.ll
+new file mode 100644
+index 000000000000..0b2029f2e44a
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/intrinsic-frecipe-flt.ll
+@@ -0,0 +1,26 @@
++; RUN: llc --mtriple=loongarch32 --mattr=+f,+frecipe < %s | FileCheck %s
++; RUN: llc --mtriple=loongarch64 --mattr=+f,+frecipe < %s | FileCheck %s
++
++declare float @llvm.loongarch.frecipe.s(float)
++
++define float @frecipe_s(float %a) {
++; CHECK-LABEL: frecipe_s:
++; CHECK:       # %bb.0: # %entry
++; CHECK-NEXT:    frecipe.s $fa0, $fa0
++; CHECK-NEXT:    ret
++entry:
++  %res = call float @llvm.loongarch.frecipe.s(float %a)
++  ret float %res
++}
++
++declare float @llvm.loongarch.frsqrte.s(float)
++
++define float @frsqrte_s(float %a) {
++; CHECK-LABEL: frsqrte_s:
++; CHECK:       # %bb.0: # %entry
++; CHECK-NEXT:    frsqrte.s $fa0, $fa0
++; CHECK-NEXT:    ret
++entry:
++  %res = call float @llvm.loongarch.frsqrte.s(float %a)
++  ret float %res
++}
+diff --git a/llvm/test/CodeGen/LoongArch/lasx/intrinsic-frecipe.ll b/llvm/test/CodeGen/LoongArch/lasx/intrinsic-frecipe.ll
+new file mode 100644
+index 000000000000..215436823af8
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lasx/intrinsic-frecipe.ll
+@@ -0,0 +1,26 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py
++; RUN: llc --mtriple=loongarch64 --mattr=+lasx,+frecipe < %s | FileCheck %s
++
++declare <8 x float> @llvm.loongarch.lasx.xvfrecipe.s(<8 x float>)
++
++define <8 x float> @lasx_xvfrecipe_s(<8 x float> %va) nounwind {
++; CHECK-LABEL: lasx_xvfrecipe_s:
++; CHECK:       # %bb.0: # %entry
++; CHECK-NEXT:    xvfrecipe.s $xr0, $xr0
++; CHECK-NEXT:    ret
++entry:
++  %res = call <8 x float> @llvm.loongarch.lasx.xvfrecipe.s(<8 x float> %va)
++  ret <8 x float> %res
++}
++
++declare <4 x double> @llvm.loongarch.lasx.xvfrecipe.d(<4 x double>)
++
++define <4 x double> @lasx_xvfrecipe_d(<4 x double> %va) nounwind {
++; CHECK-LABEL: lasx_xvfrecipe_d:
++; CHECK:       # %bb.0: # %entry
++; CHECK-NEXT:    xvfrecipe.d $xr0, $xr0
++; CHECK-NEXT:    ret
++entry:
++  %res = call <4 x double> @llvm.loongarch.lasx.xvfrecipe.d(<4 x double> %va)
++  ret <4 x double> %res
++}
+diff --git a/llvm/test/CodeGen/LoongArch/lasx/intrinsic-frsqrte.ll b/llvm/test/CodeGen/LoongArch/lasx/intrinsic-frsqrte.ll
+new file mode 100644
+index 000000000000..ad36c3aa5c29
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lasx/intrinsic-frsqrte.ll
+@@ -0,0 +1,26 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py
++; RUN: llc --mtriple=loongarch64 --mattr=+lasx,+frecipe < %s | FileCheck %s
++
++declare <8 x float> @llvm.loongarch.lasx.xvfrsqrte.s(<8 x float>)
++
++define <8 x float> @lasx_xvfrsqrte_s(<8 x float> %va) nounwind {
++; CHECK-LABEL: lasx_xvfrsqrte_s:
++; CHECK:       # %bb.0: # %entry
++; CHECK-NEXT:    xvfrsqrte.s $xr0, $xr0
++; CHECK-NEXT:    ret
++entry:
++  %res = call <8 x float> @llvm.loongarch.lasx.xvfrsqrte.s(<8 x float> %va)
++  ret <8 x float> %res
++}
++
++declare <4 x double> @llvm.loongarch.lasx.xvfrsqrte.d(<4 x double>)
++
++define <4 x double> @lasx_xvfrsqrte_d(<4 x double> %va) nounwind {
++; CHECK-LABEL: lasx_xvfrsqrte_d:
++; CHECK:       # %bb.0: # %entry
++; CHECK-NEXT:    xvfrsqrte.d $xr0, $xr0
++; CHECK-NEXT:    ret
++entry:
++  %res = call <4 x double> @llvm.loongarch.lasx.xvfrsqrte.d(<4 x double> %va)
++  ret <4 x double> %res
++}
+diff --git a/llvm/test/CodeGen/LoongArch/lsx/intrinsic-frecipe.ll b/llvm/test/CodeGen/LoongArch/lsx/intrinsic-frecipe.ll
+new file mode 100644
+index 000000000000..1b7a97d9f972
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lsx/intrinsic-frecipe.ll
+@@ -0,0 +1,26 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py
++; RUN: llc --mtriple=loongarch64 --mattr=+lsx,+frecipe < %s | FileCheck %s
++
++declare <4 x float> @llvm.loongarch.lsx.vfrecipe.s(<4 x float>)
++
++define <4 x float> @lsx_vfrecipe_s(<4 x float> %va) nounwind {
++; CHECK-LABEL: lsx_vfrecipe_s:
++; CHECK:       # %bb.0: # %entry
++; CHECK-NEXT:    vfrecipe.s $vr0, $vr0
++; CHECK-NEXT:    ret
++entry:
++  %res = call <4 x float> @llvm.loongarch.lsx.vfrecipe.s(<4 x float> %va)
++  ret <4 x float> %res
++}
++
++declare <2 x double> @llvm.loongarch.lsx.vfrecipe.d(<2 x double>)
++
++define <2 x double> @lsx_vfrecipe_d(<2 x double> %va) nounwind {
++; CHECK-LABEL: lsx_vfrecipe_d:
++; CHECK:       # %bb.0: # %entry
++; CHECK-NEXT:    vfrecipe.d $vr0, $vr0
++; CHECK-NEXT:    ret
++entry:
++  %res = call <2 x double> @llvm.loongarch.lsx.vfrecipe.d(<2 x double> %va)
++  ret <2 x double> %res
++}
+diff --git a/llvm/test/CodeGen/LoongArch/lsx/intrinsic-frsqrte.ll b/llvm/test/CodeGen/LoongArch/lsx/intrinsic-frsqrte.ll
+new file mode 100644
+index 000000000000..3cd6c78e87d7
+--- /dev/null
++++ b/llvm/test/CodeGen/LoongArch/lsx/intrinsic-frsqrte.ll
+@@ -0,0 +1,26 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py
++; RUN: llc --mtriple=loongarch64 --mattr=+lsx,+frecipe < %s | FileCheck %s
++
++declare <4 x float> @llvm.loongarch.lsx.vfrsqrte.s(<4 x float>)
++
++define <4 x float> @lsx_vfrsqrte_s(<4 x float> %va) nounwind {
++; CHECK-LABEL: lsx_vfrsqrte_s:
++; CHECK:       # %bb.0: # %entry
++; CHECK-NEXT:    vfrsqrte.s $vr0, $vr0
++; CHECK-NEXT:    ret
++entry:
++  %res = call <4 x float> @llvm.loongarch.lsx.vfrsqrte.s(<4 x float> %va)
++  ret <4 x float> %res
++}
++
++declare <2 x double> @llvm.loongarch.lsx.vfrsqrte.d(<2 x double>)
++
++define <2 x double> @lsx_vfrsqrte_d(<2 x double> %va) nounwind {
++; CHECK-LABEL: lsx_vfrsqrte_d:
++; CHECK:       # %bb.0: # %entry
++; CHECK-NEXT:    vfrsqrte.d $vr0, $vr0
++; CHECK-NEXT:    ret
++entry:
++  %res = call <2 x double> @llvm.loongarch.lsx.vfrsqrte.d(<2 x double> %va)
++  ret <2 x double> %res
++}
+-- 
+2.20.1
+

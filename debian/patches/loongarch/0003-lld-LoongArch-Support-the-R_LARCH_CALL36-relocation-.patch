@@ -1,0 +1,136 @@
+From 2b870b1f213f2d645f4fa685371fbefea09b2969 Mon Sep 17 00:00:00 2001
+From: Lu Weining <luweining@loongson.cn>
+Date: Mon, 25 Dec 2023 17:40:48 +0800
+Subject: [PATCH 03/23] [lld][LoongArch] Support the R_LARCH_CALL36 relocation
+ type (#73346)
+
+R_LARCH_CALL36 was designed for function call on medium code model where
+the 2 instructions (pcaddu18i + jirl) must be adjacent. This is expected
+to replace current medium code model implementation, i.e.
+R_LARCH_PCALA_{HI20,LO12} on pcalau12i + jirl.
+
+See https://github.com/loongson/la-abi-specs/pull/3 for more details.
+
+(cherry picked from commit 88548df0fc08364bd03148c936e36f0bb07dde8a)
+---
+ lld/ELF/Arch/LoongArch.cpp      | 20 ++++++++++
+ lld/test/ELF/loongarch-call36.s | 69 +++++++++++++++++++++++++++++++++
+ 2 files changed, 89 insertions(+)
+ create mode 100644 lld/test/ELF/loongarch-call36.s
+
+diff --git a/lld/ELF/Arch/LoongArch.cpp b/lld/ELF/Arch/LoongArch.cpp
+index 160fab4aeba9..72d9c6838e31 100644
+--- a/lld/ELF/Arch/LoongArch.cpp
++++ b/lld/ELF/Arch/LoongArch.cpp
+@@ -479,6 +479,7 @@ RelExpr LoongArch::getRelExpr(const RelType type, const Symbol &s,
+   case R_LARCH_B16:
+   case R_LARCH_B21:
+   case R_LARCH_B26:
++  case R_LARCH_CALL36:
+     return R_PLT_PC;
+   case R_LARCH_GOT_PC_HI20:
+   case R_LARCH_GOT64_PC_LO20:
+@@ -607,6 +608,25 @@ void LoongArch::relocate(uint8_t *loc, const Relocation &rel,
+     write32le(loc, setD10k16(read32le(loc), val >> 2));
+     return;
+ 
++  case R_LARCH_CALL36: {
++    // This relocation is designed for adjancent pcaddu18i+jirl pairs that
++    // are patched in one time. Because of sign extension of these insns'
++    // immediate fields, the relocation range is [-128G - 0x20000, +128G -
++    // 0x20000) (of course must be 4-byte aligned).
++    if (((int64_t)val + 0x20000) != llvm::SignExtend64(val + 0x20000, 38))
++      reportRangeError(loc, rel, Twine(val), llvm::minIntN(38) - 0x20000,
++                       llvm::maxIntN(38) - 0x20000);
++    checkAlignment(loc, val, 4, rel);
++    // Since jirl performs sign extension on the offset immediate, adds (1<<17)
++    // to original val to get the correct hi20.
++    uint32_t hi20 = extractBits(val + (1 << 17), 37, 18);
++    // Despite the name, the lower part is actually 18 bits with 4-byte aligned.
++    uint32_t lo16 = extractBits(val, 17, 2);
++    write32le(loc, setJ20(read32le(loc), hi20));
++    write32le(loc + 4, setK16(read32le(loc + 4), lo16));
++    return;
++  }
++
+   // Relocs intended for `addi`, `ld` or `st`.
+   case R_LARCH_PCALA_LO12:
+     // We have to again inspect the insn word to handle the R_LARCH_PCALA_LO12
+diff --git a/lld/test/ELF/loongarch-call36.s b/lld/test/ELF/loongarch-call36.s
+new file mode 100644
+index 000000000000..2d25a2ac64ed
+--- /dev/null
++++ b/lld/test/ELF/loongarch-call36.s
+@@ -0,0 +1,69 @@
++# REQUIRES: loongarch
++
++# RUN: rm -rf %t && split-file %s %t
++# RUN: llvm-mc --filetype=obj --triple=loongarch64-unknown-elf %t/a.s -o %t/a.o
++
++# RUN: ld.lld %t/a.o --section-start=.text=0x20010 --section-start=.sec.foo=0x60020 -o %t/exe1
++# RUN: llvm-objdump --no-show-raw-insn -d %t/exe1 | FileCheck --match-full-lines %s --check-prefix=EXE1
++## hi20 = target - pc + (1 << 17) >> 18 = 0x60020 - 0x20010 + 0x20000 >> 18 = 1
++## lo18 = target - pc & (1 << 18) - 1 = 0x60020 - 0x20010 & 0x3ffff = 16
++# EXE1:      20010: pcaddu18i $t0, 1
++# EXE1-NEXT: 20014: jirl $zero, $t0, 16
++
++# RUN: ld.lld %t/a.o --section-start=.text=0x20010 --section-start=.sec.foo=0x40020 -o %t/exe2
++# RUN: llvm-objdump --no-show-raw-insn -d %t/exe2 | FileCheck --match-full-lines %s --check-prefix=EXE2
++## hi20 = target - pc + (1 << 17) >> 18 = 0x40020 - 0x20010 + 0x20000 >> 18 = 1
++## lo18 = target - pc & (1 << 18) - 1 = 0x40020 - 0x20010 & 0x3ffff = -131056
++# EXE2:      20010: pcaddu18i $t0, 1
++# EXE2-NEXT: 20014: jirl $zero, $t0, -131056
++
++# RUN: ld.lld %t/a.o -shared -T %t/a.t -o %t/a.so
++# RUN: llvm-readelf -x .got.plt %t/a.so | FileCheck --check-prefix=GOTPLT %s
++# RUN: llvm-objdump -d --no-show-raw-insn %t/a.so | FileCheck --check-prefix=SO %s
++## PLT should be present in this case.
++# SO:    Disassembly of section .plt:
++# SO:    <.plt>:
++##       foo@plt:
++# SO:    1234520:  pcaddu12i $t3, 64{{$}}
++# SO-NEXT:         ld.d $t3, $t3, 544{{$}}
++# SO-NEXT:         jirl $t1, $t3, 0
++# SO-NEXT:         nop
++
++# SO:   Disassembly of section .text:
++# SO:   <_start>:
++## hi20 = foo@plt - pc + (1 << 17) >> 18 = 0x1234520 - 0x1274670 + 0x20000 >> 18 = -1
++## lo18 = foo@plt - pc & (1 << 18) - 1 = 0x1234520 - 0x1274670 & 0x3ffff = -336
++# SO-NEXT: pcaddu18i $t0, -1{{$}}
++# SO-NEXT: jirl $zero, $t0, -336{{$}}
++
++# GOTPLT:      section '.got.plt':
++# GOTPLT-NEXT: 0x01274730 00000000 00000000 00000000 00000000
++# GOTPLT-NEXT: 0x01274740 00452301 00000000
++
++# RUN: not ld.lld %t/a.o --section-start=.text=0x20000 --section-start=.sec.foo=0x2000020000 -o /dev/null 2>&1 | \
++# RUN:   FileCheck -DFILE=%t/a.o --check-prefix=ERROR-RANGE %s
++# ERROR-RANGE: error: [[FILE]]:(.text+0x0): relocation R_LARCH_CALL36 out of range: 137438953472 is not in [-137439084544, 137438822399]; references 'foo'
++
++## Impossible case in reality becasue all LoongArch instructions are fixed 4-bytes long.
++# RUN: not ld.lld %t/a.o --section-start=.text=0x20000 --section-start=.sec.foo=0x40001 -o /dev/null 2>&1 | \
++# RUN:   FileCheck -DFILE=%t/a.o --check-prefix=ERROR-ALIGN %s
++# ERROR-ALIGN: error: [[FILE]]:(.text+0x0): improper alignment for relocation R_LARCH_CALL36: 0x20001 is not aligned to 4 bytes
++
++#--- a.t
++SECTIONS {
++ .plt   0x1234500: { *(.plt) }
++ .text  0x1274670: { *(.text) }
++}
++
++#--- a.s
++.text
++.global _start
++_start:
++  .reloc ., R_LARCH_CALL36, foo
++  pcaddu18i $t0, 0
++  jirl      $zero, $t0, 0
++
++.section .sec.foo,"ax"
++.global foo
++foo:
++  ret
+-- 
+2.20.1
+

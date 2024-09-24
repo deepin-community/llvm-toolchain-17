@@ -1,0 +1,154 @@
+From b2f8e92e88bf63e54ace9b2f9b2aa77dcf0c50c4 Mon Sep 17 00:00:00 2001
+From: Zhaoxin Yang <yangzhaoxin@loongson.cn>
+Date: Thu, 11 Jul 2024 17:43:38 +0800
+Subject: [PATCH 15/23] [LoongArch][clang] Modify `loongarch-msimd.c` to avoid
+ `grep -o`. NFC (#98442)
+
+Address buildbot failure:
+https://lab.llvm.org/buildbot/#/builders/64/builds/250/steps/6/logs/FAIL__Clang__loongarch-msimd_c
+
+(cherry picked from commit 74b933c28e777fdc04e50f5f96e4f7a4ad1e79a6)
+---
+ clang/test/Driver/loongarch-msimd.c | 42 +++--------------------------
+ 1 file changed, 4 insertions(+), 38 deletions(-)
+
+diff --git a/clang/test/Driver/loongarch-msimd.c b/clang/test/Driver/loongarch-msimd.c
+index 984f3e8bf2bf..cd463300c874 100644
+--- a/clang/test/Driver/loongarch-msimd.c
++++ b/clang/test/Driver/loongarch-msimd.c
+@@ -2,128 +2,94 @@
+ 
+ /// COM: -msimd=none
+ // RUN: %clang --target=loongarch64 -mlasx -msimd=none -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,LASX
+ // RUN: %clang --target=loongarch64 -mlasx -mlsx -msimd=none -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,LASX
+ 
+ // RUN: %clang --target=loongarch64 -msimd=none -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mlasx -mno-lasx -msimd=none -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mlasx -mno-lasx -mlsx -mno-lsx -msimd=none -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mlasx -mno-lasx -mno-lsx -msimd=none -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mlsx -mno-lsx -msimd=none -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mno-lasx -msimd=none -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mno-lasx -mlsx -mno-lsx -msimd=none -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mno-lasx -mno-lsx -msimd=none -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mno-lsx -msimd=none -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
+ 
+ // RUN: %clang --target=loongarch64 -mlasx -mno-lasx -mlsx -msimd=none -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mno-lasx -mlsx -msimd=none -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mlsx -msimd=none -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
+ 
+ 
+ /// COM: -msimd=lsx
+ // RUN: %clang --target=loongarch64 -mlasx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,LASX
+ // RUN: %clang --target=loongarch64 -mlasx -mlsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,LASX
+ 
+ // RUN: %clang --target=loongarch64 -mlasx -mno-lasx -mno-lsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mlsx -mno-lsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mno-lasx -mlsx -mno-lsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mno-lasx -mno-lsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mno-lsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mlasx -mno-lasx -mlsx -mno-lsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
+ 
+ // RUN: %clang --target=loongarch64 -msimd=lsx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mlasx -mno-lasx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mlsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mno-lasx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mno-lasx -mlsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
+ 
+ 
+ /// COM: -msimd=lasx
+ // RUN: %clang --target=loongarch64 -msimd=lasx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,LASX
+ // RUN: %clang --target=loongarch64 -mlasx -msimd=lasx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,LASX
+ // RUN: %clang --target=loongarch64 -mlasx -mlsx -msimd=lasx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,LASX
+ // RUN: %clang --target=loongarch64 -mlsx -msimd=lasx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,LASX
+ 
+ // RUN: %clang --target=loongarch64 -mlasx -mno-lasx -msimd=lasx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mno-lasx -msimd=lasx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
+ 
+ // RUN: %clang --target=loongarch64 -mlasx -mno-lasx -mlsx -msimd=lasx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mno-lasx -mlsx -msimd=lasx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mlasx -mno-lasx -mlsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
+ 
+ 
+-// LSX: "-target-feature" "+lsx"
+-// LASX: "-target-feature" "+lasx"
++// NOLSX-NOT: "-target-feature" "+lsx"
++// NOLASX-NOT: "-target-feature" "+lasx"
++// LSX-DAG: "-target-feature" "+lsx"
++// LASX-DAG: "-target-feature" "+lasx"
+ // NOLSX-NOT: "-target-feature" "+lsx"
+ // NOLASX-NOT: "-target-feature" "+lasx"
+-- 
+2.20.1
+

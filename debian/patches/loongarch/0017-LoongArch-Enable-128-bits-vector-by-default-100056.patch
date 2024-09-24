@@ -1,0 +1,284 @@
+From 17f537eeaef8db451c70fc56a921e5ff542f713b Mon Sep 17 00:00:00 2001
+From: Ami-zhang <zhanglimin@loongson.cn>
+Date: Tue, 23 Jul 2024 14:02:04 +0800
+Subject: [PATCH 17/23] [LoongArch] Enable 128-bits vector by default (#100056)
+
+This commit is to enable 128 vector feature by default, in order to be
+consistent with gcc.
+
+(cherry picked from commit b4ef0ba244899a64a1b1e6448eca942cfa5eda18)
+---
+ .../lib/Driver/ToolChains/Arch/LoongArch.cpp  | 76 +++++++++++--------
+ .../test/Driver/loongarch-default-features.c  |  2 +-
+ clang/test/Driver/loongarch-mlasx.c           |  6 +-
+ clang/test/Driver/loongarch-msimd.c           |  4 +-
+ clang/test/Driver/loongarch-msingle-float.c   |  4 +-
+ clang/test/Driver/loongarch-msoft-float.c     |  4 +-
+ clang/test/Preprocessor/init-loongarch.c      |  8 +-
+ 7 files changed, 60 insertions(+), 44 deletions(-)
+
+diff --git a/clang/lib/Driver/ToolChains/Arch/LoongArch.cpp b/clang/lib/Driver/ToolChains/Arch/LoongArch.cpp
+index 8b3d2837a4e5..87d7b30ef5d3 100644
+--- a/clang/lib/Driver/ToolChains/Arch/LoongArch.cpp
++++ b/clang/lib/Driver/ToolChains/Arch/LoongArch.cpp
+@@ -127,6 +127,11 @@ void loongarch::getLoongArchTargetFeatures(const Driver &D,
+                                            const llvm::Triple &Triple,
+                                            const ArgList &Args,
+                                            std::vector<StringRef> &Features) {
++  // Enable the `lsx` feature on 64-bit LoongArch by default.
++  if (Triple.isLoongArch64() &&
++      (!Args.hasArgNoClaim(clang::driver::options::OPT_march_EQ)))
++    Features.push_back("+lsx");
++
+   std::string ArchName;
+   if (const Arg *A = Args.getLastArg(options::OPT_march_EQ))
+     ArchName = A->getValue();
+@@ -145,9 +150,11 @@ void loongarch::getLoongArchTargetFeatures(const Driver &D,
+     } else if (A->getOption().matches(options::OPT_msingle_float)) {
+       Features.push_back("+f");
+       Features.push_back("-d");
++      Features.push_back("-lsx");
+     } else /*Soft-float*/ {
+       Features.push_back("-f");
+       Features.push_back("-d");
++      Features.push_back("-lsx");
+     }
+   } else if (const Arg *A = Args.getLastArg(options::OPT_mfpu_EQ)) {
+     StringRef FPU = A->getValue();
+@@ -157,9 +164,11 @@ void loongarch::getLoongArchTargetFeatures(const Driver &D,
+     } else if (FPU == "32") {
+       Features.push_back("+f");
+       Features.push_back("-d");
++      Features.push_back("-lsx");
+     } else if (FPU == "0" || FPU == "none") {
+       Features.push_back("-f");
+       Features.push_back("-d");
++      Features.push_back("-lsx");
+     } else {
+       D.Diag(diag::err_drv_loongarch_invalid_mfpu_EQ) << FPU;
+     }
+@@ -175,6 +184,42 @@ void loongarch::getLoongArchTargetFeatures(const Driver &D,
+     A->ignoreTargetSpecific();
+   if (Arg *A = Args.getLastArgNoClaim(options::OPT_mfpu_EQ))
+     A->ignoreTargetSpecific();
++  if (Arg *A = Args.getLastArgNoClaim(options::OPT_msimd_EQ))
++    A->ignoreTargetSpecific();
++
++  // Select lsx/lasx feature determined by -msimd=.
++  // Option -msimd= precedes -m[no-]lsx and -m[no-]lasx.
++  if (const Arg *A = Args.getLastArg(options::OPT_msimd_EQ)) {
++    StringRef MSIMD = A->getValue();
++    if (MSIMD == "lsx") {
++      // Option -msimd=lsx depends on 64-bit FPU.
++      // -m*-float and -mfpu=none/0/32 conflict with -msimd=lsx.
++      if (llvm::find(Features, "-d") != Features.end())
++        D.Diag(diag::err_drv_loongarch_wrong_fpu_width_for_lsx);
++      else
++        Features.push_back("+lsx");
++    } else if (MSIMD == "lasx") {
++      // Option -msimd=lasx depends on 64-bit FPU and LSX.
++      // -m*-float, -mfpu=none/0/32 and -mno-lsx conflict with -msimd=lasx.
++      if (llvm::find(Features, "-d") != Features.end())
++        D.Diag(diag::err_drv_loongarch_wrong_fpu_width_for_lasx);
++      else if (llvm::find(Features, "-lsx") != Features.end())
++        D.Diag(diag::err_drv_loongarch_invalid_simd_option_combination);
++
++      // The command options do not contain -mno-lasx.
++      if (!Args.getLastArg(options::OPT_mno_lasx)) {
++        Features.push_back("+lsx");
++        Features.push_back("+lasx");
++      }
++    } else if (MSIMD == "none") {
++      if (llvm::find(Features, "+lsx") != Features.end())
++        Features.push_back("-lsx");
++      if (llvm::find(Features, "+lasx") != Features.end())
++        Features.push_back("-lasx");
++    } else {
++      D.Diag(diag::err_drv_loongarch_invalid_msimd_EQ) << MSIMD;
++    }
++  }
+ 
+   // Select lsx feature determined by -m[no-]lsx.
+   if (const Arg *A = Args.getLastArg(options::OPT_mlsx, options::OPT_mno_lsx)) {
+@@ -198,8 +243,6 @@ void loongarch::getLoongArchTargetFeatures(const Driver &D,
+     if (A->getOption().matches(options::OPT_mlasx)) {
+       if (llvm::find(Features, "-d") != Features.end())
+         D.Diag(diag::err_drv_loongarch_wrong_fpu_width_for_lasx);
+-      else if (llvm::find(Features, "-lsx") != Features.end())
+-        D.Diag(diag::err_drv_loongarch_invalid_simd_option_combination);
+       else { /*-mlasx*/
+         Features.push_back("+lsx");
+         Features.push_back("+lasx");
+@@ -207,35 +250,6 @@ void loongarch::getLoongArchTargetFeatures(const Driver &D,
+     } else /*-mno-lasx*/
+       Features.push_back("-lasx");
+   }
+-
+-  // Select lsx/lasx feature determined by -msimd=.
+-  // Option -msimd= has lower priority than -m[no-]lsx and -m[no-]lasx.
+-  if (const Arg *A = Args.getLastArg(options::OPT_msimd_EQ)) {
+-    StringRef MSIMD = A->getValue();
+-    if (MSIMD == "lsx") {
+-      // Option -msimd=lsx depends on 64-bit FPU.
+-      // -m*-float and -mfpu=none/0/32 conflict with -mlsx.
+-      if (llvm::find(Features, "-d") != Features.end())
+-        D.Diag(diag::err_drv_loongarch_wrong_fpu_width_for_lsx);
+-      // The previous option does not contain feature -lsx.
+-      else if (llvm::find(Features, "-lsx") == Features.end())
+-        Features.push_back("+lsx");
+-    } else if (MSIMD == "lasx") {
+-      // Option -msimd=lasx depends on 64-bit FPU and LSX.
+-      // -m*-float and -mfpu=none/0/32 conflict with -mlsx.
+-      if (llvm::find(Features, "-d") != Features.end())
+-        D.Diag(diag::err_drv_loongarch_wrong_fpu_width_for_lasx);
+-      else if (llvm::find(Features, "-lsx") != Features.end())
+-        D.Diag(diag::err_drv_loongarch_invalid_simd_option_combination);
+-      // The previous option does not contain feature -lasx.
+-      else if (llvm::find(Features, "-lasx") == Features.end()) {
+-        Features.push_back("+lsx");
+-        Features.push_back("+lasx");
+-      }
+-    } else if (MSIMD != "none") {
+-      D.Diag(diag::err_drv_loongarch_invalid_msimd_EQ) << MSIMD;
+-    }
+-  }
+ }
+ 
+ std::string loongarch::postProcessTargetCPUString(const std::string &CPU,
+diff --git a/clang/test/Driver/loongarch-default-features.c b/clang/test/Driver/loongarch-default-features.c
+index 3cdf3ba3d23e..90634bbcf003 100644
+--- a/clang/test/Driver/loongarch-default-features.c
++++ b/clang/test/Driver/loongarch-default-features.c
+@@ -2,7 +2,7 @@
+ // RUN: %clang --target=loongarch64 -S -emit-llvm %s -o - | FileCheck %s --check-prefix=LA64
+ 
+ // LA32: "target-features"="+32bit"
+-// LA64: "target-features"="+64bit,+d,+f,+ual"
++// LA64: "target-features"="+64bit,+d,+f,+lsx,+ual"
+ 
+ int foo(void) {
+   return 3;
+diff --git a/clang/test/Driver/loongarch-mlasx.c b/clang/test/Driver/loongarch-mlasx.c
+index 0b934f125c9e..87634ff5a9a4 100644
+--- a/clang/test/Driver/loongarch-mlasx.c
++++ b/clang/test/Driver/loongarch-mlasx.c
+@@ -5,7 +5,7 @@
+ // RUN: %clang --target=loongarch64 -mno-lasx -fsyntax-only %s -### 2>&1 | \
+ // RUN:   FileCheck %s --check-prefix=CC1-NOLASX
+ // RUN: %clang --target=loongarch64 -mlasx -mno-lasx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   FileCheck %s --check-prefix=CC1-NOLASX
++// RUN:   FileCheck %s --check-prefix=CC1-LSX
+ // RUN: %clang --target=loongarch64 -mno-lasx -mlasx -fsyntax-only %s -### 2>&1 | \
+ // RUN:   FileCheck %s --check-prefix=CC1-LASX
+ // RUN: %clang --target=loongarch64 -mlsx -mlasx -fsyntax-only %s -### 2>&1 | \
+@@ -18,7 +18,7 @@
+ // RUN: %clang --target=loongarch64 -mno-lasx -S -emit-llvm %s -o - | \
+ // RUN:   FileCheck %s --check-prefix=IR-NOLASX
+ // RUN: %clang --target=loongarch64 -mlasx -mno-lasx -S -emit-llvm %s -o - | \
+-// RUN:   FileCheck %s --check-prefix=IR-NOLASX
++// RUN:   FileCheck %s --check-prefix=IR-LSX
+ // RUN: %clang --target=loongarch64 -mno-lasx -mlasx -S -emit-llvm %s -o - | \
+ // RUN:   FileCheck %s --check-prefix=IR-LASX
+ // RUN: %clang --target=loongarch64 -mlsx -mlasx -S -emit-llvm %s -o - | \
+@@ -26,9 +26,11 @@
+ // RUN: %clang --target=loongarch64 -mlasx -mlsx -S -emit-llvm %s -o - | \
+ // RUN:   FileCheck %s --check-prefix=IR-LASX
+ 
++// CC1-LSX: "-target-feature" "+lsx"
+ // CC1-LASX: "-target-feature" "+lsx" "-target-feature" "+lasx"
+ // CC1-NOLASX: "-target-feature" "-lasx"
+ 
++// IR-LSX: attributes #[[#]] ={{.*}}"target-features"="{{(.*,)?}}+lsx{{(,.*)?}}"
+ // IR-LASX: attributes #[[#]] ={{.*}}"target-features"="{{(.*,)?}}+lasx{{(,.*)?}}"
+ // IR-NOLASX: attributes #[[#]] ={{.*}}"target-features"="{{(.*,)?}}-lasx{{(,.*)?}}"
+ 
+diff --git a/clang/test/Driver/loongarch-msimd.c b/clang/test/Driver/loongarch-msimd.c
+index cd463300c874..49d298e1b2e3 100644
+--- a/clang/test/Driver/loongarch-msimd.c
++++ b/clang/test/Driver/loongarch-msimd.c
+@@ -75,9 +75,9 @@
+ // RUN:   FileCheck %s --check-prefixes=LSX,LASX
+ 
+ // RUN: %clang --target=loongarch64 -mlasx -mno-lasx -msimd=lasx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++// RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
+ // RUN: %clang --target=loongarch64 -mno-lasx -msimd=lasx -fsyntax-only %s -### 2>&1 | \
+-// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++// RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
+ 
+ // RUN: %clang --target=loongarch64 -mlasx -mno-lasx -mlsx -msimd=lasx -fsyntax-only %s -### 2>&1 | \
+ // RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
+diff --git a/clang/test/Driver/loongarch-msingle-float.c b/clang/test/Driver/loongarch-msingle-float.c
+index bd9b3e8a8c01..4eb0865b53a5 100644
+--- a/clang/test/Driver/loongarch-msingle-float.c
++++ b/clang/test/Driver/loongarch-msingle-float.c
+@@ -11,10 +11,10 @@
+ // WARN: warning: ignoring '-mabi=lp64s' as it conflicts with that implied by '-msingle-float' (lp64f)
+ // WARN: warning: ignoring '-mfpu=64' as it conflicts with that implied by '-msingle-float' (32)
+ 
+-// CC1: "-target-feature" "+f"{{.*}} "-target-feature" "-d"
++// CC1: "-target-feature" "+f"{{.*}} "-target-feature" "-d" "-target-feature" "-lsx"
+ // CC1: "-target-abi" "lp64f"
+ 
+-// IR: attributes #[[#]] ={{.*}}"target-features"="{{(.*,)?}}+f,{{(.*,)?}}-d"
++// IR: attributes #[[#]] ={{.*}}"target-features"="{{(.*,)?}}+f,{{(.*,)?}}-d,-lsx"
+ 
+ int foo(void) {
+   return 3;
+diff --git a/clang/test/Driver/loongarch-msoft-float.c b/clang/test/Driver/loongarch-msoft-float.c
+index 0e5121ac84b4..ebf27fb00e30 100644
+--- a/clang/test/Driver/loongarch-msoft-float.c
++++ b/clang/test/Driver/loongarch-msoft-float.c
+@@ -11,10 +11,10 @@
+ // WARN: warning: ignoring '-mabi=lp64d' as it conflicts with that implied by '-msoft-float' (lp64s)
+ // WARN: warning: ignoring '-mfpu=64' as it conflicts with that implied by '-msoft-float' (0)
+ 
+-// CC1: "-target-feature" "-f"{{.*}} "-target-feature" "-d"
++// CC1: "-target-feature" "-f"{{.*}} "-target-feature" "-d" "-target-feature" "-lsx"
+ // CC1: "-target-abi" "lp64s"
+ 
+-// IR: attributes #[[#]] ={{.*}}"target-features"="{{(.*,)?}}-d,{{(.*,)?}}-f{{(,.*)?}}"
++// IR: attributes #[[#]] ={{.*}}"target-features"="{{(.*,)?}}-d,{{(.*,)?}}-f,-lsx"
+ 
+ int foo(void) {
+   return 3;
+diff --git a/clang/test/Preprocessor/init-loongarch.c b/clang/test/Preprocessor/init-loongarch.c
+index 154ad82e0f8c..635d029ce9d3 100644
+--- a/clang/test/Preprocessor/init-loongarch.c
++++ b/clang/test/Preprocessor/init-loongarch.c
+@@ -814,6 +814,8 @@
+ // RUN:   | FileCheck --match-full-lines --check-prefix=MLSX %s
+ // RUN: %clang --target=loongarch64 -mlsx -mno-lasx -x c -E -dM %s -o - \
+ // RUN:   | FileCheck --match-full-lines --check-prefix=MLSX %s
++// RUN: %clang --target=loongarch64 -mno-lasx -x c -E -dM %s -o - \
++// RUN:   | FileCheck --match-full-lines --check-prefix=MLSX %s
+ // RUN: %clang --target=loongarch64 -mno-lasx -mlsx -x c -E -dM %s -o - \
+ // RUN:   | FileCheck --match-full-lines --check-prefix=MLSX %s
+ // MLSX-NOT: #define __loongarch_asx
+@@ -822,12 +824,12 @@
+ 
+ // RUN: %clang --target=loongarch64 -mlasx -x c -E -dM %s -o - \
+ // RUN:   | FileCheck --match-full-lines --check-prefix=MLASX %s
+-// RUN: %clang --target=loongarch64 -mno-lasx -mlasx -x c -E -dM %s -o - \
+-// RUN:   | FileCheck --match-full-lines --check-prefix=MLASX %s
+ // RUN: %clang --target=loongarch64 -mlsx -mlasx -x c -E -dM %s -o - \
+ // RUN:   | FileCheck --match-full-lines --check-prefix=MLASX %s
+ // RUN: %clang --target=loongarch64 -mlasx -mlsx -x c -E -dM %s -o - \
+ // RUN:   | FileCheck --match-full-lines --check-prefix=MLASX %s
++// RUN: %clang --target=loongarch64 -mno-lasx -mlasx -x c -E -dM %s -o - \
++// RUN:   | FileCheck --match-full-lines --check-prefix=MLASX %s
+ // MLASX: #define __loongarch_asx 1
+ // MLASX: #define __loongarch_simd_width 256
+ // MLASX: #define __loongarch_sx 1
+@@ -840,8 +842,6 @@
+ // RUN:   | FileCheck --match-full-lines --check-prefix=MNO-LSX %s
+ // RUN: %clang --target=loongarch64 -mno-lasx -mno-lsx -x c -E -dM %s -o - \
+ // RUN:   | FileCheck --match-full-lines --check-prefix=MNO-LSX %s
+-// RUN: %clang --target=loongarch64 -mno-lasx -x c -E -dM %s -o - \
+-// RUN:   | FileCheck --match-full-lines --check-prefix=MNO-LSX %s
+ // MNO-LSX-NOT: #define __loongarch_asx
+ // MNO-LSX-NOT: #define __loongarch_simd_width
+ // MNO-LSX-NOT: #define __loongarch_sx
+-- 
+2.20.1
+

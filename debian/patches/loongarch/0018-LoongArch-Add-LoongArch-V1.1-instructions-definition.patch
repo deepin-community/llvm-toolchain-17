@@ -1,0 +1,432 @@
+From cac0cc4649362e0b80f61e45aec54341f40f7f77 Mon Sep 17 00:00:00 2001
+From: Ami-zhang <zhanglimin@loongson.cn>
+Date: Wed, 17 Jan 2024 11:15:05 +0800
+Subject: [PATCH 18/23] [LoongArch] Add LoongArch V1.1 instructions definitions
+ and MC tests (#78238)
+
+LoongArch V1.1 instrucions include floating-point approximate reciprocal
+instructions and atomic instrucions. And add testcases for these
+instrucions meanwhile.
+
+(cherry picked from commit 84bdee2875da364be7eb2144b1ae530f6a05f0e2)
+---
+ .../LoongArch/LoongArchFloat32InstrInfo.td    |  2 +
+ .../LoongArch/LoongArchFloat64InstrInfo.td    |  2 +
+ .../Target/LoongArch/LoongArchInstrInfo.td    | 34 ++++++-
+ .../LoongArch/LoongArchLASXInstrInfo.td       |  4 +
+ .../Target/LoongArch/LoongArchLSXInstrInfo.td |  4 +
+ llvm/test/MC/LoongArch/Basic/Float/d-arith.s  |  8 ++
+ llvm/test/MC/LoongArch/Basic/Float/f-arith.s  |  8 ++
+ llvm/test/MC/LoongArch/Basic/Integer/atomic.s | 92 +++++++++++++++++++
+ llvm/test/MC/LoongArch/lasx/frecip.s          |  8 ++
+ llvm/test/MC/LoongArch/lasx/frsqrt.s          |  8 ++
+ llvm/test/MC/LoongArch/lsx/frecip.s           |  8 ++
+ llvm/test/MC/LoongArch/lsx/frsqrt.s           |  8 ++
+ 12 files changed, 184 insertions(+), 2 deletions(-)
+
+diff --git a/llvm/lib/Target/LoongArch/LoongArchFloat32InstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchFloat32InstrInfo.td
+index 65120c083f49..f30837912e75 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchFloat32InstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchFloat32InstrInfo.td
+@@ -50,6 +50,8 @@ def FNEG_S   : FP_ALU_2R<0x01141400>;
+ def FSQRT_S  : FP_ALU_2R<0x01144400>;
+ def FRECIP_S : FP_ALU_2R<0x01145400>;
+ def FRSQRT_S : FP_ALU_2R<0x01146400>;
++def FRECIPE_S : FP_ALU_2R<0x01147400>;
++def FRSQRTE_S : FP_ALU_2R<0x01148400>;
+ def FSCALEB_S : FP_ALU_3R<0x01108000>;
+ def FLOGB_S   : FP_ALU_2R<0x01142400>;
+ def FCOPYSIGN_S : FP_ALU_3R<0x01128000>;
+diff --git a/llvm/lib/Target/LoongArch/LoongArchFloat64InstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchFloat64InstrInfo.td
+index 437c1e4d7be2..0ea4c564b045 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchFloat64InstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchFloat64InstrInfo.td
+@@ -34,6 +34,8 @@ def FNEG_D   : FP_ALU_2R<0x01141800, FPR64>;
+ def FSQRT_D  : FP_ALU_2R<0x01144800, FPR64>;
+ def FRECIP_D : FP_ALU_2R<0x01145800, FPR64>;
+ def FRSQRT_D : FP_ALU_2R<0x01146800, FPR64>;
++def FRECIPE_D : FP_ALU_2R<0x01147800, FPR64>;
++def FRSQRTE_D : FP_ALU_2R<0x01148800, FPR64>;
+ def FSCALEB_D : FP_ALU_3R<0x01110000, FPR64>;
+ def FLOGB_D   : FP_ALU_2R<0x01142800, FPR64>;
+ def FCOPYSIGN_D : FP_ALU_3R<0x01130000, FPR64>;
+diff --git a/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
+index ecd0c2b71b85..756c460f916b 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
+@@ -634,15 +634,24 @@ class AM_3R<bits<32> op>
+     : Fmt3R<op, (outs GPR:$rd), (ins GPR:$rk, GPRMemAtomic:$rj),
+             "$rd, $rk, $rj">;
+ 
+-let hasSideEffects = 0, mayLoad = 1, mayStore = 0 in
++let hasSideEffects = 0, mayLoad = 1, mayStore = 0 in {
+ class LLBase<bits<32> op>
+     : Fmt2RI14<op, (outs GPR:$rd), (ins GPR:$rj, simm14_lsl2:$imm14),
+                "$rd, $rj, $imm14">;
++class LLBase_ACQ<bits<32> op>
++    : Fmt2R<op, (outs GPR:$rd), (ins GPR:$rj), "$rd, $rj">;
++}
+ 
+-let hasSideEffects = 0, mayLoad = 0, mayStore = 1, Constraints = "$rd = $dst" in
++let hasSideEffects = 0, mayLoad = 0, mayStore = 1, Constraints = "$rd = $dst" in {
+ class SCBase<bits<32> op>
+     : Fmt2RI14<op, (outs GPR:$dst), (ins GPR:$rd, GPR:$rj, simm14_lsl2:$imm14),
+                "$rd, $rj, $imm14">;
++class SCBase_128<bits<32> op>
++    : Fmt3R<op, (outs GPR:$dst), (ins GPR:$rd, GPR:$rk, GPR:$rj),
++               "$rd, $rk, $rj">;
++class SCBase_REL<bits<32> op>
++    : Fmt2R<op, (outs GPR:$dst), (ins GPR:$rd, GPR:$rj), "$rd, $rj">;
++}
+ 
+ let hasSideEffects = 1 in
+ class IOCSRRD<bits<32> op>
+@@ -754,6 +763,8 @@ def PRELD : FmtPRELD<(outs), (ins uimm5:$imm5, GPR:$rj, simm12:$imm12),
+ // Atomic Memory Access Instructions
+ def LL_W : LLBase<0x20000000>;
+ def SC_W : SCBase<0x21000000>;
++def LLACQ_W : LLBase_ACQ<0x38578000>;
++def SCREL_W : SCBase_REL<0x38578400>;
+ 
+ // Barrier Instructions
+ def DBAR : MISC_I15<0x38720000>;
+@@ -875,8 +886,12 @@ def STLE_W : STORE_3R<0x387f0000>;
+ def STLE_D : STORE_3R<0x387f8000>;
+ 
+ // Atomic Memory Access Instructions for 64-bits
++def AMSWAP_B     : AM_3R<0x385c0000>;
++def AMSWAP_H     : AM_3R<0x385c8000>;
+ def AMSWAP_W     : AM_3R<0x38600000>;
+ def AMSWAP_D     : AM_3R<0x38608000>;
++def AMADD_B      : AM_3R<0x385d0000>;
++def AMADD_H      : AM_3R<0x385d8000>;
+ def AMADD_W      : AM_3R<0x38610000>;
+ def AMADD_D      : AM_3R<0x38618000>;
+ def AMAND_W      : AM_3R<0x38620000>;
+@@ -893,8 +908,12 @@ def AMMAX_WU     : AM_3R<0x38670000>;
+ def AMMAX_DU     : AM_3R<0x38678000>;
+ def AMMIN_WU     : AM_3R<0x38680000>;
+ def AMMIN_DU     : AM_3R<0x38688000>;
++def AMSWAP__DB_B : AM_3R<0x385e0000>;
++def AMSWAP__DB_H : AM_3R<0x385e8000>;
+ def AMSWAP__DB_W : AM_3R<0x38690000>;
+ def AMSWAP__DB_D : AM_3R<0x38698000>;
++def AMADD__DB_B  : AM_3R<0x385f0000>;
++def AMADD__DB_H  : AM_3R<0x385f8000>;
+ def AMADD__DB_W  : AM_3R<0x386a0000>;
+ def AMADD__DB_D  : AM_3R<0x386a8000>;
+ def AMAND__DB_W  : AM_3R<0x386b0000>;
+@@ -911,8 +930,19 @@ def AMMAX__DB_WU : AM_3R<0x38700000>;
+ def AMMAX__DB_DU : AM_3R<0x38708000>;
+ def AMMIN__DB_WU : AM_3R<0x38710000>;
+ def AMMIN__DB_DU : AM_3R<0x38718000>;
++def AMCAS_B     : AM_3R<0x38580000>;
++def AMCAS_H     : AM_3R<0x38588000>;
++def AMCAS_W     : AM_3R<0x38590000>;
++def AMCAS_D     : AM_3R<0x38598000>;
++def AMCAS__DB_B     : AM_3R<0x385a0000>;
++def AMCAS__DB_H     : AM_3R<0x385a8000>;
++def AMCAS__DB_W     : AM_3R<0x385b0000>;
++def AMCAS__DB_D     : AM_3R<0x385b8000>;
+ def LL_D : LLBase<0x22000000>;
+ def SC_D : SCBase<0x23000000>;
++def SC_Q : SCBase_128<0x38570000>;
++def LLACQ_D : LLBase_ACQ<0x38578800>;
++def SCREL_D : SCBase_REL<0x38578C00>;
+ 
+ // CRC Check Instructions
+ def CRC_W_B_W  : ALU_3R<0x00240000>;
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+index 5b6721cdf1b4..454915ac8c0a 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLASXInstrInfo.td
+@@ -773,6 +773,10 @@ def XVFRECIP_S : LASX2R_XX<0x769cf400>;
+ def XVFRECIP_D : LASX2R_XX<0x769cf800>;
+ def XVFRSQRT_S : LASX2R_XX<0x769d0400>;
+ def XVFRSQRT_D : LASX2R_XX<0x769d0800>;
++def XVFRECIPE_S : LASX2R_XX<0x769d1400>;
++def XVFRECIPE_D : LASX2R_XX<0x769d1800>;
++def XVFRSQRTE_S : LASX2R_XX<0x769d2400>;
++def XVFRSQRTE_D : LASX2R_XX<0x769d2800>;
+ 
+ def XVFCVTL_S_H : LASX2R_XX<0x769de800>;
+ def XVFCVTH_S_H : LASX2R_XX<0x769dec00>;
+diff --git a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+index 3519fa3142c3..6d60d7074ec3 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchLSXInstrInfo.td
+@@ -918,6 +918,10 @@ def VFRECIP_S : LSX2R_VV<0x729cf400>;
+ def VFRECIP_D : LSX2R_VV<0x729cf800>;
+ def VFRSQRT_S : LSX2R_VV<0x729d0400>;
+ def VFRSQRT_D : LSX2R_VV<0x729d0800>;
++def VFRECIPE_S : LSX2R_VV<0x729d1400>;
++def VFRECIPE_D : LSX2R_VV<0x729d1800>;
++def VFRSQRTE_S : LSX2R_VV<0x729d2400>;
++def VFRSQRTE_D : LSX2R_VV<0x729d2800>;
+ 
+ def VFCVTL_S_H : LSX2R_VV<0x729de800>;
+ def VFCVTH_S_H : LSX2R_VV<0x729dec00>;
+diff --git a/llvm/test/MC/LoongArch/Basic/Float/d-arith.s b/llvm/test/MC/LoongArch/Basic/Float/d-arith.s
+index 6b2c67e9a2cc..8e19d2e34f3c 100644
+--- a/llvm/test/MC/LoongArch/Basic/Float/d-arith.s
++++ b/llvm/test/MC/LoongArch/Basic/Float/d-arith.s
+@@ -78,10 +78,18 @@ fsqrt.d $fa2, $ft3
+ # ASM: encoding: [0x7b,0x5b,0x14,0x01]
+ frecip.d $fs3, $fs3
+ 
++# ASM-AND-OBJ: frecipe.d $fa0, $fa0
++# ASM: encoding: [0x00,0x78,0x14,0x01]
++frecipe.d $fa0, $fa0
++
+ # ASM-AND-OBJ: frsqrt.d $ft14, $fa3
+ # ASM: encoding: [0x76,0x68,0x14,0x01]
+ frsqrt.d $ft14, $fa3
+ 
++# ASM-AND-OBJ: frsqrte.d $fa1, $fa1
++# ASM: encoding: [0x21,0x88,0x14,0x01]
++frsqrte.d $fa1, $fa1
++
+ # ASM-AND-OBJ: fscaleb.d $ft4, $ft6, $fs2
+ # ASM: encoding: [0xcc,0x69,0x11,0x01]
+ fscaleb.d $ft4, $ft6, $fs2
+diff --git a/llvm/test/MC/LoongArch/Basic/Float/f-arith.s b/llvm/test/MC/LoongArch/Basic/Float/f-arith.s
+index 155e783cf435..c32151adbf3b 100644
+--- a/llvm/test/MC/LoongArch/Basic/Float/f-arith.s
++++ b/llvm/test/MC/LoongArch/Basic/Float/f-arith.s
+@@ -73,10 +73,18 @@ fsqrt.s $fs3, $ft10
+ # ASM: encoding: [0x71,0x57,0x14,0x01]
+ frecip.s $ft9, $fs3
+ 
++# ASM-AND-OBJ: frecipe.s $fa0, $fa0
++# ASM: encoding: [0x00,0x74,0x14,0x01]
++frecipe.s $fa0, $fa0
++
+ # ASM-AND-OBJ: frsqrt.s $fs1, $ft4
+ # ASM: encoding: [0x99,0x65,0x14,0x01]
+ frsqrt.s $fs1, $ft4
+ 
++# ASM-AND-OBJ: frsqrte.s $fa1, $fa1
++# ASM: encoding: [0x21,0x84,0x14,0x01]
++frsqrte.s $fa1, $fa1
++
+ # ASM-AND-OBJ: fscaleb.s $ft13, $ft15, $fa6
+ # ASM: encoding: [0xf5,0x9a,0x10,0x01]
+ fscaleb.s $ft13, $ft15, $fa6
+diff --git a/llvm/test/MC/LoongArch/Basic/Integer/atomic.s b/llvm/test/MC/LoongArch/Basic/Integer/atomic.s
+index a35211db8851..69acdeef935c 100644
+--- a/llvm/test/MC/LoongArch/Basic/Integer/atomic.s
++++ b/llvm/test/MC/LoongArch/Basic/Integer/atomic.s
+@@ -21,6 +21,14 @@ ll.w $tp, $s4, 220
+ # CHECK-ASM: encoding: [0xd3,0x39,0x00,0x21]
+ sc.w $t7, $t2, 56
+ 
++# CHECK-ASM-AND-OBJ: llacq.w $t1, $t2
++# CHECK-ASM: encoding: [0xcd,0x81,0x57,0x38]
++llacq.w $t1, $t2
++
++# CHECK-ASM-AND-OBJ: screl.w $t1, $t2
++# CHECK-ASM: encoding: [0xcd,0x85,0x57,0x38]
++screl.w $t1, $t2
++
+ 
+ 
+ #############################################################
+@@ -29,6 +37,14 @@ sc.w $t7, $t2, 56
+ 
+ .ifdef LA64
+ 
++# CHECK64-ASM-AND-OBJ: amswap.b $a2, $t0, $s1
++# CHECK64-ASM: encoding: [0x06,0x33,0x5c,0x38]
++amswap.b $a2, $t0, $s1, 0
++
++# CHECK64-ASM-AND-OBJ: amswap.h $a2, $t0, $s1
++# CHECK64-ASM: encoding: [0x06,0xb3,0x5c,0x38]
++amswap.h $a2, $t0, $s1, 0
++
+ # CHECK64-ASM-AND-OBJ: amswap.w $a2, $t0, $s1
+ # CHECK64-ASM: encoding: [0x06,0x33,0x60,0x38]
+ amswap.w $a2, $t0, $s1, 0
+@@ -41,6 +57,14 @@ amswap.w $zero, $t0, $zero
+ # CHECK64-ASM: encoding: [0xa0,0x00,0x6a,0x38]
+ amadd_db.w $zero, $zero, $a1
+ 
++# CHECK64-ASM-AND-OBJ: amswap.b $a2, $t0, $s1
++# CHECK64-ASM: encoding: [0x06,0x33,0x5c,0x38]
++amswap.b $a2, $t0, $s1
++
++# CHECK64-ASM-AND-OBJ: amswap.h $a2, $t0, $s1
++# CHECK64-ASM: encoding: [0x06,0xb3,0x5c,0x38]
++amswap.h $a2, $t0, $s1
++
+ # CHECK64-ASM-AND-OBJ: amswap.w $a2, $t0, $s1
+ # CHECK64-ASM: encoding: [0x06,0x33,0x60,0x38]
+ amswap.w $a2, $t0, $s1
+@@ -49,6 +73,14 @@ amswap.w $a2, $t0, $s1
+ # CHECK64-ASM: encoding: [0xc2,0xba,0x60,0x38]
+ amswap.d $tp, $t2, $fp
+ 
++# CHECK64-ASM-AND-OBJ: amadd.b $a4, $t0, $r21
++# CHECK64-ASM: encoding: [0xa8,0x32,0x5d,0x38]
++amadd.b $a4, $t0, $r21
++
++# CHECK64-ASM-AND-OBJ: amadd.h $a1, $t5, $s6
++# CHECK64-ASM: encoding: [0xa5,0xc7,0x5d,0x38]
++amadd.h $a1, $t5, $s6
++
+ # CHECK64-ASM-AND-OBJ: amadd.w $a4, $t0, $r21
+ # CHECK64-ASM: encoding: [0xa8,0x32,0x61,0x38]
+ amadd.w $a4, $t0, $r21
+@@ -113,6 +145,14 @@ ammin.wu $a4, $t6, $s7
+ # CHECK64-ASM: encoding: [0x27,0xc3,0x68,0x38]
+ ammin.du $a3, $t4, $s2
+ 
++# CHECK64-ASM-AND-OBJ: amswap_db.b $a2, $t0, $s1
++# CHECK64-ASM: encoding: [0x06,0x33,0x5e,0x38]
++amswap_db.b $a2, $t0, $s1
++
++# CHECK64-ASM-AND-OBJ: amswap_db.h $tp, $t2, $fp
++# CHECK64-ASM: encoding: [0xc2,0xba,0x5e,0x38]
++amswap_db.h $tp, $t2, $fp
++
+ # CHECK64-ASM-AND-OBJ: amswap_db.w $a2, $t0, $s1
+ # CHECK64-ASM: encoding: [0x06,0x33,0x69,0x38]
+ amswap_db.w $a2, $t0, $s1
+@@ -121,6 +161,14 @@ amswap_db.w $a2, $t0, $s1
+ # CHECK64-ASM: encoding: [0xc2,0xba,0x69,0x38]
+ amswap_db.d $tp, $t2, $fp
+ 
++# CHECK64-ASM-AND-OBJ: amadd_db.b $zero, $zero, $a1
++# CHECK64-ASM: encoding: [0xa0,0x00,0x5f,0x38]
++amadd_db.b $zero, $zero, $a1
++
++# CHECK64-ASM-AND-OBJ: amadd_db.h $a4, $t0, $r21
++# CHECK64-ASM: encoding: [0xa8,0xb2,0x5f,0x38]
++amadd_db.h $a4, $t0, $r21
++
+ # CHECK64-ASM-AND-OBJ: amadd_db.w $a4, $t0, $r21
+ # CHECK64-ASM: encoding: [0xa8,0x32,0x6a,0x38]
+ amadd_db.w $a4, $t0, $r21
+@@ -185,6 +233,38 @@ ammin_db.wu $a4, $t6, $s7
+ # CHECK64-ASM: encoding: [0x27,0xc3,0x71,0x38]
+ ammin_db.du $a3, $t4, $s2
+ 
++# CHECK64-ASM-AND-OBJ: amcas.b $t1, $t2, $t3
++# CHECK64-ASM: encoding: [0xed,0x39,0x58,0x38]
++amcas.b $t1, $t2, $t3
++
++# CHECK64-ASM-AND-OBJ: amcas.h $t1, $t2, $t3
++# CHECK64-ASM: encoding: [0xed,0xb9,0x58,0x38]
++amcas.h $t1, $t2, $t3
++
++# CHECK64-ASM-AND-OBJ: amcas.w $t1, $t2, $t3
++# CHECK64-ASM: encoding: [0xed,0x39,0x59,0x38]
++amcas.w $t1, $t2, $t3
++
++# CHECK64-ASM-AND-OBJ: amcas.d $t1, $t2, $t3
++# CHECK64-ASM: encoding: [0xed,0xb9,0x59,0x38]
++amcas.d $t1, $t2, $t3
++
++# CHECK64-ASM-AND-OBJ: amcas_db.b $t1, $t2, $t3
++# CHECK64-ASM: encoding: [0xed,0x39,0x5a,0x38]
++amcas_db.b $t1, $t2, $t3
++
++# CHECK64-ASM-AND-OBJ: amcas_db.h $t1, $t2, $t3
++# CHECK64-ASM: encoding: [0xed,0xb9,0x5a,0x38]
++amcas_db.h $t1, $t2, $t3
++
++# CHECK64-ASM-AND-OBJ: amcas_db.w $t1, $t2, $t3
++# CHECK64-ASM: encoding: [0xed,0x39,0x5b,0x38]
++amcas_db.w $t1, $t2, $t3
++
++# CHECK64-ASM-AND-OBJ: amcas_db.d $t1, $t2, $t3
++# CHECK64-ASM: encoding: [0xed,0xb9,0x5b,0x38]
++amcas_db.d $t1, $t2, $t3
++
+ # CHECK64-ASM-AND-OBJ: ll.d $s2, $s4, 16
+ # CHECK64-ASM: encoding: [0x79,0x13,0x00,0x22]
+ ll.d $s2, $s4, 16
+@@ -193,5 +273,17 @@ ll.d $s2, $s4, 16
+ # CHECK64-ASM: encoding: [0x31,0xf6,0x00,0x23]
+ sc.d $t5, $t5, 244
+ 
++# CHECK64-ASM-AND-OBJ: sc.q $t7, $t2, $t5
++# CHECK64-ASM: encoding: [0x33,0x3a,0x57,0x38]
++sc.q $t7, $t2, $t5
++
++# CHECK64-ASM-AND-OBJ: llacq.d $t1, $t2
++# CHECK64-ASM: encoding: [0xcd,0x89,0x57,0x38]
++llacq.d $t1, $t2
++
++# CHECK64-ASM-AND-OBJ: screl.d $t1, $t2
++# CHECK64-ASM: encoding: [0xcd,0x8d,0x57,0x38]
++screl.d $t1, $t2
++
+ .endif
+ 
+diff --git a/llvm/test/MC/LoongArch/lasx/frecip.s b/llvm/test/MC/LoongArch/lasx/frecip.s
+index 1bb3ce02fb9c..e95b03a96eba 100644
+--- a/llvm/test/MC/LoongArch/lasx/frecip.s
++++ b/llvm/test/MC/LoongArch/lasx/frecip.s
+@@ -10,3 +10,11 @@ xvfrecip.s $xr3, $xr16
+ xvfrecip.d $xr17, $xr24
+ # CHECK-INST: xvfrecip.d $xr17, $xr24
+ # CHECK-ENCODING: encoding: [0x11,0xfb,0x9c,0x76]
++
++xvfrecipe.s $xr3, $xr16
++# CHECK-INST: xvfrecipe.s $xr3, $xr16
++# CHECK-ENCODING: encoding: [0x03,0x16,0x9d,0x76]
++
++xvfrecipe.d $xr17, $xr24
++# CHECK-INST: xvfrecipe.d $xr17, $xr24
++# CHECK-ENCODING: encoding: [0x11,0x1b,0x9d,0x76]
+diff --git a/llvm/test/MC/LoongArch/lasx/frsqrt.s b/llvm/test/MC/LoongArch/lasx/frsqrt.s
+index af96e10832df..d1048f9ff8f0 100644
+--- a/llvm/test/MC/LoongArch/lasx/frsqrt.s
++++ b/llvm/test/MC/LoongArch/lasx/frsqrt.s
+@@ -10,3 +10,11 @@ xvfrsqrt.s $xr31, $xr25
+ xvfrsqrt.d $xr14, $xr22
+ # CHECK-INST: xvfrsqrt.d $xr14, $xr22
+ # CHECK-ENCODING: encoding: [0xce,0x0a,0x9d,0x76]
++
++xvfrsqrte.s $xr31, $xr25
++# CHECK-INST: xvfrsqrte.s $xr31, $xr25
++# CHECK-ENCODING: encoding: [0x3f,0x27,0x9d,0x76]
++
++xvfrsqrte.d $xr14, $xr22
++# CHECK-INST: xvfrsqrte.d $xr14, $xr22
++# CHECK-ENCODING: encoding: [0xce,0x2a,0x9d,0x76]
+diff --git a/llvm/test/MC/LoongArch/lsx/frecip.s b/llvm/test/MC/LoongArch/lsx/frecip.s
+index d8c8278d1667..cd6d925e1470 100644
+--- a/llvm/test/MC/LoongArch/lsx/frecip.s
++++ b/llvm/test/MC/LoongArch/lsx/frecip.s
+@@ -10,3 +10,11 @@ vfrecip.s $vr29, $vr14
+ vfrecip.d $vr24, $vr9
+ # CHECK-INST: vfrecip.d $vr24, $vr9
+ # CHECK-ENCODING: encoding: [0x38,0xf9,0x9c,0x72]
++
++vfrecipe.s $vr29, $vr14
++# CHECK-INST: vfrecipe.s $vr29, $vr14
++# CHECK-ENCODING: encoding: [0xdd,0x15,0x9d,0x72]
++
++vfrecipe.d $vr24, $vr9
++# CHECK-INST: vfrecipe.d $vr24, $vr9
++# CHECK-ENCODING: encoding: [0x38,0x19,0x9d,0x72]
+diff --git a/llvm/test/MC/LoongArch/lsx/frsqrt.s b/llvm/test/MC/LoongArch/lsx/frsqrt.s
+index 68b0cc091b8a..d8b9fc3d0684 100644
+--- a/llvm/test/MC/LoongArch/lsx/frsqrt.s
++++ b/llvm/test/MC/LoongArch/lsx/frsqrt.s
+@@ -10,3 +10,11 @@ vfrsqrt.s $vr19, $vr30
+ vfrsqrt.d $vr1, $vr0
+ # CHECK-INST: vfrsqrt.d $vr1, $vr0
+ # CHECK-ENCODING: encoding: [0x01,0x08,0x9d,0x72]
++
++vfrsqrte.s $vr19, $vr30
++# CHECK-INST: vfrsqrte.s $vr19, $vr30
++# CHECK-ENCODING: encoding: [0xd3,0x27,0x9d,0x72]
++
++vfrsqrte.d $vr1, $vr0
++# CHECK-INST: vfrsqrte.d $vr1, $vr0
++# CHECK-ENCODING: encoding: [0x01,0x28,0x9d,0x72]
+-- 
+2.20.1
+

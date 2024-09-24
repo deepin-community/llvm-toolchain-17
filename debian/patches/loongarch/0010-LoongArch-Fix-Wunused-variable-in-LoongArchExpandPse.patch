@@ -1,0 +1,38 @@
+From 34e8c30579faf4a8ef69fa686bd9b2d9e832d299 Mon Sep 17 00:00:00 2001
+From: Jie Fu <jiefu@tencent.com>
+Date: Fri, 5 Jan 2024 12:05:23 +0800
+Subject: [PATCH 10/23] [LoongArch] Fix -Wunused-variable in
+ LoongArchExpandPseudoInsts.cpp (NFC)
+
+llvm-project/llvm/lib/Target/LoongArch/LoongArchExpandPseudoInsts.cpp:480:20:
+ error: unused variable 'MF' [-Werror,-Wunused-variable]
+  MachineFunction *MF = MBB.getParent();
+                   ^
+1 error generated.
+
+(cherry picked from commit 52d1397e38ee88b170585c9c824d08e6975890ca)
+---
+ llvm/lib/Target/LoongArch/LoongArchExpandPseudoInsts.cpp | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/llvm/lib/Target/LoongArch/LoongArchExpandPseudoInsts.cpp b/llvm/lib/Target/LoongArch/LoongArchExpandPseudoInsts.cpp
+index f977f176066a..ad39658f698e 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchExpandPseudoInsts.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchExpandPseudoInsts.cpp
+@@ -477,12 +477,11 @@ bool LoongArchExpandPseudo::expandLargeAddressLoad(
+     break;
+   }
+ 
+-  MachineFunction *MF = MBB.getParent();
+   MachineInstr &MI = *MBBI;
+   DebugLoc DL = MI.getDebugLoc();
+   Register ScratchReg = LoongArch::R20; // $t8
+ 
+-  assert(MF->getSubtarget<LoongArchSubtarget>().is64Bit() &&
++  assert(MBB.getParent()->getSubtarget<LoongArchSubtarget>().is64Bit() &&
+          "Large code model requires LA64");
+ 
+   auto Part1 = BuildMI(MBB, MBBI, DL, TII->get(LoongArch::PCALAU12I), DestReg);
+-- 
+2.20.1
+

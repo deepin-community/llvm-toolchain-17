@@ -1,0 +1,240 @@
+From 6f9531b069971dc0f5c6b28bd6a6754c1b5fde72 Mon Sep 17 00:00:00 2001
+From: Ami-zhang <zhanglimin@loongson.cn>
+Date: Tue, 23 Jul 2024 14:03:28 +0800
+Subject: [PATCH 20/23] [LoongArch] Support -march=la64v1.0 and -march=la64v1.1
+ (#100057)
+
+The newly added strings `la64v1.0` and `la64v1.1` in `-march` are as
+described in LoongArch toolchains conventions (see [1]).
+
+The target-cpu/feature attributes are forwarded to compiler when
+specifying particular `-march` parameter. The default cpu `loongarch64`
+is returned when archname is `la64v1.0` or `la64v1.1`.
+
+In addition, this commit adds `la64v1.0`/`la64v1.1` to
+"__loongarch_arch" and adds definition for macro "__loongarch_frecipe".
+
+[1]: https://github.com/loongson/la-toolchain-conventions
+
+(cherry picked from commit 5a1b9896ad5a7dcd25a1cc7a4d3fd44155e4b22d)
+---
+ clang/lib/Basic/Targets/LoongArch.cpp         | 23 +++++++++++++++-
+ clang/lib/Basic/Targets/LoongArch.h           |  2 ++
+ .../lib/Driver/ToolChains/Arch/LoongArch.cpp  | 10 +++++--
+ clang/test/Driver/loongarch-march.c           | 22 +++++++++++++++
+ clang/test/Preprocessor/init-loongarch.c      | 27 ++++++++++++++++---
+ .../TargetParser/LoongArchTargetParser.cpp    | 11 ++++++++
+ 6 files changed, 88 insertions(+), 7 deletions(-)
+
+diff --git a/clang/lib/Basic/Targets/LoongArch.cpp b/clang/lib/Basic/Targets/LoongArch.cpp
+index 913404240916..5fede3d7cdc4 100644
+--- a/clang/lib/Basic/Targets/LoongArch.cpp
++++ b/clang/lib/Basic/Targets/LoongArch.cpp
+@@ -200,7 +200,24 @@ void LoongArchTargetInfo::getTargetDefines(const LangOptions &Opts,
+ 
+   // Define __loongarch_arch.
+   StringRef ArchName = getCPU();
+-  Builder.defineMacro("__loongarch_arch", Twine('"') + ArchName + Twine('"'));
++  if (ArchName == "loongarch64") {
++    if (HasFeatureLSX) {
++      // TODO: As more features of the V1.1 ISA are supported, a unified "v1.1"
++      // arch feature set will be used to include all sub-features belonging to
++      // the V1.1 ISA version.
++      if (HasFeatureFrecipe)
++        Builder.defineMacro("__loongarch_arch",
++                            Twine('"') + "la64v1.1" + Twine('"'));
++      else
++        Builder.defineMacro("__loongarch_arch",
++                            Twine('"') + "la64v1.0" + Twine('"'));
++    } else {
++      Builder.defineMacro("__loongarch_arch",
++                          Twine('"') + ArchName + Twine('"'));
++    }
++  } else {
++    Builder.defineMacro("__loongarch_arch", Twine('"') + ArchName + Twine('"'));
++  }
+ 
+   // Define __loongarch_tune.
+   StringRef TuneCPU = getTargetOpts().TuneCPU;
+@@ -216,6 +233,8 @@ void LoongArchTargetInfo::getTargetDefines(const LangOptions &Opts,
+     Builder.defineMacro("__loongarch_simd_width", "128");
+     Builder.defineMacro("__loongarch_sx", Twine(1));
+   }
++  if (HasFeatureFrecipe)
++    Builder.defineMacro("__loongarch_frecipe", Twine(1));
+ 
+   StringRef ABI = getABI();
+   if (ABI == "lp64d" || ABI == "lp64f" || ABI == "lp64s")
+@@ -289,6 +308,8 @@ bool LoongArchTargetInfo::handleTargetFeatures(
+       HasFeatureLSX = true;
+     else if (Feature == "+lasx")
+       HasFeatureLASX = true;
++    else if (Feature == "+frecipe")
++      HasFeatureFrecipe = true;
+   }
+   return true;
+ }
+diff --git a/clang/lib/Basic/Targets/LoongArch.h b/clang/lib/Basic/Targets/LoongArch.h
+index 3313102492cb..4d2965f5b3a3 100644
+--- a/clang/lib/Basic/Targets/LoongArch.h
++++ b/clang/lib/Basic/Targets/LoongArch.h
+@@ -29,6 +29,7 @@ protected:
+   bool HasFeatureF;
+   bool HasFeatureLSX;
+   bool HasFeatureLASX;
++  bool HasFeatureFrecipe;
+ 
+ public:
+   LoongArchTargetInfo(const llvm::Triple &Triple, const TargetOptions &)
+@@ -37,6 +38,7 @@ public:
+     HasFeatureF = false;
+     HasFeatureLSX = false;
+     HasFeatureLASX = false;
++    HasFeatureFrecipe = false;
+     LongDoubleWidth = 128;
+     LongDoubleAlign = 128;
+     LongDoubleFormat = &llvm::APFloat::IEEEquad();
+diff --git a/clang/lib/Driver/ToolChains/Arch/LoongArch.cpp b/clang/lib/Driver/ToolChains/Arch/LoongArch.cpp
+index 87d7b30ef5d3..21106c425206 100644
+--- a/clang/lib/Driver/ToolChains/Arch/LoongArch.cpp
++++ b/clang/lib/Driver/ToolChains/Arch/LoongArch.cpp
+@@ -268,8 +268,14 @@ std::string loongarch::postProcessTargetCPUString(const std::string &CPU,
+ std::string loongarch::getLoongArchTargetCPU(const llvm::opt::ArgList &Args,
+                                              const llvm::Triple &Triple) {
+   std::string CPU;
++  std::string Arch;
+   // If we have -march, use that.
+-  if (const Arg *A = Args.getLastArg(options::OPT_march_EQ))
+-    CPU = A->getValue();
++  if (const Arg *A = Args.getLastArg(options::OPT_march_EQ)) {
++    Arch = A->getValue();
++    if (Arch == "la64v1.0" || Arch == "la64v1.1")
++      CPU = llvm::LoongArch::getDefaultArch(Triple.isLoongArch64());
++    else
++      CPU = Arch;
++  }
+   return postProcessTargetCPUString(CPU, Triple);
+ }
+diff --git a/clang/test/Driver/loongarch-march.c b/clang/test/Driver/loongarch-march.c
+index 9214130cd034..d06da72a755c 100644
+--- a/clang/test/Driver/loongarch-march.c
++++ b/clang/test/Driver/loongarch-march.c
+@@ -2,10 +2,18 @@
+ // RUN:   FileCheck %s --check-prefix=CC1-LOONGARCH64
+ // RUN: %clang --target=loongarch64 -march=la464 -fsyntax-only %s -### 2>&1 | \
+ // RUN:   FileCheck %s --check-prefix=CC1-LA464
++// RUN: %clang --target=loongarch64 -march=la64v1.0 -fsyntax-only %s -### 2>&1 | \
++// RUN:   FileCheck %s --check-prefix=CC1-LA64V1P0
++// RUN: %clang --target=loongarch64 -march=la64v1.1 -fsyntax-only %s -### 2>&1 | \
++// RUN:   FileCheck %s --check-prefix=CC1-LA64V1P1
+ // RUN: %clang --target=loongarch64 -march=loongarch64 -S -emit-llvm %s -o - | \
+ // RUN:   FileCheck %s --check-prefix=IR-LOONGARCH64
+ // RUN: %clang --target=loongarch64 -march=la464 -S -emit-llvm %s -o - | \
+ // RUN:   FileCheck %s --check-prefix=IR-LA464
++// RUN: %clang --target=loongarch64 -march=la64v1.0 -S -emit-llvm %s -o - | \
++// RUN:   FileCheck %s --check-prefix=IR-LA64V1P0
++// RUN: %clang --target=loongarch64 -march=la64v1.1 -S -emit-llvm %s -o - | \
++// RUN:   FileCheck %s --check-prefix=IR-LA64V1P1
+ 
+ // CC1-LOONGARCH64: "-target-cpu" "loongarch64"
+ // CC1-LOONGARCH64-NOT: "-target-feature"
+@@ -19,8 +27,22 @@
+ // CC1-LA464-NOT: "-target-feature"
+ // CC1-LA464: "-target-abi" "lp64d"
+ 
++// CC1-LA64V1P0: "-target-cpu" "loongarch64"
++// CC1-LA64V1P0-NOT: "-target-feature"
++// CC1-LA64V1P0: "-target-feature" "+64bit" "-target-feature" "+d" "-target-feature" "+lsx" "-target-feature" "+ual"
++// CC1-LA64V1P0-NOT: "-target-feature"
++// CC1-LA64V1P0: "-target-abi" "lp64d"
++
++// CC1-LA64V1P1: "-target-cpu" "loongarch64"
++// CC1-LA64V1P1-NOT: "-target-feature"
++// CC1-LA64V1P1: "-target-feature" "+64bit" "-target-feature" "+d" "-target-feature" "+lsx" "-target-feature" "+ual" "-target-feature" "+frecipe"
++// CC1-LA64V1P1-NOT: "-target-feature"
++// CC1-LA64V1P1: "-target-abi" "lp64d"
++
+ // IR-LOONGARCH64: attributes #[[#]] ={{.*}}"target-cpu"="loongarch64" {{.*}}"target-features"="+64bit,+d,+f,+ual"
+ // IR-LA464: attributes #[[#]] ={{.*}}"target-cpu"="la464" {{.*}}"target-features"="+64bit,+d,+f,+lasx,+lsx,+ual"
++// IR-LA64V1P0: attributes #[[#]] ={{.*}}"target-cpu"="loongarch64" {{.*}}"target-features"="+64bit,+d,+lsx,+ual"
++// IR-LA64V1P1: attributes #[[#]] ={{.*}}"target-cpu"="loongarch64" {{.*}}"target-features"="+64bit,+d,+frecipe,+lsx,+ual"
+ 
+ int foo(void) {
+   return 3;
+diff --git a/clang/test/Preprocessor/init-loongarch.c b/clang/test/Preprocessor/init-loongarch.c
+index 635d029ce9d3..cfa3ddb20f10 100644
+--- a/clang/test/Preprocessor/init-loongarch.c
++++ b/clang/test/Preprocessor/init-loongarch.c
+@@ -788,24 +788,43 @@
+ // LA64-FPU0-LP64S-NOT: #define __loongarch_single_float
+ // LA64-FPU0-LP64S: #define __loongarch_soft_float 1
+ 
+-/// Check __loongarch_arch and __loongarch_tune.
++/// Check __loongarch_arch{_tune/_frecipe}.
+ 
+ // RUN: %clang --target=loongarch64 -x c -E -dM %s -o - | \
+-// RUN:   FileCheck --match-full-lines --check-prefix=ARCH-TUNE -DARCH=loongarch64 -DTUNE=loongarch64 %s
++// RUN:   FileCheck --match-full-lines --check-prefix=ARCH-TUNE -DARCH=la64v1.0 -DTUNE=loongarch64 %s
+ // RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -march=loongarch64 | \
+ // RUN:   FileCheck --match-full-lines --check-prefix=ARCH-TUNE -DARCH=loongarch64 -DTUNE=loongarch64 %s
+ // RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -march=la464 | \
+ // RUN:   FileCheck --match-full-lines --check-prefix=ARCH-TUNE -DARCH=la464 -DTUNE=la464 %s
+ // RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -mtune=loongarch64 | \
+-// RUN:   FileCheck --match-full-lines --check-prefix=ARCH-TUNE -DARCH=loongarch64 -DTUNE=loongarch64 %s
++// RUN:   FileCheck --match-full-lines --check-prefix=ARCH-TUNE -DARCH=la64v1.0 -DTUNE=loongarch64 %s
+ // RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -mtune=la464 | \
+-// RUN:   FileCheck --match-full-lines --check-prefix=ARCH-TUNE -DARCH=loongarch64 -DTUNE=la464 %s
++// RUN:   FileCheck --match-full-lines --check-prefix=ARCH-TUNE -DARCH=la64v1.0 -DTUNE=la464 %s
+ // RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -march=loongarch64 -mtune=la464 | \
+ // RUN:   FileCheck --match-full-lines --check-prefix=ARCH-TUNE -DARCH=loongarch64 -DTUNE=la464 %s
+ // RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -march=la464 -mtune=loongarch64 | \
+ // RUN:   FileCheck --match-full-lines --check-prefix=ARCH-TUNE -DARCH=la464 -DTUNE=loongarch64 %s
++// RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -march=la64v1.0 | \
++// RUN:   FileCheck --match-full-lines --check-prefix=ARCH-TUNE -DARCH=la64v1.0 -DTUNE=loongarch64 %s
++// RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -march=la64v1.0 -Xclang -target-feature -Xclang -lsx | \
++// RUN:   FileCheck --match-full-lines --check-prefix=ARCH-TUNE -DARCH=loongarch64 -DTUNE=loongarch64 %s
++// RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -march=la64v1.0 -Xclang -target-feature -Xclang +frecipe | \
++// RUN:   FileCheck --match-full-lines --check-prefixes=ARCH-TUNE,FRECIPE -DARCH=la64v1.1 -DTUNE=loongarch64 %s
++// RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -march=loongarch64 -Xclang -target-feature -Xclang +lsx | \
++// RUN:   FileCheck --match-full-lines --check-prefix=ARCH-TUNE -DARCH=la64v1.0 -DTUNE=loongarch64 %s
++// RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -march=la64v1.1 | \
++// RUN:   FileCheck --match-full-lines  --check-prefixes=ARCH-TUNE,FRECIPE -DARCH=la64v1.1 -DTUNE=loongarch64 %s
++// RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -march=la64v1.1 -Xclang -target-feature -Xclang -frecipe | \
++// RUN:   FileCheck --match-full-lines --check-prefix=ARCH-TUNE -DARCH=la64v1.0 -DTUNE=loongarch64 %s
++// RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -march=la64v1.1 -Xclang -target-feature -Xclang -lsx | \
++// RUN:   FileCheck --match-full-lines --check-prefixes=ARCH-TUNE,FRECIPE -DARCH=loongarch64 -DTUNE=loongarch64 %s
++// RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -march=loongarch64 -Xclang -target-feature -Xclang +frecipe | \
++// RUN:   FileCheck --match-full-lines --check-prefixes=ARCH-TUNE,FRECIPE -DARCH=loongarch64 -DTUNE=loongarch64 %s
++// RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -march=loongarch64 -Xclang -target-feature -Xclang +lsx -Xclang -target-feature -Xclang +frecipe | \
++// RUN:   FileCheck --match-full-lines --check-prefixes=ARCH-TUNE,FRECIPE -DARCH=la64v1.1 -DTUNE=loongarch64 %s
+ 
+ // ARCH-TUNE: #define __loongarch_arch "[[ARCH]]"
++// FRECIPE: #define __loongarch_frecipe 1
+ // ARCH-TUNE: #define __loongarch_tune "[[TUNE]]"
+ 
+ // RUN: %clang --target=loongarch64 -mlsx -x c -E -dM %s -o - \
+diff --git a/llvm/lib/TargetParser/LoongArchTargetParser.cpp b/llvm/lib/TargetParser/LoongArchTargetParser.cpp
+index 772d24c5ce3d..8e86d18de2ad 100644
+--- a/llvm/lib/TargetParser/LoongArchTargetParser.cpp
++++ b/llvm/lib/TargetParser/LoongArchTargetParser.cpp
+@@ -44,6 +44,17 @@ bool LoongArch::getArchFeatures(StringRef Arch,
+       return true;
+     }
+   }
++
++  if (Arch == "la64v1.0" || Arch == "la64v1.1") {
++    Features.push_back("+64bit");
++    Features.push_back("+d");
++    Features.push_back("+lsx");
++    Features.push_back("+ual");
++    if (Arch == "la64v1.1")
++      Features.push_back("+frecipe");
++    return true;
++  }
++
+   return false;
+ }
+ 
+-- 
+2.20.1
+

@@ -1,0 +1,26 @@
+From 18f453f2dba969c1fdcbda562079113de7bbcfca Mon Sep 17 00:00:00 2001
+From: Ami-zhang <zhanglimin@loongson.cn>
+Date: Tue, 23 Jul 2024 15:20:30 +0800
+Subject: [PATCH 22/23] [LoongArch] Fix test issue of init-loongarch.c
+
+(cherry picked from commit d59925c39856f255f4dd4427ccc650f2c2692a24)
+---
+ clang/test/Preprocessor/init-loongarch.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/clang/test/Preprocessor/init-loongarch.c b/clang/test/Preprocessor/init-loongarch.c
+index 7ce3d2de8c78..887b6d6af7e1 100644
+--- a/clang/test/Preprocessor/init-loongarch.c
++++ b/clang/test/Preprocessor/init-loongarch.c
+@@ -825,7 +825,7 @@
+ // RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -march=la664 | \
+ // RUN:   FileCheck --match-full-lines --check-prefixes=ARCH-TUNE,FRECIPE -DARCH=la664 -DTUNE=la664 %s
+ // RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -mtune=la664 | \
+-// RUN:   FileCheck --match-full-lines --check-prefix=ARCH-TUNE -DARCH=loongarch64 -DTUNE=la664 %s
++// RUN:   FileCheck --match-full-lines --check-prefix=ARCH-TUNE -DARCH=la64v1.0 -DTUNE=la664 %s
+ // RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -march=loongarch64 -mtune=la664 | \
+ // RUN:   FileCheck --match-full-lines --check-prefix=ARCH-TUNE -DARCH=loongarch64 -DTUNE=la664 %s
+ // RUN: %clang --target=loongarch64 -x c -E -dM %s -o - -march=la664 -mtune=loongarch64 | \
+-- 
+2.20.1
+

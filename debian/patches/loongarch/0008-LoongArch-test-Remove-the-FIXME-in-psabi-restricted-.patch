@@ -1,0 +1,29 @@
+From 1248440ab618fcffada7fa29eed71bc04945c3ec Mon Sep 17 00:00:00 2001
+From: Weining Lu <luweining@loongson.cn>
+Date: Tue, 25 Jun 2024 09:52:17 +0800
+Subject: [PATCH 08/23] [LoongArch][test] Remove the FIXME in
+ psabi-restricted-scheduling.ll which has been addressed by #76555
+
+(cherry picked from commit 7ea63b9db4198688873036f3b0b81f9124076f7a)
+---
+ llvm/test/CodeGen/LoongArch/psabi-restricted-scheduling.ll | 4 ----
+ 1 file changed, 4 deletions(-)
+
+diff --git a/llvm/test/CodeGen/LoongArch/psabi-restricted-scheduling.ll b/llvm/test/CodeGen/LoongArch/psabi-restricted-scheduling.ll
+index 150a935d7bf8..a515939b9c2b 100644
+--- a/llvm/test/CodeGen/LoongArch/psabi-restricted-scheduling.ll
++++ b/llvm/test/CodeGen/LoongArch/psabi-restricted-scheduling.ll
+@@ -8,10 +8,6 @@
+ ; RUN: llc --mtriple=loongarch64 --code-model=large --post-RA-scheduler=1 < %s \
+ ; RUN:     | FileCheck %s --check-prefix=LARGE_SCH
+ 
+-;; FIXME: According to the description of the psABI v2.30, the code sequences
+-;; of `PseudoLA*_LARGE` instruction and Medium code model's function call must
+-;; be adjacent.
+-
+ @g = dso_local global i64 zeroinitializer, align 4
+ @G = global i64 zeroinitializer, align 4
+ @gd = external thread_local global i64
+-- 
+2.20.1
+
