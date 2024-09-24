@@ -1,0 +1,53 @@
+From 11d61b028f306d5ace2b09154781575e88b118cb Mon Sep 17 00:00:00 2001
+From: Weining Lu <luweining@loongson.cn>
+Date: Sat, 25 Nov 2023 15:44:05 +0800
+Subject: [PATCH 12/23] [lld][LoongArch] Add a another corner testcase for
+ elf::getLoongArchPageDelta
+
+Similar to e752b58e0d26.
+
+(cherry picked from commit 84a20989c6f72d0f7d04c9981d51c7838e95855c)
+---
+ lld/ELF/Arch/LoongArch.cpp          |  1 -
+ lld/test/ELF/loongarch-pc-aligned.s | 13 +++++++++++++
+ 2 files changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/lld/ELF/Arch/LoongArch.cpp b/lld/ELF/Arch/LoongArch.cpp
+index 72d9c6838e31..516d02bb9e3f 100644
+--- a/lld/ELF/Arch/LoongArch.cpp
++++ b/lld/ELF/Arch/LoongArch.cpp
+@@ -168,7 +168,6 @@ uint64_t elf::getLoongArchPageDelta(uint64_t dest, uint64_t pc) {
+     result -= 0x10000'0000;
+   else if (!negativeA && negativeB)
+     result += 0x10000'0000;
+-
+   return result;
+ }
+ 
+diff --git a/lld/test/ELF/loongarch-pc-aligned.s b/lld/test/ELF/loongarch-pc-aligned.s
+index f6ac56e5261d..e7950400a5c8 100644
+--- a/lld/test/ELF/loongarch-pc-aligned.s
++++ b/lld/test/ELF/loongarch-pc-aligned.s
+@@ -273,6 +273,19 @@
+ # EXTREME16-NEXT: lu32i.d   $t0, 0
+ # EXTREME16-NEXT: lu52i.d   $t0, $t0, 0
+ 
++## FIXME: Correct %pc64_lo20 should be 0x00000 (0) and %pc64_hi12 should be 0x000 (0), but current values are:
++## page delta = 0xffffffff80000000, page offset = 0x888
++## %pc_lo12   = 0x888 = -1912
++## %pc_hi20   = 0x80000 = -524288
++## %pc64_lo20 = 0xfffff = -1
++## %pc64_hi12 = 0xfff = -1
++# RUN: ld.lld %t/extreme.o --section-start=.rodata=0x000071238ffff888 --section-start=.text=0x0000712310000678 -o %t/extreme17
++# RUN: llvm-objdump -d --no-show-raw-insn %t/extreme17 | FileCheck %s --check-prefix=EXTREME17
++# EXTREME17:      addi.d $t0, $zero, -1912
++# EXTREME17-NEXT: pcalau12i $t1, -524288
++# EXTREME17-NEXT: lu32i.d   $t0, -1
++# EXTREME17-NEXT: lu52i.d   $t0, $t0, -1
++
+ #--- a.s
+ .rodata
+ x:
+-- 
+2.20.1
+

@@ -1,0 +1,442 @@
+From a8ed0f26220bbacb2c485a392f79ac4b271d73af Mon Sep 17 00:00:00 2001
+From: wanglei <wanglei@loongson.cn>
+Date: Tue, 2 Jan 2024 10:55:02 +0800
+Subject: [PATCH 06/23] [LoongArch] Emit function call code sequence as
+ `PCADDU18I+JIRL` in medium code model
+
+According to the description of the psABI v2.20:
+https://github.com/loongson/la-abi-specs/releases/tag/v2.20, adjustments
+are made to the function call instructions under the medium code model.
+
+At the same time, AsmParser has already supported parsing the call36 and
+tail36 macro instructions.
+
+(cherry picked from commit 2cf420d5b846a4733ef0ef7c8ed0ae0bfd1c6772)
+---
+ .../AsmParser/LoongArchAsmParser.cpp          | 61 +++++++++++++++++++
+ .../LoongArch/LoongArchExpandPseudoInsts.cpp  | 29 ++++-----
+ .../Target/LoongArch/LoongArchInstrInfo.td    | 23 ++++++-
+ .../Target/LoongArch/LoongArchMCInstLower.cpp |  3 +
+ .../LoongArch/LoongArchTargetMachine.cpp      |  4 +-
+ .../MCTargetDesc/LoongArchBaseInfo.h          |  1 +
+ .../MCTargetDesc/LoongArchELFObjectWriter.cpp |  2 +
+ .../MCTargetDesc/LoongArchFixupKinds.h        |  3 +
+ .../MCTargetDesc/LoongArchMCCodeEmitter.cpp   |  3 +
+ .../MCTargetDesc/LoongArchMCExpr.cpp          |  3 +
+ .../LoongArch/MCTargetDesc/LoongArchMCExpr.h  |  1 +
+ llvm/test/CodeGen/LoongArch/code-models.ll    | 12 ++--
+ .../MC/LoongArch/Basic/Integer/invalid64.s    |  2 +-
+ llvm/test/MC/LoongArch/Macros/macros-call.s   |  9 +++
+ .../MC/LoongArch/Relocations/relocations.s    |  5 ++
+ 15 files changed, 133 insertions(+), 28 deletions(-)
+ create mode 100644 llvm/test/MC/LoongArch/Macros/macros-call.s
+
+diff --git a/llvm/lib/Target/LoongArch/AsmParser/LoongArchAsmParser.cpp b/llvm/lib/Target/LoongArch/AsmParser/LoongArchAsmParser.cpp
+index a132e645c864..f908e5bc63d3 100644
+--- a/llvm/lib/Target/LoongArch/AsmParser/LoongArchAsmParser.cpp
++++ b/llvm/lib/Target/LoongArch/AsmParser/LoongArchAsmParser.cpp
+@@ -122,6 +122,10 @@ class LoongArchAsmParser : public MCTargetAsmParser {
+   // Helper to emit pseudo instruction "li.w/d $rd, $imm".
+   void emitLoadImm(MCInst &Inst, SMLoc IDLoc, MCStreamer &Out);
+ 
++  // Helper to emit pseudo instruction "call36 sym" or "tail36 $rj, sym".
++  void emitFuncCall36(MCInst &Inst, SMLoc IDLoc, MCStreamer &Out,
++                      bool IsTailCall);
++
+ public:
+   enum LoongArchMatchResultTy {
+     Match_Dummy = FIRST_TARGET_MATCH_RESULT_TY,
+@@ -401,6 +405,22 @@ public:
+                      IsValidKind;
+   }
+ 
++  bool isSImm20pcaddu18i() const {
++    if (!isImm())
++      return false;
++
++    int64_t Imm;
++    LoongArchMCExpr::VariantKind VK = LoongArchMCExpr::VK_LoongArch_None;
++    bool IsConstantImm = evaluateConstantImm(getImm(), Imm, VK);
++    bool IsValidKind = VK == LoongArchMCExpr::VK_LoongArch_None ||
++                       VK == LoongArchMCExpr::VK_LoongArch_CALL36;
++
++    return IsConstantImm
++               ? isInt<20>(Imm) && IsValidKind
++               : LoongArchAsmParser::classifySymbolRef(getImm(), VK) &&
++                     IsValidKind;
++  }
++
+   bool isSImm21lsl2() const {
+     if (!isImm())
+       return false;
+@@ -1111,6 +1131,35 @@ void LoongArchAsmParser::emitLoadImm(MCInst &Inst, SMLoc IDLoc,
+   }
+ }
+ 
++void LoongArchAsmParser::emitFuncCall36(MCInst &Inst, SMLoc IDLoc,
++                                        MCStreamer &Out, bool IsTailCall) {
++  // call36 sym
++  // expands to:
++  //   pcaddu18i $ra, %call36(sym)
++  //   jirl      $ra, $ra, 0
++  //
++  // tail36 $rj, sym
++  // expands to:
++  //   pcaddu18i $rj, %call36(sym)
++  //   jirl      $r0, $rj, 0
++  unsigned ScratchReg =
++      IsTailCall ? Inst.getOperand(0).getReg() : (unsigned)LoongArch::R1;
++  const MCExpr *Sym =
++      IsTailCall ? Inst.getOperand(1).getExpr() : Inst.getOperand(0).getExpr();
++  const LoongArchMCExpr *LE = LoongArchMCExpr::create(
++      Sym, llvm::LoongArchMCExpr::VK_LoongArch_CALL36, getContext());
++
++  Out.emitInstruction(
++      MCInstBuilder(LoongArch::PCADDU18I).addReg(ScratchReg).addExpr(LE),
++      getSTI());
++  Out.emitInstruction(
++      MCInstBuilder(LoongArch::JIRL)
++          .addReg(IsTailCall ? (unsigned)LoongArch::R0 : ScratchReg)
++          .addReg(ScratchReg)
++          .addImm(0),
++      getSTI());
++}
++
+ bool LoongArchAsmParser::processInstruction(MCInst &Inst, SMLoc IDLoc,
+                                             OperandVector &Operands,
+                                             MCStreamer &Out) {
+@@ -1159,6 +1208,12 @@ bool LoongArchAsmParser::processInstruction(MCInst &Inst, SMLoc IDLoc,
+   case LoongArch::PseudoLI_D:
+     emitLoadImm(Inst, IDLoc, Out);
+     return false;
++  case LoongArch::PseudoCALL36:
++    emitFuncCall36(Inst, IDLoc, Out, /*IsTailCall=*/false);
++    return false;
++  case LoongArch::PseudoTAIL36:
++    emitFuncCall36(Inst, IDLoc, Out, /*IsTailCall=*/true);
++    return false;
+   }
+   Out.emitInstruction(Inst, getSTI());
+   return false;
+@@ -1440,6 +1495,12 @@ bool LoongArchAsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
+         /*Upper=*/(1 << 19) - 1,
+         "operand must be a symbol with modifier (e.g. %pc_hi20) or an integer "
+         "in the range");
++  case Match_InvalidSImm20pcaddu18i:
++    return generateImmOutOfRangeError(
++        Operands, ErrorInfo, /*Lower=*/-(1 << 19),
++        /*Upper=*/(1 << 19) - 1,
++        "operand must be a symbol with modifier (e.g. %call36) or an integer "
++        "in the range");
+   case Match_InvalidSImm21lsl2:
+     return generateImmOutOfRangeError(
+         Operands, ErrorInfo, /*Lower=*/-(1 << 22), /*Upper=*/(1 << 22) - 4,
+diff --git a/llvm/lib/Target/LoongArch/LoongArchExpandPseudoInsts.cpp b/llvm/lib/Target/LoongArch/LoongArchExpandPseudoInsts.cpp
+index 72c1f1cec198..8eda2dcc1633 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchExpandPseudoInsts.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchExpandPseudoInsts.cpp
+@@ -458,11 +458,11 @@ bool LoongArchPreRAExpandPseudo::expandFunctionCALL(
+   }
+   case CodeModel::Medium: {
+     // CALL:
+-    // pcalau12i  $ra, %pc_hi20(func)
+-    // jirl       $ra, $ra, %pc_lo12(func)
++    // pcaddu18i $ra, %call36(func)
++    // jirl      $ra, $ra, 0
+     // TAIL:
+-    // pcalau12i  $scratch, %pc_hi20(func)
+-    // jirl       $r0, $scratch, %pc_lo12(func)
++    // pcaddu18i $scratch, %call36(func)
++    // jirl      $r0, $scratch, 0
+     Opcode =
+         IsTailCall ? LoongArch::PseudoJIRL_TAIL : LoongArch::PseudoJIRL_CALL;
+     Register ScratchReg =
+@@ -470,18 +470,15 @@ bool LoongArchPreRAExpandPseudo::expandFunctionCALL(
+             ? MF->getRegInfo().createVirtualRegister(&LoongArch::GPRRegClass)
+             : LoongArch::R1;
+     MachineInstrBuilder MIB =
+-        BuildMI(MBB, MBBI, DL, TII->get(LoongArch::PCALAU12I), ScratchReg);
+-    CALL = BuildMI(MBB, MBBI, DL, TII->get(Opcode)).addReg(ScratchReg);
+-    if (Func.isSymbol()) {
+-      const char *FnName = Func.getSymbolName();
+-      MIB.addExternalSymbol(FnName, LoongArchII::MO_PCREL_HI);
+-      CALL.addExternalSymbol(FnName, LoongArchII::MO_PCREL_LO);
+-      break;
+-    }
+-    assert(Func.isGlobal() && "Expected a GlobalValue at this time");
+-    const GlobalValue *GV = Func.getGlobal();
+-    MIB.addGlobalAddress(GV, 0, LoongArchII::MO_PCREL_HI);
+-    CALL.addGlobalAddress(GV, 0, LoongArchII::MO_PCREL_LO);
++        BuildMI(MBB, MBBI, DL, TII->get(LoongArch::PCADDU18I), ScratchReg);
++
++    CALL =
++        BuildMI(MBB, MBBI, DL, TII->get(Opcode)).addReg(ScratchReg).addImm(0);
++
++    if (Func.isSymbol())
++      MIB.addExternalSymbol(Func.getSymbolName(), LoongArchII::MO_CALL36);
++    else
++      MIB.addDisp(Func, 0, LoongArchII::MO_CALL36);
+     break;
+   }
+   case CodeModel::Large: {
+diff --git a/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
+index ab1890556814..67de5f7afd78 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
+@@ -351,6 +351,10 @@ def simm20_lu32id : SImm20Operand {
+   let ParserMatchClass = SImmAsmOperand<20, "lu32id">;
+ }
+ 
++def simm20_pcaddu18i : SImm20Operand {
++  let ParserMatchClass = SImmAsmOperand<20, "pcaddu18i">;
++}
++
+ def simm21_lsl2 : Operand<OtherVT> {
+   let ParserMatchClass = SImmAsmOperand<21, "lsl2">;
+   let EncoderMethod = "getImmOpValueAsr<2>";
+@@ -772,7 +776,7 @@ def LU32I_D : Fmt1RI20<0x16000000, (outs GPR:$dst),
+                        "$rd, $imm20">;
+ }
+ def LU52I_D : ALU_2RI12<0x03000000, simm12_lu52id>;
+-def PCADDU18I : ALU_1RI20<0x1e000000, simm20>;
++def PCADDU18I : ALU_1RI20<0x1e000000, simm20_pcaddu18i>;
+ def MUL_D     : ALU_3R<0x001d8000>;
+ def MULH_D    : ALU_3R<0x001e0000>;
+ def MULH_DU   : ALU_3R<0x001e8000>;
+@@ -1324,7 +1328,7 @@ def : Pat<(brind (add GPR:$rj, simm16_lsl2:$imm16)),
+           (PseudoBRIND GPR:$rj, simm16_lsl2:$imm16)>;
+ 
+ let isCall = 1, Defs = [R1] in
+-def PseudoCALL : Pseudo<(outs), (ins simm26_symbol:$func)>;
++def PseudoCALL : Pseudo<(outs), (ins bare_symbol:$func)>;
+ 
+ def : Pat<(loongarch_call tglobaladdr:$func), (PseudoCALL tglobaladdr:$func)>;
+ def : Pat<(loongarch_call texternalsym:$func), (PseudoCALL texternalsym:$func)>;
+@@ -1344,7 +1348,7 @@ def PseudoRET : Pseudo<(outs), (ins), [(loongarch_ret)]>,
+                 PseudoInstExpansion<(JIRL R0, R1, 0)>;
+ 
+ let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1, Uses = [R3] in
+-def PseudoTAIL : Pseudo<(outs), (ins simm26_symbol:$dst)>;
++def PseudoTAIL : Pseudo<(outs), (ins bare_symbol:$dst)>;
+ 
+ def : Pat<(loongarch_tail (iPTR tglobaladdr:$dst)),
+           (PseudoTAIL tglobaladdr:$dst)>;
+@@ -1367,6 +1371,19 @@ def PseudoJIRL_TAIL : Pseudo<(outs), (ins GPR:$rj, simm16_lsl2:$imm16)>,
+                       PseudoInstExpansion<(JIRL R0, GPR:$rj,
+                                            simm16_lsl2:$imm16)>;
+ 
++/// call36/taill36 macro instructions
++let isCall = 1, isBarrier = 1, isCodeGenOnly = 0, isAsmParserOnly = 1,
++    Defs = [R1], Size = 8, hasSideEffects = 0, mayStore = 0, mayLoad = 0 in
++def PseudoCALL36 : Pseudo<(outs), (ins bare_symbol:$dst), [],
++                          "call36", "$dst">,
++                   Requires<[IsLA64]>;
++let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1, Uses = [R3],
++    isCodeGenOnly = 0, isAsmParserOnly = 1, Size = 8, hasSideEffects = 0,
++    mayStore = 0, mayLoad = 0 in
++def PseudoTAIL36 : Pseudo<(outs), (ins GPR:$tmp, bare_symbol:$dst), [],
++                          "tail36", "$tmp, $dst">,
++                   Requires<[IsLA64]>;
++
+ /// Load address (la*) macro instructions.
+ 
+ // Define isCodeGenOnly = 0 to expose them to tablegened assembly parser.
+diff --git a/llvm/lib/Target/LoongArch/LoongArchMCInstLower.cpp b/llvm/lib/Target/LoongArch/LoongArchMCInstLower.cpp
+index 5daa9481c907..98ad49f25e3f 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchMCInstLower.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchMCInstLower.cpp
+@@ -95,6 +95,9 @@ static MCOperand lowerSymbolOperand(const MachineOperand &MO, MCSymbol *Sym,
+   case LoongArchII::MO_GD_PC_HI:
+     Kind = LoongArchMCExpr::VK_LoongArch_TLS_GD_PC_HI20;
+     break;
++  case LoongArchII::MO_CALL36:
++    Kind = LoongArchMCExpr::VK_LoongArch_CALL36;
++    break;
+     // TODO: Handle more target-flags.
+   }
+ 
+diff --git a/llvm/lib/Target/LoongArch/LoongArchTargetMachine.cpp b/llvm/lib/Target/LoongArch/LoongArchTargetMachine.cpp
+index d0a4e9375048..0efc5e6ebb99 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchTargetMachine.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchTargetMachine.cpp
+@@ -63,11 +63,11 @@ getEffectiveLoongArchCodeModel(const Triple &TT,
+ 
+   switch (*CM) {
+   case CodeModel::Small:
+-  case CodeModel::Medium:
+     return *CM;
++  case CodeModel::Medium:
+   case CodeModel::Large:
+     if (!TT.isArch64Bit())
+-      report_fatal_error("Large code model requires LA64");
++      report_fatal_error("Medium/Large code model requires LA64");
+     return *CM;
+   default:
+     report_fatal_error(
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchBaseInfo.h b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchBaseInfo.h
+index cee6dad1f095..0692cb92b694 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchBaseInfo.h
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchBaseInfo.h
+@@ -47,6 +47,7 @@ enum {
+   MO_IE_PC64_HI,
+   MO_LD_PC_HI,
+   MO_GD_PC_HI,
++  MO_CALL36
+   // TODO: Add more flags.
+ };
+ } // end namespace LoongArchII
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchELFObjectWriter.cpp b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchELFObjectWriter.cpp
+index e60b9c2cfd97..0a52380dd2cd 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchELFObjectWriter.cpp
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchELFObjectWriter.cpp
+@@ -90,6 +90,8 @@ unsigned LoongArchELFObjectWriter::getRelocType(MCContext &Ctx,
+     return ELF::R_LARCH_TLS_LE64_LO20;
+   case LoongArch::fixup_loongarch_tls_le64_hi12:
+     return ELF::R_LARCH_TLS_LE64_HI12;
++  case LoongArch::fixup_loongarch_call36:
++    return ELF::R_LARCH_CALL36;
+     // TODO: Handle more fixup-kinds.
+   }
+ }
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchFixupKinds.h b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchFixupKinds.h
+index 78414408f21f..0d19d2b0fb1f 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchFixupKinds.h
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchFixupKinds.h
+@@ -111,6 +111,9 @@ enum Fixups {
+   fixup_loongarch_relax = FirstLiteralRelocationKind + ELF::R_LARCH_RELAX,
+   // Generate an R_LARCH_ALIGN which indicates the linker may fixup align here.
+   fixup_loongarch_align = FirstLiteralRelocationKind + ELF::R_LARCH_ALIGN,
++  // 36-bit fixup corresponding to %call36(foo) for a pair instructions:
++  // pcaddu18i+jirl.
++  fixup_loongarch_call36 = FirstLiteralRelocationKind + ELF::R_LARCH_CALL36,
+ };
+ } // end namespace LoongArch
+ } // end namespace llvm
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCCodeEmitter.cpp b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCCodeEmitter.cpp
+index 09d92ac9aa3a..7c4fe9674d4e 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCCodeEmitter.cpp
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCCodeEmitter.cpp
+@@ -241,6 +241,9 @@ LoongArchMCCodeEmitter::getExprOpValue(const MCInst &MI, const MCOperand &MO,
+     case LoongArchMCExpr::VK_LoongArch_TLS_GD_HI20:
+       FixupKind = LoongArch::fixup_loongarch_tls_gd_hi20;
+       break;
++    case LoongArchMCExpr::VK_LoongArch_CALL36:
++      FixupKind = LoongArch::fixup_loongarch_call36;
++      break;
+     }
+   } else if (Kind == MCExpr::SymbolRef &&
+              cast<MCSymbolRefExpr>(Expr)->getKind() ==
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCExpr.cpp b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCExpr.cpp
+index 82c992b1cc8c..8ca8876a19b9 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCExpr.cpp
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCExpr.cpp
+@@ -138,6 +138,8 @@ StringRef LoongArchMCExpr::getVariantKindName(VariantKind Kind) {
+     return "gd_pc_hi20";
+   case VK_LoongArch_TLS_GD_HI20:
+     return "gd_hi20";
++  case VK_LoongArch_CALL36:
++    return "call36";
+   }
+ }
+ 
+@@ -180,6 +182,7 @@ LoongArchMCExpr::getVariantKindForName(StringRef name) {
+       .Case("ld_hi20", VK_LoongArch_TLS_LD_HI20)
+       .Case("gd_pc_hi20", VK_LoongArch_TLS_GD_PC_HI20)
+       .Case("gd_hi20", VK_LoongArch_TLS_GD_HI20)
++      .Case("call36", VK_LoongArch_CALL36)
+       .Default(VK_LoongArch_Invalid);
+ }
+ 
+diff --git a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCExpr.h b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCExpr.h
+index 93251f824103..bd828116d7fa 100644
+--- a/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCExpr.h
++++ b/llvm/lib/Target/LoongArch/MCTargetDesc/LoongArchMCExpr.h
+@@ -61,6 +61,7 @@ public:
+     VK_LoongArch_TLS_LD_HI20,
+     VK_LoongArch_TLS_GD_PC_HI20,
+     VK_LoongArch_TLS_GD_HI20,
++    VK_LoongArch_CALL36,
+     VK_LoongArch_Invalid // Must be the last item.
+   };
+ 
+diff --git a/llvm/test/CodeGen/LoongArch/code-models.ll b/llvm/test/CodeGen/LoongArch/code-models.ll
+index c610f645a06a..7c6f46d5e926 100644
+--- a/llvm/test/CodeGen/LoongArch/code-models.ll
++++ b/llvm/test/CodeGen/LoongArch/code-models.ll
+@@ -23,8 +23,8 @@ define i32 @call_globaladdress(i32 %a) nounwind {
+ ; MEDIUM:       # %bb.0:
+ ; MEDIUM-NEXT:    addi.d $sp, $sp, -16
+ ; MEDIUM-NEXT:    st.d $ra, $sp, 8 # 8-byte Folded Spill
+-; MEDIUM-NEXT:    pcalau12i $ra, %pc_hi20(callee)
+-; MEDIUM-NEXT:    jirl $ra, $ra, %pc_lo12(callee)
++; MEDIUM-NEXT:    pcaddu18i $ra, %call36(callee)
++; MEDIUM-NEXT:    jirl $ra, $ra, 0
+ ; MEDIUM-NEXT:    ld.d $ra, $sp, 8 # 8-byte Folded Reload
+ ; MEDIUM-NEXT:    addi.d $sp, $sp, 16
+ ; MEDIUM-NEXT:    ret
+@@ -68,8 +68,8 @@ define void @call_external_sym(ptr %dst) {
+ ; MEDIUM-NEXT:    .cfi_offset 1, -8
+ ; MEDIUM-NEXT:    ori $a2, $zero, 1000
+ ; MEDIUM-NEXT:    move $a1, $zero
+-; MEDIUM-NEXT:    pcalau12i $ra, %pc_hi20(memset)
+-; MEDIUM-NEXT:    jirl $ra, $ra, %pc_lo12(memset)
++; MEDIUM-NEXT:    pcaddu18i $ra, %call36(memset)
++; MEDIUM-NEXT:    jirl $ra, $ra, 0
+ ; MEDIUM-NEXT:    ld.d $ra, $sp, 8 # 8-byte Folded Reload
+ ; MEDIUM-NEXT:    addi.d $sp, $sp, 16
+ ; MEDIUM-NEXT:    ret
+@@ -105,8 +105,8 @@ define i32 @caller_tail(i32 %i) nounwind {
+ ;
+ ; MEDIUM-LABEL: caller_tail:
+ ; MEDIUM:       # %bb.0: # %entry
+-; MEDIUM-NEXT:    pcalau12i $a1, %pc_hi20(callee_tail)
+-; MEDIUM-NEXT:    jirl $zero, $a1, %pc_lo12(callee_tail)
++; MEDIUM-NEXT:    pcaddu18i $a1, %call36(callee_tail)
++; MEDIUM-NEXT:    jr $a1
+ ;
+ ; LARGE-LABEL: caller_tail:
+ ; LARGE:       # %bb.0: # %entry
+diff --git a/llvm/test/MC/LoongArch/Basic/Integer/invalid64.s b/llvm/test/MC/LoongArch/Basic/Integer/invalid64.s
+index acddca9432a6..1c1c658ad440 100644
+--- a/llvm/test/MC/LoongArch/Basic/Integer/invalid64.s
++++ b/llvm/test/MC/LoongArch/Basic/Integer/invalid64.s
+@@ -65,7 +65,7 @@ addu16i.d $a0, $a0, 32768
+ 
+ ## simm20
+ pcaddu18i $a0, 0x80000
+-# CHECK: :[[#@LINE-1]]:16: error: immediate must be an integer in the range [-524288, 524287]
++# CHECK: :[[#@LINE-1]]:16: error: operand must be a symbol with modifier (e.g. %call36) or an integer in the range [-524288, 524287]
+ 
+ ## simm20_lu32id
+ lu32i.d $a0, 0x80000
+diff --git a/llvm/test/MC/LoongArch/Macros/macros-call.s b/llvm/test/MC/LoongArch/Macros/macros-call.s
+new file mode 100644
+index 000000000000..a648a3978038
+--- /dev/null
++++ b/llvm/test/MC/LoongArch/Macros/macros-call.s
+@@ -0,0 +1,9 @@
++# RUN: llvm-mc --triple=loongarch64 %s | FileCheck %s
++
++call36 sym_call
++# CHECK:      pcaddu18i $ra, %call36(sym_call)
++# CHECK-NEXT: jirl $ra, $ra, 0
++
++tail36 $t0, sym_tail
++# CHECK:      pcaddu18i $t0, %call36(sym_tail)
++# CHECK-NEXT: jr $t0
+diff --git a/llvm/test/MC/LoongArch/Relocations/relocations.s b/llvm/test/MC/LoongArch/Relocations/relocations.s
+index 042cc93470a1..bec71e103893 100644
+--- a/llvm/test/MC/LoongArch/Relocations/relocations.s
++++ b/llvm/test/MC/LoongArch/Relocations/relocations.s
+@@ -218,3 +218,8 @@ lu12i.w $t1, %gd_hi20(foo)
+ # RELOC: R_LARCH_TLS_GD_HI20 foo 0x0
+ # INSTR: lu12i.w $t1, %gd_hi20(foo)
+ # FIXUP: fixup A - offset: 0, value: %gd_hi20(foo), kind: FK_NONE
++
++pcaddu18i $t1, %call36(foo)
++# RELOC: R_LARCH_CALL36 foo 0x0
++# INSTR: pcaddu18i $t1, %call36(foo)
++# FIXUP: fixup A - offset: 0, value: %call36(foo), kind: FK_NONE
+-- 
+2.20.1
+

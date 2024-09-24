@@ -1,0 +1,44 @@
+From cf0d9db4664d59e163d53c62ae1de663092ab2d2 Mon Sep 17 00:00:00 2001
+From: Weining Lu <luweining@loongson.cn>
+Date: Fri, 10 Nov 2023 13:37:55 +0800
+Subject: [PATCH 11/23] [lld][ELF] Add a corner testcase for
+ elf::getLoongArchPageDelta
+
+If `page(dest) - page(pc)` is 0xfffffffffff000, i.e. page(pc) is next
+to page(dest), and lo12(dest) > 0x7ff, correct %pc64_lo12 and %pc64_hi12
+should be both -1 (which can be checked with binutils) but they are both
+0 on lld. This patch adds such a test showing lld's incorrect behaviour
+and following patch will fix this issue.
+
+(cherry picked from commit e752b58e0d26fc08bca6b2a4e56b05af7f8d8d66)
+---
+ lld/test/ELF/loongarch-pc-aligned.s | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/lld/test/ELF/loongarch-pc-aligned.s b/lld/test/ELF/loongarch-pc-aligned.s
+index 9df3492d1877..f6ac56e5261d 100644
+--- a/lld/test/ELF/loongarch-pc-aligned.s
++++ b/lld/test/ELF/loongarch-pc-aligned.s
+@@ -260,6 +260,19 @@
+ # EXTREME15-NEXT: lu32i.d   $t0, -349526
+ # EXTREME15-NEXT: lu52i.d   $t0, $t0, -1093
+ 
++## FIXME: Correct %pc64_lo20 should be 0xfffff (-1) and %pc64_hi12 should be 0xfff (-1), but current values are:
++## page delta = 0x0000000000000000, page offset = 0x888
++## %pc_lo12   = 0x888 = -1912
++## %pc_hi20   = 0x00000 = 0
++## %pc64_lo20 = 0x00000 = 0
++## %pc64_hi12 = 0x00000 = 0
++# RUN: ld.lld %t/extreme.o --section-start=.rodata=0x0000000012344888 --section-start=.text=0x0000000012345678 -o %t/extreme16
++# RUN: llvm-objdump -d --no-show-raw-insn %t/extreme16 | FileCheck %s --check-prefix=EXTREME16
++# EXTREME16:      addi.d $t0, $zero, -1912
++# EXTREME16-NEXT: pcalau12i $t1, 0
++# EXTREME16-NEXT: lu32i.d   $t0, 0
++# EXTREME16-NEXT: lu52i.d   $t0, $t0, 0
++
+ #--- a.s
+ .rodata
+ x:
+-- 
+2.20.1
+

@@ -1,0 +1,109 @@
+From 0cae10595a7521e2c430c605c1f830570b3c9682 Mon Sep 17 00:00:00 2001
+From: Lu Weining <luweining@loongson.cn>
+Date: Thu, 30 Nov 2023 14:08:45 +0800
+Subject: [PATCH 01/23] [Driver] Support -mcmodel= for LoongArch (#72514)
+
+7e42545 rejects unsupported mcmodel options, but normal/medium/extreme
+should be supported models for LoongArch according to [gcc
+document](https://gcc.gnu.org/onlinedocs/gcc/LoongArch-Options.html).
+
+The mappings among `gcc`, `clang driver`, `clang cc1` and `LLVM (i.e.
+llc --code-model=)` are:
+
+|     gcc      |  clang driver |  clang cc1   |    LLVM    |
+| -------------  | ------------------ | ----------------- | -------------- |
+| normal    |      normal     |   small        |    small    |
+| medium  |     medium     |   medium    |    medium |
+| extreme  |     extreme     |  large         |     large     |
+
+(cherry picked from commit 1296d20adfb0978afe38d67efab9818079d870ca)
+---
+ clang/lib/Driver/ToolChains/Clang.cpp | 38 ++++++++++++++++++++-------
+ clang/test/Driver/mcmodel.c           | 15 +++++++++++
+ 2 files changed, 44 insertions(+), 9 deletions(-)
+
+diff --git a/clang/lib/Driver/ToolChains/Clang.cpp b/clang/lib/Driver/ToolChains/Clang.cpp
+index fac4f03d6193..4e5f689498d6 100644
+--- a/clang/lib/Driver/ToolChains/Clang.cpp
++++ b/clang/lib/Driver/ToolChains/Clang.cpp
+@@ -5773,18 +5773,38 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
+ 
+   if (Arg *A = Args.getLastArg(options::OPT_mcmodel_EQ)) {
+     StringRef CM = A->getValue();
+-    if (CM == "small" || CM == "kernel" || CM == "medium" || CM == "large" ||
+-        CM == "tiny") {
+-      if (Triple.isOSAIX() && CM == "medium")
+-        CmdArgs.push_back("-mcmodel=large");
+-      else if (Triple.isAArch64() && (CM == "kernel" || CM == "medium"))
++    if (Triple.isLoongArch()) {
++      bool Ok = false;
++      if (CM == "extreme" &&
++          Args.hasFlagNoClaim(options::OPT_fplt, options::OPT_fno_plt, false))
++        D.Diag(diag::err_drv_argument_not_allowed_with)
++            << A->getAsString(Args) << "-fplt";
++      Ok = CM == "normal" || CM == "medium" || CM == "extreme";
++      // Convert to LLVM recognizable names.
++      if (Ok) {
++        CM = llvm::StringSwitch<StringRef>(CM)
++                 .Case("normal", "small")
++                 .Case("extreme", "large")
++                 .Default(CM);
++        CmdArgs.push_back(Args.MakeArgString("-mcmodel=" + CM));
++      } else {
+         D.Diag(diag::err_drv_invalid_argument_to_option)
+             << CM << A->getOption().getName();
+-      else
+-        A->render(Args, CmdArgs);
++      }
+     } else {
+-      D.Diag(diag::err_drv_invalid_argument_to_option)
+-          << CM << A->getOption().getName();
++      if (CM == "small" || CM == "kernel" || CM == "medium" || CM == "large" ||
++          CM == "tiny") {
++        if (Triple.isOSAIX() && CM == "medium")
++          CmdArgs.push_back("-mcmodel=large");
++        else if (Triple.isAArch64() && (CM == "kernel" || CM == "medium"))
++          D.Diag(diag::err_drv_invalid_argument_to_option)
++              << CM << A->getOption().getName();
++        else
++          A->render(Args, CmdArgs);
++      } else {
++        D.Diag(diag::err_drv_invalid_argument_to_option)
++            << CM << A->getOption().getName();
++      }
+     }
+   }
+ 
+diff --git a/clang/test/Driver/mcmodel.c b/clang/test/Driver/mcmodel.c
+index 63b432036159..4aada126cf06 100644
+--- a/clang/test/Driver/mcmodel.c
++++ b/clang/test/Driver/mcmodel.c
+@@ -8,6 +8,14 @@
+ // RUN: not %clang -c -mcmodel=lager %s 2>&1 | FileCheck --check-prefix=INVALID %s
+ // RUN: not %clang -c --target=aarch64 -mcmodel=medium %s 2>&1 | FileCheck --check-prefix=AARCH64-MEDIUM %s
+ // RUN: not %clang -c --target=aarch64 -mcmodel=kernel %s 2>&1 | FileCheck --check-prefix=AARCH64-KERNEL %s
++// RUN: %clang --target=loongarch64 -### -S -mcmodel=normal %s 2>&1 | FileCheck --check-prefix=SMALL %s
++// RUN: %clang --target=loongarch64 -### -S -mcmodel=medium %s 2>&1 | FileCheck --check-prefix=MEDIUM %s
++// RUN: %clang --target=loongarch64 -### -S -mcmodel=extreme %s 2>&1 | FileCheck --check-prefix=LARGE %s
++// RUN: not %clang -c --target=loongarch64 -mcmodel=tiny %s 2>&1 | FileCheck --check-prefix=ERR-LOONGARCH64-TINY %s
++// RUN: not %clang -c --target=loongarch64 -mcmodel=small %s 2>&1 | FileCheck --check-prefix=ERR-LOONGARCH64-SMALL %s
++// RUN: not %clang -c --target=loongarch64 -mcmodel=kernel %s 2>&1 | FileCheck --check-prefix=ERR-LOONGARCH64-KERNEL %s
++// RUN: not %clang -c --target=loongarch64 -mcmodel=large %s 2>&1 | FileCheck --check-prefix=ERR-LOONGARCH64-LARGE %s
++// RUN: not %clang -c --target=loongarch64 -mcmodel=extreme -fplt %s 2>&1 | FileCheck --check-prefix=ERR-LOONGARCH64-PLT-EXTREME %s
+ 
+ // TINY: "-mcmodel=tiny"
+ // SMALL: "-mcmodel=small"
+@@ -20,3 +28,10 @@
+ 
+ // AARCH64-MEDIUM: error: invalid argument 'medium' to -mcmodel=
+ // AARCH64-KERNEL: error: invalid argument 'kernel' to -mcmodel=
++
++// ERR-LOONGARCH64-TINY:   error: invalid argument 'tiny' to -mcmodel=
++// ERR-LOONGARCH64-SMALL:  error: invalid argument 'small' to -mcmodel=
++// ERR-LOONGARCH64-KERNEL: error: invalid argument 'kernel' to -mcmodel=
++// ERR-LOONGARCH64-LARGE:  error: invalid argument 'large' to -mcmodel=
++
++// ERR-LOONGARCH64-PLT-EXTREME: error: invalid argument '-mcmodel=extreme' not allowed with '-fplt'
+-- 
+2.20.1
+

@@ -1,0 +1,63 @@
+From 53a624f1fbb2d1f837070b400812e8bddf66fd3d Mon Sep 17 00:00:00 2001
+From: Lu Weining <luweining@loongson.cn>
+Date: Tue, 5 Dec 2023 09:20:48 +0800
+Subject: [PATCH 02/23] [BinaryFormat][LoongArch] Define psABI v2.20 relocs for
+ R_LARCH_CALL36(#73345)
+
+R_LARCH_CALL36 was designed for function call on medium code model where
+the 2 instructions (pcaddu18i + jirl) must be adjacent.
+
+(cherry picked from commit c3a9c905fbc486add75e16218fe58a04b7b6c282)
+---
+ llvm/include/llvm/BinaryFormat/ELFRelocs/LoongArch.def      | 6 ++++++
+ .../tools/llvm-readobj/ELF/reloc-types-loongarch64.test     | 2 ++
+ llvm/unittests/Object/ELFTest.cpp                           | 2 ++
+ 3 files changed, 10 insertions(+)
+
+diff --git a/llvm/include/llvm/BinaryFormat/ELFRelocs/LoongArch.def b/llvm/include/llvm/BinaryFormat/ELFRelocs/LoongArch.def
+index 02bce3c71712..c4393432677b 100644
+--- a/llvm/include/llvm/BinaryFormat/ELFRelocs/LoongArch.def
++++ b/llvm/include/llvm/BinaryFormat/ELFRelocs/LoongArch.def
+@@ -118,3 +118,9 @@ ELF_RELOC(R_LARCH_SUB6,        106)
+ ELF_RELOC(R_LARCH_ADD_ULEB128, 107)
+ ELF_RELOC(R_LARCH_SUB_ULEB128, 108)
+ ELF_RELOC(R_LARCH_64_PCREL,    109)
++
++// Relocs added in ELF for the LoongArch™ Architecture v20231102, part of the
++// v2.20 LoongArch ABI specs.
++//
++// Spec addition: https://github.com/loongson/la-abi-specs/pull/4
++ELF_RELOC(R_LARCH_CALL36, 110)
+diff --git a/llvm/test/tools/llvm-readobj/ELF/reloc-types-loongarch64.test b/llvm/test/tools/llvm-readobj/ELF/reloc-types-loongarch64.test
+index e32dc893fa79..88ff7fa405ed 100644
+--- a/llvm/test/tools/llvm-readobj/ELF/reloc-types-loongarch64.test
++++ b/llvm/test/tools/llvm-readobj/ELF/reloc-types-loongarch64.test
+@@ -102,6 +102,7 @@
+ # CHECK: Type: R_LARCH_ADD_ULEB128 (107)
+ # CHECK: Type: R_LARCH_SUB_ULEB128 (108)
+ # CHECK: Type: R_LARCH_64_PCREL (109)
++# CHECK: Type: R_LARCH_CALL36 (110)
+ 
+ --- !ELF
+ FileHeader:
+@@ -211,3 +212,4 @@ Sections:
+       - Type: R_LARCH_ADD_ULEB128
+       - Type: R_LARCH_SUB_ULEB128
+       - Type: R_LARCH_64_PCREL
++      - Type: R_LARCH_CALL36
+diff --git a/llvm/unittests/Object/ELFTest.cpp b/llvm/unittests/Object/ELFTest.cpp
+index 50b1df124a4a..ed851dde4c00 100644
+--- a/llvm/unittests/Object/ELFTest.cpp
++++ b/llvm/unittests/Object/ELFTest.cpp
+@@ -251,6 +251,8 @@ TEST(ELFTest, getELFRelocationTypeNameForLoongArch) {
+             getELFRelocationTypeName(EM_LOONGARCH, R_LARCH_SUB_ULEB128));
+   EXPECT_EQ("R_LARCH_64_PCREL",
+             getELFRelocationTypeName(EM_LOONGARCH, R_LARCH_64_PCREL));
++  EXPECT_EQ("R_LARCH_CALL36",
++            getELFRelocationTypeName(EM_LOONGARCH, R_LARCH_CALL36));
+ }
+ 
+ TEST(ELFTest, getELFRelativeRelocationType) {
+-- 
+2.20.1
+

@@ -1,0 +1,1278 @@
+From 0e86ae628414dac6d7ef2eaccc8655d790595f9f Mon Sep 17 00:00:00 2001
+From: wanglei <wanglei@loongson.cn>
+Date: Tue, 2 Jan 2024 10:57:15 +0800
+Subject: [PATCH 09/23] [LoongArch] Reimplement the expansion of
+ PseudoLA*_LARGE instructions (#76555)
+
+According to the description of the psABI v2.30:
+https://github.com/loongson/la-abi-specs/releases/tag/v2.30, moved the
+expansion of relevant pseudo-instructions from
+`LoongArchPreRAExpandPseudo` pass to `LoongArchExpandPseudo` pass, to
+ensure that the code sequences of `PseudoLA*_LARGE` instructions and
+Medium code model's function call are not scheduled.
+
+(cherry picked from commit c56a5e895a96fec4292e9333d998cfa88770432a)
+---
+ .../LoongArch/LoongArchExpandPseudoInsts.cpp  | 519 +++++++++---------
+ .../LoongArch/LoongArchISelLowering.cpp       |  24 +-
+ .../Target/LoongArch/LoongArchISelLowering.h  |   4 +
+ .../Target/LoongArch/LoongArchInstrInfo.td    |  83 ++-
+ llvm/test/CodeGen/LoongArch/code-models.ll    |  36 +-
+ llvm/test/CodeGen/LoongArch/expand-call.ll    |   2 +-
+ llvm/test/CodeGen/LoongArch/global-address.ll |  32 +-
+ .../LoongArch/psabi-restricted-scheduling.ll  | 102 ++--
+ llvm/test/CodeGen/LoongArch/tls-models.ll     |  68 +--
+ 9 files changed, 487 insertions(+), 383 deletions(-)
+
+diff --git a/llvm/lib/Target/LoongArch/LoongArchExpandPseudoInsts.cpp b/llvm/lib/Target/LoongArch/LoongArchExpandPseudoInsts.cpp
+index 8eda2dcc1633..f977f176066a 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchExpandPseudoInsts.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchExpandPseudoInsts.cpp
+@@ -62,43 +62,24 @@ private:
+                                MachineBasicBlock::iterator &NextMBBI,
+                                unsigned FlagsHi, unsigned SecondOpcode,
+                                unsigned FlagsLo);
+-  bool expandLargeAddressLoad(MachineBasicBlock &MBB,
+-                              MachineBasicBlock::iterator MBBI,
+-                              MachineBasicBlock::iterator &NextMBBI,
+-                              unsigned LastOpcode, unsigned IdentifyingMO);
+-  bool expandLargeAddressLoad(MachineBasicBlock &MBB,
+-                              MachineBasicBlock::iterator MBBI,
+-                              MachineBasicBlock::iterator &NextMBBI,
+-                              unsigned LastOpcode, unsigned IdentifyingMO,
+-                              const MachineOperand &Symbol, Register DestReg,
+-                              bool EraseFromParent);
+   bool expandLoadAddressPcrel(MachineBasicBlock &MBB,
+                               MachineBasicBlock::iterator MBBI,
+-                              MachineBasicBlock::iterator &NextMBBI,
+-                              bool Large = false);
++                              MachineBasicBlock::iterator &NextMBBI);
+   bool expandLoadAddressGot(MachineBasicBlock &MBB,
+                             MachineBasicBlock::iterator MBBI,
+-                            MachineBasicBlock::iterator &NextMBBI,
+-                            bool Large = false);
++                            MachineBasicBlock::iterator &NextMBBI);
+   bool expandLoadAddressTLSLE(MachineBasicBlock &MBB,
+                               MachineBasicBlock::iterator MBBI,
+                               MachineBasicBlock::iterator &NextMBBI);
+   bool expandLoadAddressTLSIE(MachineBasicBlock &MBB,
+                               MachineBasicBlock::iterator MBBI,
+-                              MachineBasicBlock::iterator &NextMBBI,
+-                              bool Large = false);
++                              MachineBasicBlock::iterator &NextMBBI);
+   bool expandLoadAddressTLSLD(MachineBasicBlock &MBB,
+                               MachineBasicBlock::iterator MBBI,
+-                              MachineBasicBlock::iterator &NextMBBI,
+-                              bool Large = false);
++                              MachineBasicBlock::iterator &NextMBBI);
+   bool expandLoadAddressTLSGD(MachineBasicBlock &MBB,
+                               MachineBasicBlock::iterator MBBI,
+-                              MachineBasicBlock::iterator &NextMBBI,
+-                              bool Large = false);
+-  bool expandFunctionCALL(MachineBasicBlock &MBB,
+-                          MachineBasicBlock::iterator MBBI,
+-                          MachineBasicBlock::iterator &NextMBBI,
+-                          bool IsTailCall);
++                              MachineBasicBlock::iterator &NextMBBI);
+ };
+ 
+ char LoongArchPreRAExpandPseudo::ID = 0;
+@@ -131,30 +112,16 @@ bool LoongArchPreRAExpandPseudo::expandMI(
+   switch (MBBI->getOpcode()) {
+   case LoongArch::PseudoLA_PCREL:
+     return expandLoadAddressPcrel(MBB, MBBI, NextMBBI);
+-  case LoongArch::PseudoLA_PCREL_LARGE:
+-    return expandLoadAddressPcrel(MBB, MBBI, NextMBBI, /*Large=*/true);
+   case LoongArch::PseudoLA_GOT:
+     return expandLoadAddressGot(MBB, MBBI, NextMBBI);
+-  case LoongArch::PseudoLA_GOT_LARGE:
+-    return expandLoadAddressGot(MBB, MBBI, NextMBBI, /*Large=*/true);
+   case LoongArch::PseudoLA_TLS_LE:
+     return expandLoadAddressTLSLE(MBB, MBBI, NextMBBI);
+   case LoongArch::PseudoLA_TLS_IE:
+     return expandLoadAddressTLSIE(MBB, MBBI, NextMBBI);
+-  case LoongArch::PseudoLA_TLS_IE_LARGE:
+-    return expandLoadAddressTLSIE(MBB, MBBI, NextMBBI, /*Large=*/true);
+   case LoongArch::PseudoLA_TLS_LD:
+     return expandLoadAddressTLSLD(MBB, MBBI, NextMBBI);
+-  case LoongArch::PseudoLA_TLS_LD_LARGE:
+-    return expandLoadAddressTLSLD(MBB, MBBI, NextMBBI, /*Large=*/true);
+   case LoongArch::PseudoLA_TLS_GD:
+     return expandLoadAddressTLSGD(MBB, MBBI, NextMBBI);
+-  case LoongArch::PseudoLA_TLS_GD_LARGE:
+-    return expandLoadAddressTLSGD(MBB, MBBI, NextMBBI, /*Large=*/true);
+-  case LoongArch::PseudoCALL:
+-    return expandFunctionCALL(MBB, MBBI, NextMBBI, /*IsTailCall=*/false);
+-  case LoongArch::PseudoTAIL:
+-    return expandFunctionCALL(MBB, MBBI, NextMBBI, /*IsTailCall=*/true);
+   }
+   return false;
+ }
+@@ -187,118 +154,9 @@ bool LoongArchPreRAExpandPseudo::expandPcalau12iInstPair(
+   return true;
+ }
+ 
+-bool LoongArchPreRAExpandPseudo::expandLargeAddressLoad(
+-    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+-    MachineBasicBlock::iterator &NextMBBI, unsigned LastOpcode,
+-    unsigned IdentifyingMO) {
+-  MachineInstr &MI = *MBBI;
+-  return expandLargeAddressLoad(MBB, MBBI, NextMBBI, LastOpcode, IdentifyingMO,
+-                                MI.getOperand(2), MI.getOperand(0).getReg(),
+-                                true);
+-}
+-
+-bool LoongArchPreRAExpandPseudo::expandLargeAddressLoad(
+-    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+-    MachineBasicBlock::iterator &NextMBBI, unsigned LastOpcode,
+-    unsigned IdentifyingMO, const MachineOperand &Symbol, Register DestReg,
+-    bool EraseFromParent) {
+-  // Code Sequence:
+-  //
+-  // Part1: pcalau12i  $scratch, %MO1(sym)
+-  // Part0: addi.d     $dest, $zero, %MO0(sym)
+-  // Part2: lu32i.d    $dest, %MO2(sym)
+-  // Part3: lu52i.d    $dest, $dest, %MO3(sym)
+-  // Fin:   LastOpcode $dest, $dest, $scratch
+-
+-  unsigned MO0, MO1, MO2, MO3;
+-  switch (IdentifyingMO) {
+-  default:
+-    llvm_unreachable("unsupported identifying MO");
+-  case LoongArchII::MO_PCREL_LO:
+-    MO0 = IdentifyingMO;
+-    MO1 = LoongArchII::MO_PCREL_HI;
+-    MO2 = LoongArchII::MO_PCREL64_LO;
+-    MO3 = LoongArchII::MO_PCREL64_HI;
+-    break;
+-  case LoongArchII::MO_GOT_PC_HI:
+-  case LoongArchII::MO_LD_PC_HI:
+-  case LoongArchII::MO_GD_PC_HI:
+-    // These cases relocate just like the GOT case, except for Part1.
+-    MO0 = LoongArchII::MO_GOT_PC_LO;
+-    MO1 = IdentifyingMO;
+-    MO2 = LoongArchII::MO_GOT_PC64_LO;
+-    MO3 = LoongArchII::MO_GOT_PC64_HI;
+-    break;
+-  case LoongArchII::MO_IE_PC_LO:
+-    MO0 = IdentifyingMO;
+-    MO1 = LoongArchII::MO_IE_PC_HI;
+-    MO2 = LoongArchII::MO_IE_PC64_LO;
+-    MO3 = LoongArchII::MO_IE_PC64_HI;
+-    break;
+-  }
+-
+-  MachineFunction *MF = MBB.getParent();
+-  MachineInstr &MI = *MBBI;
+-  DebugLoc DL = MI.getDebugLoc();
+-
+-  assert(MF->getSubtarget<LoongArchSubtarget>().is64Bit() &&
+-         "Large code model requires LA64");
+-
+-  Register TmpPart1 =
+-      MF->getRegInfo().createVirtualRegister(&LoongArch::GPRRegClass);
+-  Register TmpPart0 =
+-      DestReg.isVirtual()
+-          ? MF->getRegInfo().createVirtualRegister(&LoongArch::GPRRegClass)
+-          : DestReg;
+-  Register TmpParts02 =
+-      DestReg.isVirtual()
+-          ? MF->getRegInfo().createVirtualRegister(&LoongArch::GPRRegClass)
+-          : DestReg;
+-  Register TmpParts023 =
+-      DestReg.isVirtual()
+-          ? MF->getRegInfo().createVirtualRegister(&LoongArch::GPRRegClass)
+-          : DestReg;
+-
+-  auto Part1 = BuildMI(MBB, MBBI, DL, TII->get(LoongArch::PCALAU12I), TmpPart1);
+-  auto Part0 = BuildMI(MBB, MBBI, DL, TII->get(LoongArch::ADDI_D), TmpPart0)
+-                   .addReg(LoongArch::R0);
+-  auto Part2 = BuildMI(MBB, MBBI, DL, TII->get(LoongArch::LU32I_D), TmpParts02)
+-                   // "rj" is needed due to InstrInfo pattern requirement.
+-                   .addReg(TmpPart0, RegState::Kill);
+-  auto Part3 = BuildMI(MBB, MBBI, DL, TII->get(LoongArch::LU52I_D), TmpParts023)
+-                   .addReg(TmpParts02, RegState::Kill);
+-  BuildMI(MBB, MBBI, DL, TII->get(LastOpcode), DestReg)
+-      .addReg(TmpParts023)
+-      .addReg(TmpPart1, RegState::Kill);
+-
+-  if (Symbol.getType() == MachineOperand::MO_ExternalSymbol) {
+-    const char *SymName = Symbol.getSymbolName();
+-    Part0.addExternalSymbol(SymName, MO0);
+-    Part1.addExternalSymbol(SymName, MO1);
+-    Part2.addExternalSymbol(SymName, MO2);
+-    Part3.addExternalSymbol(SymName, MO3);
+-  } else {
+-    Part0.addDisp(Symbol, 0, MO0);
+-    Part1.addDisp(Symbol, 0, MO1);
+-    Part2.addDisp(Symbol, 0, MO2);
+-    Part3.addDisp(Symbol, 0, MO3);
+-  }
+-
+-  if (EraseFromParent)
+-    MI.eraseFromParent();
+-
+-  return true;
+-}
+-
+ bool LoongArchPreRAExpandPseudo::expandLoadAddressPcrel(
+     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+-    MachineBasicBlock::iterator &NextMBBI, bool Large) {
+-  if (Large)
+-    // Emit the 5-insn large address load sequence with the `%pc` family of
+-    // relocs.
+-    return expandLargeAddressLoad(MBB, MBBI, NextMBBI, LoongArch::ADD_D,
+-                                  LoongArchII::MO_PCREL_LO);
+-
++    MachineBasicBlock::iterator &NextMBBI) {
+   // Code Sequence:
+   // pcalau12i $rd, %pc_hi20(sym)
+   // addi.w/d $rd, $rd, %pc_lo12(sym)
+@@ -311,13 +169,7 @@ bool LoongArchPreRAExpandPseudo::expandLoadAddressPcrel(
+ 
+ bool LoongArchPreRAExpandPseudo::expandLoadAddressGot(
+     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+-    MachineBasicBlock::iterator &NextMBBI, bool Large) {
+-  if (Large)
+-    // Emit the 5-insn large address load sequence with the `%got_pc` family
+-    // of relocs, loading the result from GOT with `ldx.d` in the end.
+-    return expandLargeAddressLoad(MBB, MBBI, NextMBBI, LoongArch::LDX_D,
+-                                  LoongArchII::MO_GOT_PC_HI);
+-
++    MachineBasicBlock::iterator &NextMBBI) {
+   // Code Sequence:
+   // pcalau12i $rd, %got_pc_hi20(sym)
+   // ld.w/d $rd, $rd, %got_pc_lo12(sym)
+@@ -378,13 +230,7 @@ bool LoongArchPreRAExpandPseudo::expandLoadAddressTLSLE(
+ 
+ bool LoongArchPreRAExpandPseudo::expandLoadAddressTLSIE(
+     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+-    MachineBasicBlock::iterator &NextMBBI, bool Large) {
+-  if (Large)
+-    // Emit the 5-insn large address load sequence with the `%ie_pc` family
+-    // of relocs, loading the result with `ldx.d` in the end.
+-    return expandLargeAddressLoad(MBB, MBBI, NextMBBI, LoongArch::LDX_D,
+-                                  LoongArchII::MO_IE_PC_LO);
+-
++    MachineBasicBlock::iterator &NextMBBI) {
+   // Code Sequence:
+   // pcalau12i $rd, %ie_pc_hi20(sym)
+   // ld.w/d $rd, $rd, %ie_pc_lo12(sym)
+@@ -397,13 +243,7 @@ bool LoongArchPreRAExpandPseudo::expandLoadAddressTLSIE(
+ 
+ bool LoongArchPreRAExpandPseudo::expandLoadAddressTLSLD(
+     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+-    MachineBasicBlock::iterator &NextMBBI, bool Large) {
+-  if (Large)
+-    // Emit the 5-insn large address load sequence with the `%got_pc` family
+-    // of relocs, with the `pcalau12i` insn relocated with `%ld_pc_hi20`.
+-    return expandLargeAddressLoad(MBB, MBBI, NextMBBI, LoongArch::ADD_D,
+-                                  LoongArchII::MO_LD_PC_HI);
+-
++    MachineBasicBlock::iterator &NextMBBI) {
+   // Code Sequence:
+   // pcalau12i $rd, %ld_pc_hi20(sym)
+   // addi.w/d $rd, $rd, %got_pc_lo12(sym)
+@@ -416,13 +256,7 @@ bool LoongArchPreRAExpandPseudo::expandLoadAddressTLSLD(
+ 
+ bool LoongArchPreRAExpandPseudo::expandLoadAddressTLSGD(
+     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+-    MachineBasicBlock::iterator &NextMBBI, bool Large) {
+-  if (Large)
+-    // Emit the 5-insn large address load sequence with the `%got_pc` family
+-    // of relocs, with the `pcalau12i` insn relocated with `%gd_pc_hi20`.
+-    return expandLargeAddressLoad(MBB, MBBI, NextMBBI, LoongArch::ADD_D,
+-                                  LoongArchII::MO_GD_PC_HI);
+-
++    MachineBasicBlock::iterator &NextMBBI) {
+   // Code Sequence:
+   // pcalau12i $rd, %gd_pc_hi20(sym)
+   // addi.w/d $rd, $rd, %got_pc_lo12(sym)
+@@ -433,85 +267,6 @@ bool LoongArchPreRAExpandPseudo::expandLoadAddressTLSGD(
+                                  SecondOpcode, LoongArchII::MO_GOT_PC_LO);
+ }
+ 
+-bool LoongArchPreRAExpandPseudo::expandFunctionCALL(
+-    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+-    MachineBasicBlock::iterator &NextMBBI, bool IsTailCall) {
+-  MachineFunction *MF = MBB.getParent();
+-  MachineInstr &MI = *MBBI;
+-  DebugLoc DL = MI.getDebugLoc();
+-  const MachineOperand &Func = MI.getOperand(0);
+-  MachineInstrBuilder CALL;
+-  unsigned Opcode;
+-
+-  switch (MF->getTarget().getCodeModel()) {
+-  default:
+-    report_fatal_error("Unsupported code model");
+-    break;
+-  case CodeModel::Small: {
+-    // CALL:
+-    // bl func
+-    // TAIL:
+-    // b func
+-    Opcode = IsTailCall ? LoongArch::PseudoB_TAIL : LoongArch::BL;
+-    CALL = BuildMI(MBB, MBBI, DL, TII->get(Opcode)).add(Func);
+-    break;
+-  }
+-  case CodeModel::Medium: {
+-    // CALL:
+-    // pcaddu18i $ra, %call36(func)
+-    // jirl      $ra, $ra, 0
+-    // TAIL:
+-    // pcaddu18i $scratch, %call36(func)
+-    // jirl      $r0, $scratch, 0
+-    Opcode =
+-        IsTailCall ? LoongArch::PseudoJIRL_TAIL : LoongArch::PseudoJIRL_CALL;
+-    Register ScratchReg =
+-        IsTailCall
+-            ? MF->getRegInfo().createVirtualRegister(&LoongArch::GPRRegClass)
+-            : LoongArch::R1;
+-    MachineInstrBuilder MIB =
+-        BuildMI(MBB, MBBI, DL, TII->get(LoongArch::PCADDU18I), ScratchReg);
+-
+-    CALL =
+-        BuildMI(MBB, MBBI, DL, TII->get(Opcode)).addReg(ScratchReg).addImm(0);
+-
+-    if (Func.isSymbol())
+-      MIB.addExternalSymbol(Func.getSymbolName(), LoongArchII::MO_CALL36);
+-    else
+-      MIB.addDisp(Func, 0, LoongArchII::MO_CALL36);
+-    break;
+-  }
+-  case CodeModel::Large: {
+-    // Emit the 5-insn large address load sequence, either directly or
+-    // indirectly in case of going through the GOT, then JIRL_TAIL or
+-    // JIRL_CALL to $addr.
+-    Opcode =
+-        IsTailCall ? LoongArch::PseudoJIRL_TAIL : LoongArch::PseudoJIRL_CALL;
+-    Register AddrReg =
+-        IsTailCall
+-            ? MF->getRegInfo().createVirtualRegister(&LoongArch::GPRRegClass)
+-            : LoongArch::R1;
+-
+-    bool UseGOT = Func.isGlobal() && !Func.getGlobal()->isDSOLocal();
+-    unsigned MO = UseGOT ? LoongArchII::MO_GOT_PC_HI : LoongArchII::MO_PCREL_LO;
+-    unsigned LAOpcode = UseGOT ? LoongArch::LDX_D : LoongArch::ADD_D;
+-    expandLargeAddressLoad(MBB, MBBI, NextMBBI, LAOpcode, MO, Func, AddrReg,
+-                           false);
+-    CALL = BuildMI(MBB, MBBI, DL, TII->get(Opcode)).addReg(AddrReg).addImm(0);
+-    break;
+-  }
+-  }
+-
+-  // Transfer implicit operands.
+-  CALL.copyImplicitOps(MI);
+-
+-  // Transfer MI flags.
+-  CALL.setMIFlags(MI.getFlags());
+-
+-  MI.eraseFromParent();
+-  return true;
+-}
+-
+ class LoongArchExpandPseudo : public MachineFunctionPass {
+ public:
+   const LoongArchInstrInfo *TII;
+@@ -533,6 +288,35 @@ private:
+                 MachineBasicBlock::iterator &NextMBBI);
+   bool expandCopyCFR(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+                      MachineBasicBlock::iterator &NextMBBI);
++  bool expandLargeAddressLoad(MachineBasicBlock &MBB,
++                              MachineBasicBlock::iterator MBBI,
++                              MachineBasicBlock::iterator &NextMBBI,
++                              unsigned LastOpcode, unsigned IdentifyingMO);
++  bool expandLargeAddressLoad(MachineBasicBlock &MBB,
++                              MachineBasicBlock::iterator MBBI,
++                              MachineBasicBlock::iterator &NextMBBI,
++                              unsigned LastOpcode, unsigned IdentifyingMO,
++                              const MachineOperand &Symbol, Register DestReg,
++                              bool EraseFromParent);
++  bool expandLoadAddressPcrelLarge(MachineBasicBlock &MBB,
++                                   MachineBasicBlock::iterator MBBI,
++                                   MachineBasicBlock::iterator &NextMBBI);
++  bool expandLoadAddressGotLarge(MachineBasicBlock &MBB,
++                                 MachineBasicBlock::iterator MBBI,
++                                 MachineBasicBlock::iterator &NextMBBI);
++  bool expandLoadAddressTLSIELarge(MachineBasicBlock &MBB,
++                                   MachineBasicBlock::iterator MBBI,
++                                   MachineBasicBlock::iterator &NextMBBI);
++  bool expandLoadAddressTLSLDLarge(MachineBasicBlock &MBB,
++                                   MachineBasicBlock::iterator MBBI,
++                                   MachineBasicBlock::iterator &NextMBBI);
++  bool expandLoadAddressTLSGDLarge(MachineBasicBlock &MBB,
++                                   MachineBasicBlock::iterator MBBI,
++                                   MachineBasicBlock::iterator &NextMBBI);
++  bool expandFunctionCALL(MachineBasicBlock &MBB,
++                          MachineBasicBlock::iterator MBBI,
++                          MachineBasicBlock::iterator &NextMBBI,
++                          bool IsTailCall);
+ };
+ 
+ char LoongArchExpandPseudo::ID = 0;
+@@ -567,6 +351,24 @@ bool LoongArchExpandPseudo::expandMI(MachineBasicBlock &MBB,
+   switch (MBBI->getOpcode()) {
+   case LoongArch::PseudoCopyCFR:
+     return expandCopyCFR(MBB, MBBI, NextMBBI);
++  case LoongArch::PseudoLA_PCREL_LARGE:
++    return expandLoadAddressPcrelLarge(MBB, MBBI, NextMBBI);
++  case LoongArch::PseudoLA_GOT_LARGE:
++    return expandLoadAddressGotLarge(MBB, MBBI, NextMBBI);
++  case LoongArch::PseudoLA_TLS_IE_LARGE:
++    return expandLoadAddressTLSIELarge(MBB, MBBI, NextMBBI);
++  case LoongArch::PseudoLA_TLS_LD_LARGE:
++    return expandLoadAddressTLSLDLarge(MBB, MBBI, NextMBBI);
++  case LoongArch::PseudoLA_TLS_GD_LARGE:
++    return expandLoadAddressTLSGDLarge(MBB, MBBI, NextMBBI);
++  case LoongArch::PseudoCALL:
++  case LoongArch::PseudoCALL_MEDIUM:
++  case LoongArch::PseudoCALL_LARGE:
++    return expandFunctionCALL(MBB, MBBI, NextMBBI, /*IsTailCall=*/false);
++  case LoongArch::PseudoTAIL:
++  case LoongArch::PseudoTAIL_MEDIUM:
++  case LoongArch::PseudoTAIL_LARGE:
++    return expandFunctionCALL(MBB, MBBI, NextMBBI, /*IsTailCall=*/true);
+   }
+ 
+   return false;
+@@ -625,6 +427,213 @@ bool LoongArchExpandPseudo::expandCopyCFR(
+   return true;
+ }
+ 
++bool LoongArchExpandPseudo::expandLargeAddressLoad(
++    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
++    MachineBasicBlock::iterator &NextMBBI, unsigned LastOpcode,
++    unsigned IdentifyingMO) {
++  MachineInstr &MI = *MBBI;
++  return expandLargeAddressLoad(MBB, MBBI, NextMBBI, LastOpcode, IdentifyingMO,
++                                MI.getOperand(2), MI.getOperand(0).getReg(),
++                                true);
++}
++
++bool LoongArchExpandPseudo::expandLargeAddressLoad(
++    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
++    MachineBasicBlock::iterator &NextMBBI, unsigned LastOpcode,
++    unsigned IdentifyingMO, const MachineOperand &Symbol, Register DestReg,
++    bool EraseFromParent) {
++  // Code Sequence:
++  //
++  // Part1: pcalau12i  $dst, %MO1(sym)
++  // Part0: addi.d     $t8, $zero, %MO0(sym)
++  // Part2: lu32i.d    $t8, %MO2(sym)
++  // Part3: lu52i.d    $t8, $t8, %MO3(sym)
++  // Fin:   LastOpcode $dst, $t8, $dst
++
++  unsigned MO0, MO1, MO2, MO3;
++  switch (IdentifyingMO) {
++  default:
++    llvm_unreachable("unsupported identifying MO");
++  case LoongArchII::MO_PCREL_LO:
++    MO0 = IdentifyingMO;
++    MO1 = LoongArchII::MO_PCREL_HI;
++    MO2 = LoongArchII::MO_PCREL64_LO;
++    MO3 = LoongArchII::MO_PCREL64_HI;
++    break;
++  case LoongArchII::MO_GOT_PC_HI:
++  case LoongArchII::MO_LD_PC_HI:
++  case LoongArchII::MO_GD_PC_HI:
++    // These cases relocate just like the GOT case, except for Part1.
++    MO0 = LoongArchII::MO_GOT_PC_LO;
++    MO1 = IdentifyingMO;
++    MO2 = LoongArchII::MO_GOT_PC64_LO;
++    MO3 = LoongArchII::MO_GOT_PC64_HI;
++    break;
++  case LoongArchII::MO_IE_PC_LO:
++    MO0 = IdentifyingMO;
++    MO1 = LoongArchII::MO_IE_PC_HI;
++    MO2 = LoongArchII::MO_IE_PC64_LO;
++    MO3 = LoongArchII::MO_IE_PC64_HI;
++    break;
++  }
++
++  MachineFunction *MF = MBB.getParent();
++  MachineInstr &MI = *MBBI;
++  DebugLoc DL = MI.getDebugLoc();
++  Register ScratchReg = LoongArch::R20; // $t8
++
++  assert(MF->getSubtarget<LoongArchSubtarget>().is64Bit() &&
++         "Large code model requires LA64");
++
++  auto Part1 = BuildMI(MBB, MBBI, DL, TII->get(LoongArch::PCALAU12I), DestReg);
++  auto Part0 = BuildMI(MBB, MBBI, DL, TII->get(LoongArch::ADDI_D), ScratchReg)
++                   .addReg(LoongArch::R0);
++  auto Part2 = BuildMI(MBB, MBBI, DL, TII->get(LoongArch::LU32I_D), ScratchReg)
++                   // "rj" is needed due to InstrInfo pattern requirement.
++                   .addReg(ScratchReg);
++  auto Part3 = BuildMI(MBB, MBBI, DL, TII->get(LoongArch::LU52I_D), ScratchReg)
++                   .addReg(ScratchReg);
++  BuildMI(MBB, MBBI, DL, TII->get(LastOpcode), DestReg)
++      .addReg(ScratchReg)
++      .addReg(DestReg);
++
++  if (Symbol.getType() == MachineOperand::MO_ExternalSymbol) {
++    const char *SymName = Symbol.getSymbolName();
++    Part0.addExternalSymbol(SymName, MO0);
++    Part1.addExternalSymbol(SymName, MO1);
++    Part2.addExternalSymbol(SymName, MO2);
++    Part3.addExternalSymbol(SymName, MO3);
++  } else {
++    Part0.addDisp(Symbol, 0, MO0);
++    Part1.addDisp(Symbol, 0, MO1);
++    Part2.addDisp(Symbol, 0, MO2);
++    Part3.addDisp(Symbol, 0, MO3);
++  }
++
++  if (EraseFromParent)
++    MI.eraseFromParent();
++
++  return true;
++}
++
++bool LoongArchExpandPseudo::expandLoadAddressPcrelLarge(
++    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
++    MachineBasicBlock::iterator &NextMBBI) {
++  // Emit the 5-insn large address load sequence with the `%pc` family of
++  // relocs.
++  return expandLargeAddressLoad(MBB, MBBI, NextMBBI, LoongArch::ADD_D,
++                                LoongArchII::MO_PCREL_LO);
++}
++
++bool LoongArchExpandPseudo::expandLoadAddressGotLarge(
++    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
++    MachineBasicBlock::iterator &NextMBBI) {
++  // Emit the 5-insn large address load sequence with the `%got_pc` family
++  // of relocs, loading the result from GOT with `ldx.d` in the end.
++  return expandLargeAddressLoad(MBB, MBBI, NextMBBI, LoongArch::LDX_D,
++                                LoongArchII::MO_GOT_PC_HI);
++}
++
++bool LoongArchExpandPseudo::expandLoadAddressTLSIELarge(
++    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
++    MachineBasicBlock::iterator &NextMBBI) {
++  // Emit the 5-insn large address load sequence with the `%ie_pc` family
++  // of relocs, loading the result with `ldx.d` in the end.
++  return expandLargeAddressLoad(MBB, MBBI, NextMBBI, LoongArch::LDX_D,
++                                LoongArchII::MO_IE_PC_LO);
++}
++
++bool LoongArchExpandPseudo::expandLoadAddressTLSLDLarge(
++    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
++    MachineBasicBlock::iterator &NextMBBI) {
++  // Emit the 5-insn large address load sequence with the `%got_pc` family
++  // of relocs, with the `pcalau12i` insn relocated with `%ld_pc_hi20`.
++  return expandLargeAddressLoad(MBB, MBBI, NextMBBI, LoongArch::ADD_D,
++                                LoongArchII::MO_LD_PC_HI);
++}
++
++bool LoongArchExpandPseudo::expandLoadAddressTLSGDLarge(
++    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
++    MachineBasicBlock::iterator &NextMBBI) {
++  // Emit the 5-insn large address load sequence with the `%got_pc` family
++  // of relocs, with the `pcalau12i` insn relocated with `%gd_pc_hi20`.
++  return expandLargeAddressLoad(MBB, MBBI, NextMBBI, LoongArch::ADD_D,
++                                LoongArchII::MO_GD_PC_HI);
++}
++
++bool LoongArchExpandPseudo::expandFunctionCALL(
++    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
++    MachineBasicBlock::iterator &NextMBBI, bool IsTailCall) {
++  MachineFunction *MF = MBB.getParent();
++  MachineInstr &MI = *MBBI;
++  DebugLoc DL = MI.getDebugLoc();
++  const MachineOperand &Func = MI.getOperand(0);
++  MachineInstrBuilder CALL;
++  unsigned Opcode;
++
++  switch (MF->getTarget().getCodeModel()) {
++  default:
++    report_fatal_error("Unsupported code model");
++    break;
++  case CodeModel::Small: {
++    // CALL:
++    // bl func
++    // TAIL:
++    // b func
++    Opcode = IsTailCall ? LoongArch::PseudoB_TAIL : LoongArch::BL;
++    CALL = BuildMI(MBB, MBBI, DL, TII->get(Opcode)).add(Func);
++    break;
++  }
++  case CodeModel::Medium: {
++    // CALL:
++    // pcaddu18i  $ra, %call36(func)
++    // jirl       $ra, $ra, 0
++    // TAIL:
++    // pcaddu18i  $t8, %call36(func)
++    // jr         $t8
++    Opcode =
++        IsTailCall ? LoongArch::PseudoJIRL_TAIL : LoongArch::PseudoJIRL_CALL;
++    Register ScratchReg = IsTailCall ? LoongArch::R20 : LoongArch::R1;
++    MachineInstrBuilder MIB =
++        BuildMI(MBB, MBBI, DL, TII->get(LoongArch::PCADDU18I), ScratchReg);
++
++    CALL =
++        BuildMI(MBB, MBBI, DL, TII->get(Opcode)).addReg(ScratchReg).addImm(0);
++
++    if (Func.isSymbol())
++      MIB.addExternalSymbol(Func.getSymbolName(), LoongArchII::MO_CALL36);
++    else
++      MIB.addDisp(Func, 0, LoongArchII::MO_CALL36);
++    break;
++  }
++  case CodeModel::Large: {
++    // Emit the 5-insn large address load sequence, either directly or
++    // indirectly in case of going through the GOT, then JIRL_TAIL or
++    // JIRL_CALL to $addr.
++    Opcode =
++        IsTailCall ? LoongArch::PseudoJIRL_TAIL : LoongArch::PseudoJIRL_CALL;
++    Register AddrReg = IsTailCall ? LoongArch::R19 : LoongArch::R1;
++
++    bool UseGOT = Func.isGlobal() && !Func.getGlobal()->isDSOLocal();
++    unsigned MO = UseGOT ? LoongArchII::MO_GOT_PC_HI : LoongArchII::MO_PCREL_LO;
++    unsigned LAOpcode = UseGOT ? LoongArch::LDX_D : LoongArch::ADD_D;
++    expandLargeAddressLoad(MBB, MBBI, NextMBBI, LAOpcode, MO, Func, AddrReg,
++                           false);
++    CALL = BuildMI(MBB, MBBI, DL, TII->get(Opcode)).addReg(AddrReg).addImm(0);
++    break;
++  }
++  }
++
++  // Transfer implicit operands.
++  CALL.copyImplicitOps(MI);
++
++  // Transfer MI flags.
++  CALL.setMIFlags(MI.getFlags());
++
++  MI.eraseFromParent();
++  return true;
++}
++
+ } // end namespace
+ 
+ INITIALIZE_PASS(LoongArchPreRAExpandPseudo, "loongarch-prera-expand-pseudo",
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+index 4fc2b4709840..df1b17649b7d 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
++++ b/llvm/lib/Target/LoongArch/LoongArchISelLowering.cpp
+@@ -3389,8 +3389,12 @@ const char *LoongArchTargetLowering::getTargetNodeName(unsigned Opcode) const {
+ 
+     // TODO: Add more target-dependent nodes later.
+     NODE_NAME_CASE(CALL)
++    NODE_NAME_CASE(CALL_MEDIUM)
++    NODE_NAME_CASE(CALL_LARGE)
+     NODE_NAME_CASE(RET)
+     NODE_NAME_CASE(TAIL)
++    NODE_NAME_CASE(TAIL_MEDIUM)
++    NODE_NAME_CASE(TAIL_LARGE)
+     NODE_NAME_CASE(SLL_W)
+     NODE_NAME_CASE(SRA_W)
+     NODE_NAME_CASE(SRL_W)
+@@ -4248,15 +4252,31 @@ LoongArchTargetLowering::LowerCall(CallLoweringInfo &CLI,
+ 
+   // Emit the call.
+   SDVTList NodeTys = DAG.getVTList(MVT::Other, MVT::Glue);
++  unsigned Op;
++  switch (DAG.getTarget().getCodeModel()) {
++  default:
++    report_fatal_error("Unsupported code model");
++  case CodeModel::Small:
++    Op = IsTailCall ? LoongArchISD::TAIL : LoongArchISD::CALL;
++    break;
++  case CodeModel::Medium:
++    assert(Subtarget.is64Bit() && "Medium code model requires LA64");
++    Op = IsTailCall ? LoongArchISD::TAIL_MEDIUM : LoongArchISD::CALL_MEDIUM;
++    break;
++  case CodeModel::Large:
++    assert(Subtarget.is64Bit() && "Large code model requires LA64");
++    Op = IsTailCall ? LoongArchISD::TAIL_LARGE : LoongArchISD::CALL_LARGE;
++    break;
++  }
+ 
+   if (IsTailCall) {
+     MF.getFrameInfo().setHasTailCall();
+-    SDValue Ret = DAG.getNode(LoongArchISD::TAIL, DL, NodeTys, Ops);
++    SDValue Ret = DAG.getNode(Op, DL, NodeTys, Ops);
+     DAG.addNoMergeSiteInfo(Ret.getNode(), CLI.NoMerge);
+     return Ret;
+   }
+ 
+-  Chain = DAG.getNode(LoongArchISD::CALL, DL, NodeTys, Ops);
++  Chain = DAG.getNode(Op, DL, NodeTys, Ops);
+   DAG.addNoMergeSiteInfo(Chain.getNode(), CLI.NoMerge);
+   Glue = Chain.getValue(1);
+ 
+diff --git a/llvm/lib/Target/LoongArch/LoongArchISelLowering.h b/llvm/lib/Target/LoongArch/LoongArchISelLowering.h
+index 2c9826a13237..a2ed149f4bb7 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchISelLowering.h
++++ b/llvm/lib/Target/LoongArch/LoongArchISelLowering.h
+@@ -28,8 +28,12 @@ enum NodeType : unsigned {
+ 
+   // TODO: add more LoongArchISDs
+   CALL,
++  CALL_MEDIUM,
++  CALL_LARGE,
+   RET,
+   TAIL,
++  TAIL_MEDIUM,
++  TAIL_LARGE,
+ 
+   // 32-bit shifts, directly matching the semantics of the named LoongArch
+   // instructions.
+diff --git a/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td b/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
+index 67de5f7afd78..ecd0c2b71b85 100644
+--- a/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
++++ b/llvm/lib/Target/LoongArch/LoongArchInstrInfo.td
+@@ -69,6 +69,18 @@ def loongarch_ret : SDNode<"LoongArchISD::RET", SDTNone,
+ def loongarch_tail : SDNode<"LoongArchISD::TAIL", SDT_LoongArchCall,
+                             [SDNPHasChain, SDNPOptInGlue, SDNPOutGlue,
+                              SDNPVariadic]>;
++def loongarch_call_medium : SDNode<"LoongArchISD::CALL_MEDIUM", SDT_LoongArchCall,
++                                   [SDNPHasChain, SDNPOptInGlue, SDNPOutGlue,
++                                    SDNPVariadic]>;
++def loongarch_tail_medium : SDNode<"LoongArchISD::TAIL_MEDIUM", SDT_LoongArchCall,
++                                   [SDNPHasChain, SDNPOptInGlue, SDNPOutGlue,
++                                    SDNPVariadic]>;
++def loongarch_call_large : SDNode<"LoongArchISD::CALL_LARGE", SDT_LoongArchCall,
++                                  [SDNPHasChain, SDNPOptInGlue, SDNPOutGlue,
++                                   SDNPVariadic]>;
++def loongarch_tail_large : SDNode<"LoongArchISD::TAIL_LARGE", SDT_LoongArchCall,
++                                  [SDNPHasChain, SDNPOptInGlue, SDNPOutGlue,
++                                   SDNPVariadic]>;
+ def loongarch_sll_w : SDNode<"LoongArchISD::SLL_W", SDT_LoongArchIntBinOpW>;
+ def loongarch_sra_w : SDNode<"LoongArchISD::SRA_W", SDT_LoongArchIntBinOpW>;
+ def loongarch_srl_w : SDNode<"LoongArchISD::SRL_W", SDT_LoongArchIntBinOpW>;
+@@ -1327,16 +1339,43 @@ def : Pat<(brind GPR:$rj), (PseudoBRIND GPR:$rj, 0)>;
+ def : Pat<(brind (add GPR:$rj, simm16_lsl2:$imm16)),
+           (PseudoBRIND GPR:$rj, simm16_lsl2:$imm16)>;
+ 
++// Function call with 'Small' code model.
+ let isCall = 1, Defs = [R1] in
+ def PseudoCALL : Pseudo<(outs), (ins bare_symbol:$func)>;
+ 
+ def : Pat<(loongarch_call tglobaladdr:$func), (PseudoCALL tglobaladdr:$func)>;
+ def : Pat<(loongarch_call texternalsym:$func), (PseudoCALL texternalsym:$func)>;
+ 
++// Function call with 'Medium' code model.
++let isCall = 1, Defs = [R1, R20], Size = 8 in
++def PseudoCALL_MEDIUM : Pseudo<(outs), (ins bare_symbol:$func)>;
++
++let Predicates = [IsLA64] in {
++def : Pat<(loongarch_call_medium tglobaladdr:$func),
++          (PseudoCALL_MEDIUM tglobaladdr:$func)>;
++def : Pat<(loongarch_call_medium texternalsym:$func),
++          (PseudoCALL_MEDIUM texternalsym:$func)>;
++} // Predicates = [IsLA64]
++
++// Function call with 'Large' code model.
++let isCall = 1, Defs = [R1, R20], Size = 24 in
++def PseudoCALL_LARGE: Pseudo<(outs), (ins bare_symbol:$func)>;
++
++let Predicates = [IsLA64] in {
++def : Pat<(loongarch_call_large tglobaladdr:$func),
++          (PseudoCALL_LARGE tglobaladdr:$func)>;
++def : Pat<(loongarch_call_large texternalsym:$func),
++          (PseudoCALL_LARGE texternalsym:$func)>;
++} // Predicates = [IsLA64]
++
+ let isCall = 1, Defs = [R1] in
+ def PseudoCALLIndirect : Pseudo<(outs), (ins GPR:$rj),
+                                 [(loongarch_call GPR:$rj)]>,
+                          PseudoInstExpansion<(JIRL R1, GPR:$rj, 0)>;
++let Predicates = [IsLA64] in {
++def : Pat<(loongarch_call_medium GPR:$rj), (PseudoCALLIndirect GPR:$rj)>;
++def : Pat<(loongarch_call_large GPR:$rj), (PseudoCALLIndirect GPR:$rj)>;
++}
+ 
+ let isCall = 1, hasSideEffects = 0, mayStore = 0, mayLoad = 0, Defs = [R1] in
+ def PseudoJIRL_CALL : Pseudo<(outs), (ins GPR:$rj, simm16_lsl2:$imm16)>,
+@@ -1347,6 +1386,7 @@ let isBarrier = 1, isReturn = 1, isTerminator = 1 in
+ def PseudoRET : Pseudo<(outs), (ins), [(loongarch_ret)]>,
+                 PseudoInstExpansion<(JIRL R0, R1, 0)>;
+ 
++// Tail call with 'Small' code model.
+ let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1, Uses = [R3] in
+ def PseudoTAIL : Pseudo<(outs), (ins bare_symbol:$dst)>;
+ 
+@@ -1355,10 +1395,38 @@ def : Pat<(loongarch_tail (iPTR tglobaladdr:$dst)),
+ def : Pat<(loongarch_tail (iPTR texternalsym:$dst)),
+           (PseudoTAIL texternalsym:$dst)>;
+ 
++// Tail call with 'Medium' code model.
++let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1,
++    Uses = [R3], Defs = [R20], Size = 8 in
++def PseudoTAIL_MEDIUM : Pseudo<(outs), (ins bare_symbol:$dst)>;
++
++let Predicates = [IsLA64] in {
++def : Pat<(loongarch_tail_medium (iPTR tglobaladdr:$dst)),
++          (PseudoTAIL_MEDIUM tglobaladdr:$dst)>;
++def : Pat<(loongarch_tail_medium (iPTR texternalsym:$dst)),
++          (PseudoTAIL_MEDIUM texternalsym:$dst)>;
++} // Predicates = [IsLA64]
++
++// Tail call with 'Large' code model.
++let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1,
++    Uses = [R3], Defs = [R19, R20], Size = 24 in
++def PseudoTAIL_LARGE : Pseudo<(outs), (ins bare_symbol:$dst)>;
++
++let Predicates = [IsLA64] in {
++def : Pat<(loongarch_tail_large (iPTR tglobaladdr:$dst)),
++          (PseudoTAIL_LARGE tglobaladdr:$dst)>;
++def : Pat<(loongarch_tail_large (iPTR texternalsym:$dst)),
++          (PseudoTAIL_LARGE texternalsym:$dst)>;
++} // Predicates = [IsLA64]
++
+ let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1, Uses = [R3] in
+ def PseudoTAILIndirect : Pseudo<(outs), (ins GPRT:$rj),
+                                 [(loongarch_tail GPRT:$rj)]>,
+                          PseudoInstExpansion<(JIRL R0, GPR:$rj, 0)>;
++let Predicates = [IsLA64] in {
++def : Pat<(loongarch_tail_medium GPR:$rj), (PseudoTAILIndirect GPR:$rj)>;
++def : Pat<(loongarch_tail_large GPR:$rj), (PseudoTAILIndirect GPR:$rj)>;
++}
+ 
+ let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1,
+     hasSideEffects = 0, mayStore = 0, mayLoad = 0, Uses = [R3] in
+@@ -1396,6 +1464,7 @@ def PseudoLA_ABS_LARGE : Pseudo<(outs GPR:$dst),
+                                 "la.abs", "$dst, $src">;
+ def PseudoLA_PCREL : Pseudo<(outs GPR:$dst), (ins bare_symbol:$src), [],
+                             "la.pcrel", "$dst, $src">;
++let Defs = [R20], Size = 20 in
+ def PseudoLA_PCREL_LARGE : Pseudo<(outs GPR:$dst),
+                                   (ins GPR:$tmp, bare_symbol:$src), [],
+                                   "la.pcrel", "$dst, $tmp, $src">,
+@@ -1407,28 +1476,30 @@ let hasSideEffects = 0, mayLoad = 1, mayStore = 0, isCodeGenOnly = 0,
+     isAsmParserOnly = 1 in {
+ def PseudoLA_GOT : Pseudo<(outs GPR:$dst), (ins bare_symbol:$src), [],
+                           "la.got", "$dst, $src">;
++def PseudoLA_TLS_IE : Pseudo<(outs GPR:$dst), (ins bare_symbol:$src), [],
++                             "la.tls.ie", "$dst, $src">;
++def PseudoLA_TLS_LD : Pseudo<(outs GPR:$dst), (ins bare_symbol:$src), [],
++                             "la.tls.ld", "$dst, $src">;
++def PseudoLA_TLS_GD : Pseudo<(outs GPR:$dst), (ins bare_symbol:$src), [],
++                             "la.tls.gd", "$dst, $src">;
++let Defs = [R20], Size = 20 in {
+ def PseudoLA_GOT_LARGE : Pseudo<(outs GPR:$dst),
+                                 (ins GPR:$tmp, bare_symbol:$src), [],
+                                 "la.got", "$dst, $tmp, $src">,
+                          Requires<[IsLA64]>;
+-def PseudoLA_TLS_IE : Pseudo<(outs GPR:$dst), (ins bare_symbol:$src), [],
+-                             "la.tls.ie", "$dst, $src">;
+ def PseudoLA_TLS_IE_LARGE : Pseudo<(outs GPR:$dst),
+                                    (ins GPR:$tmp, bare_symbol:$src), [],
+                                    "la.tls.ie", "$dst, $tmp, $src">,
+                             Requires<[IsLA64]>;
+-def PseudoLA_TLS_LD : Pseudo<(outs GPR:$dst), (ins bare_symbol:$src), [],
+-                             "la.tls.ld", "$dst, $src">;
+ def PseudoLA_TLS_LD_LARGE : Pseudo<(outs GPR:$dst),
+                                    (ins GPR:$tmp, bare_symbol:$src), [],
+                                    "la.tls.ld", "$dst, $tmp, $src">,
+                             Requires<[IsLA64]>;
+-def PseudoLA_TLS_GD : Pseudo<(outs GPR:$dst), (ins bare_symbol:$src), [],
+-                             "la.tls.gd", "$dst, $src">;
+ def PseudoLA_TLS_GD_LARGE : Pseudo<(outs GPR:$dst),
+                                    (ins GPR:$tmp, bare_symbol:$src), [],
+                                    "la.tls.gd", "$dst, $tmp, $src">,
+                             Requires<[IsLA64]>;
++} // Defs = [R20], Size = 20
+ }
+ 
+ // Load address inst alias: "la", "la.global" and "la.local".
+diff --git a/llvm/test/CodeGen/LoongArch/code-models.ll b/llvm/test/CodeGen/LoongArch/code-models.ll
+index 7c6f46d5e926..f93c31670928 100644
+--- a/llvm/test/CodeGen/LoongArch/code-models.ll
++++ b/llvm/test/CodeGen/LoongArch/code-models.ll
+@@ -33,11 +33,11 @@ define i32 @call_globaladdress(i32 %a) nounwind {
+ ; LARGE:       # %bb.0:
+ ; LARGE-NEXT:    addi.d $sp, $sp, -16
+ ; LARGE-NEXT:    st.d $ra, $sp, 8 # 8-byte Folded Spill
+-; LARGE-NEXT:    pcalau12i $a1, %got_pc_hi20(callee)
+-; LARGE-NEXT:    addi.d $ra, $zero, %got_pc_lo12(callee)
+-; LARGE-NEXT:    lu32i.d $ra, %got64_pc_lo20(callee)
+-; LARGE-NEXT:    lu52i.d $ra, $ra, %got64_pc_hi12(callee)
+-; LARGE-NEXT:    ldx.d $ra, $ra, $a1
++; LARGE-NEXT:    pcalau12i $ra, %got_pc_hi20(callee)
++; LARGE-NEXT:    addi.d $t8, $zero, %got_pc_lo12(callee)
++; LARGE-NEXT:    lu32i.d $t8, %got64_pc_lo20(callee)
++; LARGE-NEXT:    lu52i.d $t8, $t8, %got64_pc_hi12(callee)
++; LARGE-NEXT:    ldx.d $ra, $t8, $ra
+ ; LARGE-NEXT:    jirl $ra, $ra, 0
+ ; LARGE-NEXT:    ld.d $ra, $sp, 8 # 8-byte Folded Reload
+ ; LARGE-NEXT:    addi.d $sp, $sp, 16
+@@ -82,11 +82,11 @@ define void @call_external_sym(ptr %dst) {
+ ; LARGE-NEXT:    .cfi_offset 1, -8
+ ; LARGE-NEXT:    ori $a2, $zero, 1000
+ ; LARGE-NEXT:    move $a1, $zero
+-; LARGE-NEXT:    pcalau12i $a3, %pc_hi20(memset)
+-; LARGE-NEXT:    addi.d $ra, $zero, %pc_lo12(memset)
+-; LARGE-NEXT:    lu32i.d $ra, %pc64_lo20(memset)
+-; LARGE-NEXT:    lu52i.d $ra, $ra, %pc64_hi12(memset)
+-; LARGE-NEXT:    add.d $ra, $ra, $a3
++; LARGE-NEXT:    pcalau12i $ra, %pc_hi20(memset)
++; LARGE-NEXT:    addi.d $t8, $zero, %pc_lo12(memset)
++; LARGE-NEXT:    lu32i.d $t8, %pc64_lo20(memset)
++; LARGE-NEXT:    lu52i.d $t8, $t8, %pc64_hi12(memset)
++; LARGE-NEXT:    add.d $ra, $t8, $ra
+ ; LARGE-NEXT:    jirl $ra, $ra, 0
+ ; LARGE-NEXT:    ld.d $ra, $sp, 8 # 8-byte Folded Reload
+ ; LARGE-NEXT:    addi.d $sp, $sp, 16
+@@ -105,17 +105,17 @@ define i32 @caller_tail(i32 %i) nounwind {
+ ;
+ ; MEDIUM-LABEL: caller_tail:
+ ; MEDIUM:       # %bb.0: # %entry
+-; MEDIUM-NEXT:    pcaddu18i $a1, %call36(callee_tail)
+-; MEDIUM-NEXT:    jr $a1
++; MEDIUM-NEXT:    pcaddu18i $t8, %call36(callee_tail)
++; MEDIUM-NEXT:    jr $t8
+ ;
+ ; LARGE-LABEL: caller_tail:
+ ; LARGE:       # %bb.0: # %entry
+-; LARGE-NEXT:    pcalau12i $a1, %got_pc_hi20(callee_tail)
+-; LARGE-NEXT:    addi.d $a2, $zero, %got_pc_lo12(callee_tail)
+-; LARGE-NEXT:    lu32i.d $a2, %got64_pc_lo20(callee_tail)
+-; LARGE-NEXT:    lu52i.d $a2, $a2, %got64_pc_hi12(callee_tail)
+-; LARGE-NEXT:    ldx.d $a1, $a2, $a1
+-; LARGE-NEXT:    jr $a1
++; LARGE-NEXT:    pcalau12i $t7, %got_pc_hi20(callee_tail)
++; LARGE-NEXT:    addi.d $t8, $zero, %got_pc_lo12(callee_tail)
++; LARGE-NEXT:    lu32i.d $t8, %got64_pc_lo20(callee_tail)
++; LARGE-NEXT:    lu52i.d $t8, $t8, %got64_pc_hi12(callee_tail)
++; LARGE-NEXT:    ldx.d $t7, $t8, $t7
++; LARGE-NEXT:    jr $t7
+ entry:
+   %r = tail call i32 @callee_tail(i32 %i)
+   ret i32 %r
+diff --git a/llvm/test/CodeGen/LoongArch/expand-call.ll b/llvm/test/CodeGen/LoongArch/expand-call.ll
+index 86bf4292665b..e0d179f92de6 100644
+--- a/llvm/test/CodeGen/LoongArch/expand-call.ll
++++ b/llvm/test/CodeGen/LoongArch/expand-call.ll
+@@ -1,6 +1,6 @@
+ ; RUN: llc --mtriple=loongarch64 --stop-before loongarch-prera-expand-pseudo \
+ ; RUN:     --verify-machineinstrs < %s | FileCheck %s --check-prefix=NOEXPAND
+-; RUN: llc --mtriple=loongarch64 --stop-after loongarch-prera-expand-pseudo \
++; RUN: llc --mtriple=loongarch64 --stop-before machine-opt-remark-emitter \
+ ; RUN:     --verify-machineinstrs < %s | FileCheck %s --check-prefix=EXPAND
+ 
+ declare void @callee()
+diff --git a/llvm/test/CodeGen/LoongArch/global-address.ll b/llvm/test/CodeGen/LoongArch/global-address.ll
+index a8f0ef648aa7..d32a17f488b1 100644
+--- a/llvm/test/CodeGen/LoongArch/global-address.ll
++++ b/llvm/test/CodeGen/LoongArch/global-address.ll
+@@ -53,32 +53,32 @@ define void @foo() nounwind {
+ ; LA64LARGENOPIC-LABEL: foo:
+ ; LA64LARGENOPIC:       # %bb.0:
+ ; LA64LARGENOPIC-NEXT:    pcalau12i $a0, %got_pc_hi20(G)
+-; LA64LARGENOPIC-NEXT:    addi.d $a1, $zero, %got_pc_lo12(G)
+-; LA64LARGENOPIC-NEXT:    lu32i.d $a1, %got64_pc_lo20(G)
+-; LA64LARGENOPIC-NEXT:    lu52i.d $a1, $a1, %got64_pc_hi12(G)
+-; LA64LARGENOPIC-NEXT:    ldx.d $a0, $a1, $a0
++; LA64LARGENOPIC-NEXT:    addi.d $t8, $zero, %got_pc_lo12(G)
++; LA64LARGENOPIC-NEXT:    lu32i.d $t8, %got64_pc_lo20(G)
++; LA64LARGENOPIC-NEXT:    lu52i.d $t8, $t8, %got64_pc_hi12(G)
++; LA64LARGENOPIC-NEXT:    ldx.d $a0, $t8, $a0
+ ; LA64LARGENOPIC-NEXT:    ld.w $a0, $a0, 0
+ ; LA64LARGENOPIC-NEXT:    pcalau12i $a0, %pc_hi20(g)
+-; LA64LARGENOPIC-NEXT:    addi.d $a1, $zero, %pc_lo12(g)
+-; LA64LARGENOPIC-NEXT:    lu32i.d $a1, %pc64_lo20(g)
+-; LA64LARGENOPIC-NEXT:    lu52i.d $a1, $a1, %pc64_hi12(g)
+-; LA64LARGENOPIC-NEXT:    add.d $a0, $a1, $a0
++; LA64LARGENOPIC-NEXT:    addi.d $t8, $zero, %pc_lo12(g)
++; LA64LARGENOPIC-NEXT:    lu32i.d $t8, %pc64_lo20(g)
++; LA64LARGENOPIC-NEXT:    lu52i.d $t8, $t8, %pc64_hi12(g)
++; LA64LARGENOPIC-NEXT:    add.d $a0, $t8, $a0
+ ; LA64LARGENOPIC-NEXT:    ld.w $a0, $a0, 0
+ ; LA64LARGENOPIC-NEXT:    ret
+ ;
+ ; LA64LARGEPIC-LABEL: foo:
+ ; LA64LARGEPIC:       # %bb.0:
+ ; LA64LARGEPIC-NEXT:    pcalau12i $a0, %got_pc_hi20(G)
+-; LA64LARGEPIC-NEXT:    addi.d $a1, $zero, %got_pc_lo12(G)
+-; LA64LARGEPIC-NEXT:    lu32i.d $a1, %got64_pc_lo20(G)
+-; LA64LARGEPIC-NEXT:    lu52i.d $a1, $a1, %got64_pc_hi12(G)
+-; LA64LARGEPIC-NEXT:    ldx.d $a0, $a1, $a0
++; LA64LARGEPIC-NEXT:    addi.d $t8, $zero, %got_pc_lo12(G)
++; LA64LARGEPIC-NEXT:    lu32i.d $t8, %got64_pc_lo20(G)
++; LA64LARGEPIC-NEXT:    lu52i.d $t8, $t8, %got64_pc_hi12(G)
++; LA64LARGEPIC-NEXT:    ldx.d $a0, $t8, $a0
+ ; LA64LARGEPIC-NEXT:    ld.w $a0, $a0, 0
+ ; LA64LARGEPIC-NEXT:    pcalau12i $a0, %pc_hi20(.Lg$local)
+-; LA64LARGEPIC-NEXT:    addi.d $a1, $zero, %pc_lo12(.Lg$local)
+-; LA64LARGEPIC-NEXT:    lu32i.d $a1, %pc64_lo20(.Lg$local)
+-; LA64LARGEPIC-NEXT:    lu52i.d $a1, $a1, %pc64_hi12(.Lg$local)
+-; LA64LARGEPIC-NEXT:    add.d $a0, $a1, $a0
++; LA64LARGEPIC-NEXT:    addi.d $t8, $zero, %pc_lo12(.Lg$local)
++; LA64LARGEPIC-NEXT:    lu32i.d $t8, %pc64_lo20(.Lg$local)
++; LA64LARGEPIC-NEXT:    lu52i.d $t8, $t8, %pc64_hi12(.Lg$local)
++; LA64LARGEPIC-NEXT:    add.d $a0, $t8, $a0
+ ; LA64LARGEPIC-NEXT:    ld.w $a0, $a0, 0
+ ; LA64LARGEPIC-NEXT:    ret
+   %V = load volatile i32, ptr @G
+diff --git a/llvm/test/CodeGen/LoongArch/psabi-restricted-scheduling.ll b/llvm/test/CodeGen/LoongArch/psabi-restricted-scheduling.ll
+index a515939b9c2b..474436a0126b 100644
+--- a/llvm/test/CodeGen/LoongArch/psabi-restricted-scheduling.ll
++++ b/llvm/test/CodeGen/LoongArch/psabi-restricted-scheduling.ll
+@@ -48,13 +48,13 @@ define void @foo() nounwind {
+ ; MEDIUM_SCH-NEXT:    addi.d $sp, $sp, -16
+ ; MEDIUM_SCH-NEXT:    st.d $ra, $sp, 8 # 8-byte Folded Spill
+ ; MEDIUM_SCH-NEXT:    pcalau12i $a0, %got_pc_hi20(G)
+-; MEDIUM_SCH-NEXT:    pcaddu18i $ra, %call36(bar)
+ ; MEDIUM_SCH-NEXT:    ld.d $a0, $a0, %got_pc_lo12(G)
+ ; MEDIUM_SCH-NEXT:    ld.d $a0, $a0, 0
+ ; MEDIUM_SCH-NEXT:    pcalau12i $a0, %pc_hi20(g)
+ ; MEDIUM_SCH-NEXT:    addi.d $a0, $a0, %pc_lo12(g)
+ ; MEDIUM_SCH-NEXT:    ld.d $a0, $a0, 0
+ ; MEDIUM_SCH-NEXT:    ori $a0, $zero, 1
++; MEDIUM_SCH-NEXT:    pcaddu18i $ra, %call36(bar)
+ ; MEDIUM_SCH-NEXT:    jirl $ra, $ra, 0
+ ; MEDIUM_SCH-NEXT:    pcalau12i $a0, %ie_pc_hi20(gd)
+ ; MEDIUM_SCH-NEXT:    ld.d $a0, $a0, %ie_pc_lo12(gd)
+@@ -74,41 +74,41 @@ define void @foo() nounwind {
+ ; LARGE_NO_SCH-NEXT:    addi.d $sp, $sp, -16
+ ; LARGE_NO_SCH-NEXT:    st.d $ra, $sp, 8 # 8-byte Folded Spill
+ ; LARGE_NO_SCH-NEXT:    pcalau12i $a0, %got_pc_hi20(G)
+-; LARGE_NO_SCH-NEXT:    addi.d $a1, $zero, %got_pc_lo12(G)
+-; LARGE_NO_SCH-NEXT:    lu32i.d $a1, %got64_pc_lo20(G)
+-; LARGE_NO_SCH-NEXT:    lu52i.d $a1, $a1, %got64_pc_hi12(G)
+-; LARGE_NO_SCH-NEXT:    ldx.d $a0, $a1, $a0
++; LARGE_NO_SCH-NEXT:    addi.d $t8, $zero, %got_pc_lo12(G)
++; LARGE_NO_SCH-NEXT:    lu32i.d $t8, %got64_pc_lo20(G)
++; LARGE_NO_SCH-NEXT:    lu52i.d $t8, $t8, %got64_pc_hi12(G)
++; LARGE_NO_SCH-NEXT:    ldx.d $a0, $t8, $a0
+ ; LARGE_NO_SCH-NEXT:    ld.d $a0, $a0, 0
+ ; LARGE_NO_SCH-NEXT:    pcalau12i $a0, %pc_hi20(g)
+-; LARGE_NO_SCH-NEXT:    addi.d $a1, $zero, %pc_lo12(g)
+-; LARGE_NO_SCH-NEXT:    lu32i.d $a1, %pc64_lo20(g)
+-; LARGE_NO_SCH-NEXT:    lu52i.d $a1, $a1, %pc64_hi12(g)
+-; LARGE_NO_SCH-NEXT:    add.d $a0, $a1, $a0
++; LARGE_NO_SCH-NEXT:    addi.d $t8, $zero, %pc_lo12(g)
++; LARGE_NO_SCH-NEXT:    lu32i.d $t8, %pc64_lo20(g)
++; LARGE_NO_SCH-NEXT:    lu52i.d $t8, $t8, %pc64_hi12(g)
++; LARGE_NO_SCH-NEXT:    add.d $a0, $t8, $a0
+ ; LARGE_NO_SCH-NEXT:    ld.d $a0, $a0, 0
+ ; LARGE_NO_SCH-NEXT:    ori $a0, $zero, 1
+-; LARGE_NO_SCH-NEXT:    pcalau12i $a1, %got_pc_hi20(bar)
+-; LARGE_NO_SCH-NEXT:    addi.d $ra, $zero, %got_pc_lo12(bar)
+-; LARGE_NO_SCH-NEXT:    lu32i.d $ra, %got64_pc_lo20(bar)
+-; LARGE_NO_SCH-NEXT:    lu52i.d $ra, $ra, %got64_pc_hi12(bar)
+-; LARGE_NO_SCH-NEXT:    ldx.d $ra, $ra, $a1
++; LARGE_NO_SCH-NEXT:    pcalau12i $ra, %got_pc_hi20(bar)
++; LARGE_NO_SCH-NEXT:    addi.d $t8, $zero, %got_pc_lo12(bar)
++; LARGE_NO_SCH-NEXT:    lu32i.d $t8, %got64_pc_lo20(bar)
++; LARGE_NO_SCH-NEXT:    lu52i.d $t8, $t8, %got64_pc_hi12(bar)
++; LARGE_NO_SCH-NEXT:    ldx.d $ra, $t8, $ra
+ ; LARGE_NO_SCH-NEXT:    jirl $ra, $ra, 0
+ ; LARGE_NO_SCH-NEXT:    pcalau12i $a0, %ie_pc_hi20(gd)
+-; LARGE_NO_SCH-NEXT:    addi.d $a1, $zero, %ie_pc_lo12(gd)
+-; LARGE_NO_SCH-NEXT:    lu32i.d $a1, %ie64_pc_lo20(gd)
+-; LARGE_NO_SCH-NEXT:    lu52i.d $a1, $a1, %ie64_pc_hi12(gd)
+-; LARGE_NO_SCH-NEXT:    ldx.d $a0, $a1, $a0
++; LARGE_NO_SCH-NEXT:    addi.d $t8, $zero, %ie_pc_lo12(gd)
++; LARGE_NO_SCH-NEXT:    lu32i.d $t8, %ie64_pc_lo20(gd)
++; LARGE_NO_SCH-NEXT:    lu52i.d $t8, $t8, %ie64_pc_hi12(gd)
++; LARGE_NO_SCH-NEXT:    ldx.d $a0, $t8, $a0
+ ; LARGE_NO_SCH-NEXT:    ldx.d $a0, $a0, $tp
+ ; LARGE_NO_SCH-NEXT:    pcalau12i $a0, %ie_pc_hi20(ld)
+-; LARGE_NO_SCH-NEXT:    addi.d $a1, $zero, %ie_pc_lo12(ld)
+-; LARGE_NO_SCH-NEXT:    lu32i.d $a1, %ie64_pc_lo20(ld)
+-; LARGE_NO_SCH-NEXT:    lu52i.d $a1, $a1, %ie64_pc_hi12(ld)
+-; LARGE_NO_SCH-NEXT:    ldx.d $a0, $a1, $a0
++; LARGE_NO_SCH-NEXT:    addi.d $t8, $zero, %ie_pc_lo12(ld)
++; LARGE_NO_SCH-NEXT:    lu32i.d $t8, %ie64_pc_lo20(ld)
++; LARGE_NO_SCH-NEXT:    lu52i.d $t8, $t8, %ie64_pc_hi12(ld)
++; LARGE_NO_SCH-NEXT:    ldx.d $a0, $t8, $a0
+ ; LARGE_NO_SCH-NEXT:    ldx.d $a0, $a0, $tp
+ ; LARGE_NO_SCH-NEXT:    pcalau12i $a0, %ie_pc_hi20(ie)
+-; LARGE_NO_SCH-NEXT:    addi.d $a1, $zero, %ie_pc_lo12(ie)
+-; LARGE_NO_SCH-NEXT:    lu32i.d $a1, %ie64_pc_lo20(ie)
+-; LARGE_NO_SCH-NEXT:    lu52i.d $a1, $a1, %ie64_pc_hi12(ie)
+-; LARGE_NO_SCH-NEXT:    ldx.d $a0, $a1, $a0
++; LARGE_NO_SCH-NEXT:    addi.d $t8, $zero, %ie_pc_lo12(ie)
++; LARGE_NO_SCH-NEXT:    lu32i.d $t8, %ie64_pc_lo20(ie)
++; LARGE_NO_SCH-NEXT:    lu52i.d $t8, $t8, %ie64_pc_hi12(ie)
++; LARGE_NO_SCH-NEXT:    ldx.d $a0, $t8, $a0
+ ; LARGE_NO_SCH-NEXT:    ldx.d $a0, $a0, $tp
+ ; LARGE_NO_SCH-NEXT:    ld.d $ra, $sp, 8 # 8-byte Folded Reload
+ ; LARGE_NO_SCH-NEXT:    addi.d $sp, $sp, 16
+@@ -118,42 +118,42 @@ define void @foo() nounwind {
+ ; LARGE_SCH:       # %bb.0:
+ ; LARGE_SCH-NEXT:    addi.d $sp, $sp, -16
+ ; LARGE_SCH-NEXT:    st.d $ra, $sp, 8 # 8-byte Folded Spill
+-; LARGE_SCH-NEXT:    addi.d $a1, $zero, %got_pc_lo12(G)
+ ; LARGE_SCH-NEXT:    pcalau12i $a0, %got_pc_hi20(G)
+-; LARGE_SCH-NEXT:    addi.d $ra, $zero, %got_pc_lo12(bar)
+-; LARGE_SCH-NEXT:    lu32i.d $a1, %got64_pc_lo20(G)
+-; LARGE_SCH-NEXT:    lu32i.d $ra, %got64_pc_lo20(bar)
+-; LARGE_SCH-NEXT:    lu52i.d $a1, $a1, %got64_pc_hi12(G)
+-; LARGE_SCH-NEXT:    lu52i.d $ra, $ra, %got64_pc_hi12(bar)
+-; LARGE_SCH-NEXT:    ldx.d $a0, $a1, $a0
+-; LARGE_SCH-NEXT:    addi.d $a1, $zero, %pc_lo12(g)
+-; LARGE_SCH-NEXT:    lu32i.d $a1, %pc64_lo20(g)
+-; LARGE_SCH-NEXT:    lu52i.d $a1, $a1, %pc64_hi12(g)
++; LARGE_SCH-NEXT:    addi.d $t8, $zero, %got_pc_lo12(G)
++; LARGE_SCH-NEXT:    lu32i.d $t8, %got64_pc_lo20(G)
++; LARGE_SCH-NEXT:    lu52i.d $t8, $t8, %got64_pc_hi12(G)
++; LARGE_SCH-NEXT:    ldx.d $a0, $t8, $a0
+ ; LARGE_SCH-NEXT:    ld.d $a0, $a0, 0
+ ; LARGE_SCH-NEXT:    pcalau12i $a0, %pc_hi20(g)
+-; LARGE_SCH-NEXT:    add.d $a0, $a1, $a0
+-; LARGE_SCH-NEXT:    pcalau12i $a1, %got_pc_hi20(bar)
++; LARGE_SCH-NEXT:    addi.d $t8, $zero, %pc_lo12(g)
++; LARGE_SCH-NEXT:    lu32i.d $t8, %pc64_lo20(g)
++; LARGE_SCH-NEXT:    lu52i.d $t8, $t8, %pc64_hi12(g)
++; LARGE_SCH-NEXT:    add.d $a0, $t8, $a0
+ ; LARGE_SCH-NEXT:    ld.d $a0, $a0, 0
+-; LARGE_SCH-NEXT:    ldx.d $ra, $ra, $a1
+ ; LARGE_SCH-NEXT:    ori $a0, $zero, 1
++; LARGE_SCH-NEXT:    pcalau12i $ra, %got_pc_hi20(bar)
++; LARGE_SCH-NEXT:    addi.d $t8, $zero, %got_pc_lo12(bar)
++; LARGE_SCH-NEXT:    lu32i.d $t8, %got64_pc_lo20(bar)
++; LARGE_SCH-NEXT:    lu52i.d $t8, $t8, %got64_pc_hi12(bar)
++; LARGE_SCH-NEXT:    ldx.d $ra, $t8, $ra
+ ; LARGE_SCH-NEXT:    jirl $ra, $ra, 0
+-; LARGE_SCH-NEXT:    addi.d $a1, $zero, %ie_pc_lo12(gd)
+ ; LARGE_SCH-NEXT:    pcalau12i $a0, %ie_pc_hi20(gd)
+-; LARGE_SCH-NEXT:    lu32i.d $a1, %ie64_pc_lo20(gd)
+-; LARGE_SCH-NEXT:    lu52i.d $a1, $a1, %ie64_pc_hi12(gd)
+-; LARGE_SCH-NEXT:    ldx.d $a0, $a1, $a0
+-; LARGE_SCH-NEXT:    addi.d $a1, $zero, %ie_pc_lo12(ld)
+-; LARGE_SCH-NEXT:    lu32i.d $a1, %ie64_pc_lo20(ld)
+-; LARGE_SCH-NEXT:    lu52i.d $a1, $a1, %ie64_pc_hi12(ld)
++; LARGE_SCH-NEXT:    addi.d $t8, $zero, %ie_pc_lo12(gd)
++; LARGE_SCH-NEXT:    lu32i.d $t8, %ie64_pc_lo20(gd)
++; LARGE_SCH-NEXT:    lu52i.d $t8, $t8, %ie64_pc_hi12(gd)
++; LARGE_SCH-NEXT:    ldx.d $a0, $t8, $a0
+ ; LARGE_SCH-NEXT:    ldx.d $a0, $a0, $tp
+ ; LARGE_SCH-NEXT:    pcalau12i $a0, %ie_pc_hi20(ld)
+-; LARGE_SCH-NEXT:    ldx.d $a0, $a1, $a0
+-; LARGE_SCH-NEXT:    addi.d $a1, $zero, %ie_pc_lo12(ie)
+-; LARGE_SCH-NEXT:    lu32i.d $a1, %ie64_pc_lo20(ie)
+-; LARGE_SCH-NEXT:    lu52i.d $a1, $a1, %ie64_pc_hi12(ie)
++; LARGE_SCH-NEXT:    addi.d $t8, $zero, %ie_pc_lo12(ld)
++; LARGE_SCH-NEXT:    lu32i.d $t8, %ie64_pc_lo20(ld)
++; LARGE_SCH-NEXT:    lu52i.d $t8, $t8, %ie64_pc_hi12(ld)
++; LARGE_SCH-NEXT:    ldx.d $a0, $t8, $a0
+ ; LARGE_SCH-NEXT:    ldx.d $a0, $a0, $tp
+ ; LARGE_SCH-NEXT:    pcalau12i $a0, %ie_pc_hi20(ie)
+-; LARGE_SCH-NEXT:    ldx.d $a0, $a1, $a0
++; LARGE_SCH-NEXT:    addi.d $t8, $zero, %ie_pc_lo12(ie)
++; LARGE_SCH-NEXT:    lu32i.d $t8, %ie64_pc_lo20(ie)
++; LARGE_SCH-NEXT:    lu52i.d $t8, $t8, %ie64_pc_hi12(ie)
++; LARGE_SCH-NEXT:    ldx.d $a0, $t8, $a0
+ ; LARGE_SCH-NEXT:    ldx.d $a0, $a0, $tp
+ ; LARGE_SCH-NEXT:    ld.d $ra, $sp, 8 # 8-byte Folded Reload
+ ; LARGE_SCH-NEXT:    addi.d $sp, $sp, 16
+diff --git a/llvm/test/CodeGen/LoongArch/tls-models.ll b/llvm/test/CodeGen/LoongArch/tls-models.ll
+index a2a3792a6a54..3994df1da716 100644
+--- a/llvm/test/CodeGen/LoongArch/tls-models.ll
++++ b/llvm/test/CodeGen/LoongArch/tls-models.ll
+@@ -45,15 +45,15 @@ define ptr @f1() nounwind {
+ ; LA64LARGEPIC-NEXT:    addi.d $sp, $sp, -16
+ ; LA64LARGEPIC-NEXT:    st.d $ra, $sp, 8 # 8-byte Folded Spill
+ ; LA64LARGEPIC-NEXT:    pcalau12i $a0, %gd_pc_hi20(unspecified)
+-; LA64LARGEPIC-NEXT:    addi.d $a1, $zero, %got_pc_lo12(unspecified)
+-; LA64LARGEPIC-NEXT:    lu32i.d $a1, %got64_pc_lo20(unspecified)
+-; LA64LARGEPIC-NEXT:    lu52i.d $a1, $a1, %got64_pc_hi12(unspecified)
+-; LA64LARGEPIC-NEXT:    add.d $a0, $a1, $a0
+-; LA64LARGEPIC-NEXT:    pcalau12i $a1, %pc_hi20(__tls_get_addr)
+-; LA64LARGEPIC-NEXT:    addi.d $ra, $zero, %pc_lo12(__tls_get_addr)
+-; LA64LARGEPIC-NEXT:    lu32i.d $ra, %pc64_lo20(__tls_get_addr)
+-; LA64LARGEPIC-NEXT:    lu52i.d $ra, $ra, %pc64_hi12(__tls_get_addr)
+-; LA64LARGEPIC-NEXT:    add.d $ra, $ra, $a1
++; LA64LARGEPIC-NEXT:    addi.d $t8, $zero, %got_pc_lo12(unspecified)
++; LA64LARGEPIC-NEXT:    lu32i.d $t8, %got64_pc_lo20(unspecified)
++; LA64LARGEPIC-NEXT:    lu52i.d $t8, $t8, %got64_pc_hi12(unspecified)
++; LA64LARGEPIC-NEXT:    add.d $a0, $t8, $a0
++; LA64LARGEPIC-NEXT:    pcalau12i $ra, %pc_hi20(__tls_get_addr)
++; LA64LARGEPIC-NEXT:    addi.d $t8, $zero, %pc_lo12(__tls_get_addr)
++; LA64LARGEPIC-NEXT:    lu32i.d $t8, %pc64_lo20(__tls_get_addr)
++; LA64LARGEPIC-NEXT:    lu52i.d $t8, $t8, %pc64_hi12(__tls_get_addr)
++; LA64LARGEPIC-NEXT:    add.d $ra, $t8, $ra
+ ; LA64LARGEPIC-NEXT:    jirl $ra, $ra, 0
+ ; LA64LARGEPIC-NEXT:    ld.d $ra, $sp, 8 # 8-byte Folded Reload
+ ; LA64LARGEPIC-NEXT:    addi.d $sp, $sp, 16
+@@ -76,10 +76,10 @@ define ptr @f1() nounwind {
+ ; LA64LARGENOPIC-LABEL: f1:
+ ; LA64LARGENOPIC:       # %bb.0: # %entry
+ ; LA64LARGENOPIC-NEXT:    pcalau12i $a0, %ie_pc_hi20(unspecified)
+-; LA64LARGENOPIC-NEXT:    addi.d $a1, $zero, %ie_pc_lo12(unspecified)
+-; LA64LARGENOPIC-NEXT:    lu32i.d $a1, %ie64_pc_lo20(unspecified)
+-; LA64LARGENOPIC-NEXT:    lu52i.d $a1, $a1, %ie64_pc_hi12(unspecified)
+-; LA64LARGENOPIC-NEXT:    ldx.d $a0, $a1, $a0
++; LA64LARGENOPIC-NEXT:    addi.d $t8, $zero, %ie_pc_lo12(unspecified)
++; LA64LARGENOPIC-NEXT:    lu32i.d $t8, %ie64_pc_lo20(unspecified)
++; LA64LARGENOPIC-NEXT:    lu52i.d $t8, $t8, %ie64_pc_hi12(unspecified)
++; LA64LARGENOPIC-NEXT:    ldx.d $a0, $t8, $a0
+ ; LA64LARGENOPIC-NEXT:    add.d $a0, $a0, $tp
+ ; LA64LARGENOPIC-NEXT:    ret
+ entry:
+@@ -116,15 +116,15 @@ define ptr @f2() nounwind {
+ ; LA64LARGEPIC-NEXT:    addi.d $sp, $sp, -16
+ ; LA64LARGEPIC-NEXT:    st.d $ra, $sp, 8 # 8-byte Folded Spill
+ ; LA64LARGEPIC-NEXT:    pcalau12i $a0, %ld_pc_hi20(ld)
+-; LA64LARGEPIC-NEXT:    addi.d $a1, $zero, %got_pc_lo12(ld)
+-; LA64LARGEPIC-NEXT:    lu32i.d $a1, %got64_pc_lo20(ld)
+-; LA64LARGEPIC-NEXT:    lu52i.d $a1, $a1, %got64_pc_hi12(ld)
+-; LA64LARGEPIC-NEXT:    add.d $a0, $a1, $a0
+-; LA64LARGEPIC-NEXT:    pcalau12i $a1, %pc_hi20(__tls_get_addr)
+-; LA64LARGEPIC-NEXT:    addi.d $ra, $zero, %pc_lo12(__tls_get_addr)
+-; LA64LARGEPIC-NEXT:    lu32i.d $ra, %pc64_lo20(__tls_get_addr)
+-; LA64LARGEPIC-NEXT:    lu52i.d $ra, $ra, %pc64_hi12(__tls_get_addr)
+-; LA64LARGEPIC-NEXT:    add.d $ra, $ra, $a1
++; LA64LARGEPIC-NEXT:    addi.d $t8, $zero, %got_pc_lo12(ld)
++; LA64LARGEPIC-NEXT:    lu32i.d $t8, %got64_pc_lo20(ld)
++; LA64LARGEPIC-NEXT:    lu52i.d $t8, $t8, %got64_pc_hi12(ld)
++; LA64LARGEPIC-NEXT:    add.d $a0, $t8, $a0
++; LA64LARGEPIC-NEXT:    pcalau12i $ra, %pc_hi20(__tls_get_addr)
++; LA64LARGEPIC-NEXT:    addi.d $t8, $zero, %pc_lo12(__tls_get_addr)
++; LA64LARGEPIC-NEXT:    lu32i.d $t8, %pc64_lo20(__tls_get_addr)
++; LA64LARGEPIC-NEXT:    lu52i.d $t8, $t8, %pc64_hi12(__tls_get_addr)
++; LA64LARGEPIC-NEXT:    add.d $ra, $t8, $ra
+ ; LA64LARGEPIC-NEXT:    jirl $ra, $ra, 0
+ ; LA64LARGEPIC-NEXT:    ld.d $ra, $sp, 8 # 8-byte Folded Reload
+ ; LA64LARGEPIC-NEXT:    addi.d $sp, $sp, 16
+@@ -147,10 +147,10 @@ define ptr @f2() nounwind {
+ ; LA64LARGENOPIC-LABEL: f2:
+ ; LA64LARGENOPIC:       # %bb.0: # %entry
+ ; LA64LARGENOPIC-NEXT:    pcalau12i $a0, %ie_pc_hi20(ld)
+-; LA64LARGENOPIC-NEXT:    addi.d $a1, $zero, %ie_pc_lo12(ld)
+-; LA64LARGENOPIC-NEXT:    lu32i.d $a1, %ie64_pc_lo20(ld)
+-; LA64LARGENOPIC-NEXT:    lu52i.d $a1, $a1, %ie64_pc_hi12(ld)
+-; LA64LARGENOPIC-NEXT:    ldx.d $a0, $a1, $a0
++; LA64LARGENOPIC-NEXT:    addi.d $t8, $zero, %ie_pc_lo12(ld)
++; LA64LARGENOPIC-NEXT:    lu32i.d $t8, %ie64_pc_lo20(ld)
++; LA64LARGENOPIC-NEXT:    lu52i.d $t8, $t8, %ie64_pc_hi12(ld)
++; LA64LARGENOPIC-NEXT:    ldx.d $a0, $t8, $a0
+ ; LA64LARGENOPIC-NEXT:    add.d $a0, $a0, $tp
+ ; LA64LARGENOPIC-NEXT:    ret
+ entry:
+@@ -177,10 +177,10 @@ define ptr @f3() nounwind {
+ ; LA64LARGEPIC-LABEL: f3:
+ ; LA64LARGEPIC:       # %bb.0: # %entry
+ ; LA64LARGEPIC-NEXT:    pcalau12i $a0, %ie_pc_hi20(ie)
+-; LA64LARGEPIC-NEXT:    addi.d $a1, $zero, %ie_pc_lo12(ie)
+-; LA64LARGEPIC-NEXT:    lu32i.d $a1, %ie64_pc_lo20(ie)
+-; LA64LARGEPIC-NEXT:    lu52i.d $a1, $a1, %ie64_pc_hi12(ie)
+-; LA64LARGEPIC-NEXT:    ldx.d $a0, $a1, $a0
++; LA64LARGEPIC-NEXT:    addi.d $t8, $zero, %ie_pc_lo12(ie)
++; LA64LARGEPIC-NEXT:    lu32i.d $t8, %ie64_pc_lo20(ie)
++; LA64LARGEPIC-NEXT:    lu52i.d $t8, $t8, %ie64_pc_hi12(ie)
++; LA64LARGEPIC-NEXT:    ldx.d $a0, $t8, $a0
+ ; LA64LARGEPIC-NEXT:    add.d $a0, $a0, $tp
+ ; LA64LARGEPIC-NEXT:    ret
+ ;
+@@ -201,10 +201,10 @@ define ptr @f3() nounwind {
+ ; LA64LARGENOPIC-LABEL: f3:
+ ; LA64LARGENOPIC:       # %bb.0: # %entry
+ ; LA64LARGENOPIC-NEXT:    pcalau12i $a0, %ie_pc_hi20(ie)
+-; LA64LARGENOPIC-NEXT:    addi.d $a1, $zero, %ie_pc_lo12(ie)
+-; LA64LARGENOPIC-NEXT:    lu32i.d $a1, %ie64_pc_lo20(ie)
+-; LA64LARGENOPIC-NEXT:    lu52i.d $a1, $a1, %ie64_pc_hi12(ie)
+-; LA64LARGENOPIC-NEXT:    ldx.d $a0, $a1, $a0
++; LA64LARGENOPIC-NEXT:    addi.d $t8, $zero, %ie_pc_lo12(ie)
++; LA64LARGENOPIC-NEXT:    lu32i.d $t8, %ie64_pc_lo20(ie)
++; LA64LARGENOPIC-NEXT:    lu52i.d $t8, $t8, %ie64_pc_hi12(ie)
++; LA64LARGENOPIC-NEXT:    ldx.d $a0, $t8, $a0
+ ; LA64LARGENOPIC-NEXT:    add.d $a0, $a0, $tp
+ ; LA64LARGENOPIC-NEXT:    ret
+ entry:
+-- 
+2.20.1
+

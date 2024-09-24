@@ -255,3 +255,30 @@ loongarch/improve/0004-LoongArch-Precommit-a-test-for-atomic-cmpxchg-optmiz.patc
 loongarch/improve/0005-LoongArch-Improve-codegen-for-atomic-cmpxchg-ops-693.patch
 loongarch/improve/0006-LoongArch-Override-LoongArchTargetLowering-getExtend.patch
 loongarch/improve/0007-Memory-Call-__clear_cache-in-InvalidateInstructionCa.patch
+
+# Backport some fixes and support, mainly including -mcmodel option, call36
+# relocation, -march=la64v1.0/la64v1.1, -msimd option, vector shuffle, default
+# enabling of 128-bit vector, and assembly support for V1.1 instructions.
+loongarch/0001-Driver-Support-mcmodel-for-LoongArch-72514.patch
+loongarch/0002-BinaryFormat-LoongArch-Define-psABI-v2.20-relocs-for.patch
+loongarch/0003-lld-LoongArch-Support-the-R_LARCH_CALL36-relocation-.patch
+loongarch/0004-lld-test-LoongArch-Remove-the-test-for-R_LARCH_CALL3.patch
+loongarch/0005-Revert-lld-test-LoongArch-Remove-the-test-for-R_LARC.patch
+loongarch/0006-LoongArch-Emit-function-call-code-sequence-as-PCADDU.patch
+loongarch/0007-LoongArch-Pre-commit-test-for-76555.-NFC.patch
+loongarch/0008-LoongArch-test-Remove-the-FIXME-in-psabi-restricted-.patch
+loongarch/0009-LoongArch-Reimplement-the-expansion-of-PseudoLA-_LAR.patch
+loongarch/0010-LoongArch-Fix-Wunused-variable-in-LoongArchExpandPse.patch
+loongarch/0011-lld-ELF-Add-a-corner-testcase-for-elf-getLoongArchPa.patch
+loongarch/0012-lld-LoongArch-Add-a-another-corner-testcase-for-elf-.patch
+loongarch/0013-lld-LoongArch-Handle-extreme-code-model-relocs-accor.patch
+loongarch/0014-LoongArch-clang-Add-support-for-option-msimd-and-mac.patch
+loongarch/0015-LoongArch-clang-Modify-loongarch-msimd.c-to-avoid-gr.patch
+loongarch/0016-LoongArch-CodeGen-Implement-128-bit-and-256-bit-vect.patch
+loongarch/0017-LoongArch-Enable-128-bits-vector-by-default-100056.patch
+loongarch/0018-LoongArch-Add-LoongArch-V1.1-instructions-definition.patch
+loongarch/0019-LoongArch-Add-definitions-and-feature-frecipe-for-FP.patch
+loongarch/0020-LoongArch-Support-march-la64v1.0-and-march-la64v1.1-.patch
+loongarch/0021-LoongArch-Support-la664-100068.patch
+loongarch/0022-LoongArch-Fix-test-issue-of-init-loongarch.c.patch
+loongarch/0023-LoongArch-Remove-experimental-auto-vec-feature.-1000.patch

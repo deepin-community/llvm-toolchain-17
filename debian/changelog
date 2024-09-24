@@ -1,3 +1,15 @@
+llvm-toolchain-17 (1:17.0.6-5deepin5) unstable; urgency=medium
+
+  * Backport support for the -mcmodel option in LoongArch
+  * Backport suppoprt for call36 relocation and update the implementation
+    of the medium and extreme code models
+  * Backport assembly support for the V1.1 instructions
+  * Backport support for -march=la64v1.0/la64v1.1 and -msimd options
+  * Backport 128-bit vector support by default, and vector shuffle
+  * Remove the 'auto-vec' feature
+
+ -- Ami-zhang <zhanglimin@loongson.cn>  Tue, 24 Sep 2024 14:49:41 +0800
+
 llvm-toolchain-17 (1:17.0.6-5deepin4) unstable; urgency=medium
 
   * Backport some support for compiler-rt on LoongArch from LLVM 18

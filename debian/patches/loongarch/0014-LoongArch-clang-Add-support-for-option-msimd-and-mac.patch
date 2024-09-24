@@ -1,0 +1,269 @@
+From b0e5225dea19a71b0c2f2168c117ac5032c2d18a Mon Sep 17 00:00:00 2001
+From: Zhaoxin Yang <yangzhaoxin@loongson.cn>
+Date: Tue, 9 Jul 2024 14:13:19 +0800
+Subject: [PATCH 14/23] [LoongArch][clang] Add support for option `-msimd=` and
+ macro `__loongarch_simd_width`. (#97984)
+
+(cherry picked from commit 626c7ce33f850831949e4e724016ddbff3a34990)
+---
+ .../clang/Basic/DiagnosticDriverKinds.td      |   2 +
+ clang/include/clang/Driver/Options.td         |   3 +
+ clang/lib/Basic/Targets/LoongArch.cpp         |   8 +-
+ .../lib/Driver/ToolChains/Arch/LoongArch.cpp  |  29 ++++
+ clang/test/Driver/loongarch-msimd.c           | 129 ++++++++++++++++++
+ clang/test/Preprocessor/init-loongarch.c      |   3 +
+ 6 files changed, 172 insertions(+), 2 deletions(-)
+ create mode 100644 clang/test/Driver/loongarch-msimd.c
+
+diff --git a/clang/include/clang/Basic/DiagnosticDriverKinds.td b/clang/include/clang/Basic/DiagnosticDriverKinds.td
+index 6b68bc458b93..060f96118364 100644
+--- a/clang/include/clang/Basic/DiagnosticDriverKinds.td
++++ b/clang/include/clang/Basic/DiagnosticDriverKinds.td
+@@ -757,6 +757,8 @@ def err_drv_loongarch_wrong_fpu_width_for_lasx : Error<
+   "wrong fpu width; LASX depends on 64-bit FPU.">;
+ def err_drv_loongarch_invalid_simd_option_combination : Error<
+   "invalid option combination; LASX depends on LSX.">;
++def err_drv_loongarch_invalid_msimd_EQ : Error<
++  "invalid argument '%0' to -msimd=; must be one of: none, lsx, lasx">;
+ 
+ def err_drv_expand_response_file : Error<
+   "failed to expand response file: %0">;
+diff --git a/clang/include/clang/Driver/Options.td b/clang/include/clang/Driver/Options.td
+index 344c8bd49da7..530bb53ea9b5 100644
+--- a/clang/include/clang/Driver/Options.td
++++ b/clang/include/clang/Driver/Options.td
+@@ -4236,6 +4236,9 @@ def mlasx : Flag<["-"], "mlasx">, Group<m_loongarch_Features_Group>,
+   HelpText<"Enable Loongson Advanced SIMD Extension (LASX).">;
+ def mno_lasx : Flag<["-"], "mno-lasx">, Group<m_loongarch_Features_Group>,
+   HelpText<"Disable Loongson Advanced SIMD Extension (LASX).">;
++def msimd_EQ : Joined<["-"], "msimd=">, Group<m_loongarch_Features_Group>,
++  Flags<[TargetSpecific]>,
++  HelpText<"Select the SIMD extension(s) to be enabled in LoongArch either 'none', 'lsx', 'lasx'.">;
+ def mnop_mcount : Flag<["-"], "mnop-mcount">, HelpText<"Generate mcount/__fentry__ calls as nops. To activate they need to be patched in.">,
+   Flags<[CC1Option]>, Group<m_Group>,
+   MarshallingInfoFlag<CodeGenOpts<"MNopMCount">>;
+diff --git a/clang/lib/Basic/Targets/LoongArch.cpp b/clang/lib/Basic/Targets/LoongArch.cpp
+index 88537989a051..913404240916 100644
+--- a/clang/lib/Basic/Targets/LoongArch.cpp
++++ b/clang/lib/Basic/Targets/LoongArch.cpp
+@@ -208,10 +208,14 @@ void LoongArchTargetInfo::getTargetDefines(const LangOptions &Opts,
+     TuneCPU = ArchName;
+   Builder.defineMacro("__loongarch_tune", Twine('"') + TuneCPU + Twine('"'));
+ 
+-  if (HasFeatureLSX)
++  if (HasFeatureLASX) {
++    Builder.defineMacro("__loongarch_simd_width", "256");
+     Builder.defineMacro("__loongarch_sx", Twine(1));
+-  if (HasFeatureLASX)
+     Builder.defineMacro("__loongarch_asx", Twine(1));
++  } else if (HasFeatureLSX) {
++    Builder.defineMacro("__loongarch_simd_width", "128");
++    Builder.defineMacro("__loongarch_sx", Twine(1));
++  }
+ 
+   StringRef ABI = getABI();
+   if (ABI == "lp64d" || ABI == "lp64f" || ABI == "lp64s")
+diff --git a/clang/lib/Driver/ToolChains/Arch/LoongArch.cpp b/clang/lib/Driver/ToolChains/Arch/LoongArch.cpp
+index 31153a67ad28..2d9c3f810a06 100644
+--- a/clang/lib/Driver/ToolChains/Arch/LoongArch.cpp
++++ b/clang/lib/Driver/ToolChains/Arch/LoongArch.cpp
+@@ -207,6 +207,35 @@ void loongarch::getLoongArchTargetFeatures(const Driver &D,
+     } else /*-mno-lasx*/
+       Features.push_back("-lasx");
+   }
++
++  // Select lsx/lasx feature determined by -msimd=.
++  // Option -msimd= has lower priority than -m[no-]lsx and -m[no-]lasx.
++  if (const Arg *A = Args.getLastArg(options::OPT_msimd_EQ)) {
++    StringRef MSIMD = A->getValue();
++    if (MSIMD == "lsx") {
++      // Option -msimd=lsx depends on 64-bit FPU.
++      // -m*-float and -mfpu=none/0/32 conflict with -mlsx.
++      if (llvm::find(Features, "-d") != Features.end())
++        D.Diag(diag::err_drv_loongarch_wrong_fpu_width) << /*LSX*/ 0;
++      // The previous option does not contain feature -lsx.
++      else if (llvm::find(Features, "-lsx") == Features.end())
++        Features.push_back("+lsx");
++    } else if (MSIMD == "lasx") {
++      // Option -msimd=lasx depends on 64-bit FPU and LSX.
++      // -m*-float and -mfpu=none/0/32 conflict with -mlsx.
++      if (llvm::find(Features, "-d") != Features.end())
++        D.Diag(diag::err_drv_loongarch_wrong_fpu_width) << /*LASX*/ 1;
++      else if (llvm::find(Features, "-lsx") != Features.end())
++        D.Diag(diag::err_drv_loongarch_invalid_simd_option_combination);
++      // The previous option does not contain feature -lasx.
++      else if (llvm::find(Features, "-lasx") == Features.end()) {
++        Features.push_back("+lsx");
++        Features.push_back("+lasx");
++      }
++    } else if (MSIMD != "none") {
++      D.Diag(diag::err_drv_loongarch_invalid_msimd_EQ) << MSIMD;
++    }
++  }
+ }
+ 
+ std::string loongarch::postProcessTargetCPUString(const std::string &CPU,
+diff --git a/clang/test/Driver/loongarch-msimd.c b/clang/test/Driver/loongarch-msimd.c
+new file mode 100644
+index 000000000000..984f3e8bf2bf
+--- /dev/null
++++ b/clang/test/Driver/loongarch-msimd.c
+@@ -0,0 +1,129 @@
++/// Test -msimd options.
++
++/// COM: -msimd=none
++// RUN: %clang --target=loongarch64 -mlasx -msimd=none -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,LASX
++// RUN: %clang --target=loongarch64 -mlasx -mlsx -msimd=none -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,LASX
++
++// RUN: %clang --target=loongarch64 -msimd=none -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++// RUN: %clang --target=loongarch64 -mlasx -mno-lasx -msimd=none -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++// RUN: %clang --target=loongarch64 -mlasx -mno-lasx -mlsx -mno-lsx -msimd=none -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++// RUN: %clang --target=loongarch64 -mlasx -mno-lasx -mno-lsx -msimd=none -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++// RUN: %clang --target=loongarch64 -mlsx -mno-lsx -msimd=none -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++// RUN: %clang --target=loongarch64 -mno-lasx -msimd=none -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++// RUN: %clang --target=loongarch64 -mno-lasx -mlsx -mno-lsx -msimd=none -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++// RUN: %clang --target=loongarch64 -mno-lasx -mno-lsx -msimd=none -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++// RUN: %clang --target=loongarch64 -mno-lsx -msimd=none -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++
++// RUN: %clang --target=loongarch64 -mlasx -mno-lasx -mlsx -msimd=none -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
++// RUN: %clang --target=loongarch64 -mno-lasx -mlsx -msimd=none -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
++// RUN: %clang --target=loongarch64 -mlsx -msimd=none -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
++
++
++/// COM: -msimd=lsx
++// RUN: %clang --target=loongarch64 -mlasx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,LASX
++// RUN: %clang --target=loongarch64 -mlasx -mlsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,LASX
++
++// RUN: %clang --target=loongarch64 -mlasx -mno-lasx -mno-lsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++// RUN: %clang --target=loongarch64 -mlsx -mno-lsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++// RUN: %clang --target=loongarch64 -mno-lasx -mlsx -mno-lsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++// RUN: %clang --target=loongarch64 -mno-lasx -mno-lsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++// RUN: %clang --target=loongarch64 -mno-lsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++// RUN: %clang --target=loongarch64 -mlasx -mno-lasx -mlsx -mno-lsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++
++// RUN: %clang --target=loongarch64 -msimd=lsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
++// RUN: %clang --target=loongarch64 -mlasx -mno-lasx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
++// RUN: %clang --target=loongarch64 -mlsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
++// RUN: %clang --target=loongarch64 -mno-lasx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
++// RUN: %clang --target=loongarch64 -mno-lasx -mlsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
++
++
++/// COM: -msimd=lasx
++// RUN: %clang --target=loongarch64 -msimd=lasx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,LASX
++// RUN: %clang --target=loongarch64 -mlasx -msimd=lasx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,LASX
++// RUN: %clang --target=loongarch64 -mlasx -mlsx -msimd=lasx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,LASX
++// RUN: %clang --target=loongarch64 -mlsx -msimd=lasx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,LASX
++
++// RUN: %clang --target=loongarch64 -mlasx -mno-lasx -msimd=lasx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++// RUN: %clang --target=loongarch64 -mno-lasx -msimd=lasx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=NOLSX,NOLASX
++
++// RUN: %clang --target=loongarch64 -mlasx -mno-lasx -mlsx -msimd=lasx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
++// RUN: %clang --target=loongarch64 -mno-lasx -mlsx -msimd=lasx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
++// RUN: %clang --target=loongarch64 -mlasx -mno-lasx -mlsx -msimd=lsx -fsyntax-only %s -### 2>&1 | \
++// RUN:   grep -o '"-target-feature" "+[[:alnum:]]\+"' | sort -r | \
++// RUN:   FileCheck %s --check-prefixes=LSX,NOLASX
++
++
++// LSX: "-target-feature" "+lsx"
++// LASX: "-target-feature" "+lasx"
++// NOLSX-NOT: "-target-feature" "+lsx"
++// NOLASX-NOT: "-target-feature" "+lasx"
+diff --git a/clang/test/Preprocessor/init-loongarch.c b/clang/test/Preprocessor/init-loongarch.c
+index e235a7283021..154ad82e0f8c 100644
+--- a/clang/test/Preprocessor/init-loongarch.c
++++ b/clang/test/Preprocessor/init-loongarch.c
+@@ -817,6 +817,7 @@
+ // RUN: %clang --target=loongarch64 -mno-lasx -mlsx -x c -E -dM %s -o - \
+ // RUN:   | FileCheck --match-full-lines --check-prefix=MLSX %s
+ // MLSX-NOT: #define __loongarch_asx
++// MLSX: #define __loongarch_simd_width 128
+ // MLSX: #define __loongarch_sx 1
+ 
+ // RUN: %clang --target=loongarch64 -mlasx -x c -E -dM %s -o - \
+@@ -828,6 +829,7 @@
+ // RUN: %clang --target=loongarch64 -mlasx -mlsx -x c -E -dM %s -o - \
+ // RUN:   | FileCheck --match-full-lines --check-prefix=MLASX %s
+ // MLASX: #define __loongarch_asx 1
++// MLASX: #define __loongarch_simd_width 256
+ // MLASX: #define __loongarch_sx 1
+ 
+ // RUN: %clang --target=loongarch64 -mno-lsx -x c -E -dM %s -o - \
+@@ -841,4 +843,5 @@
+ // RUN: %clang --target=loongarch64 -mno-lasx -x c -E -dM %s -o - \
+ // RUN:   | FileCheck --match-full-lines --check-prefix=MNO-LSX %s
+ // MNO-LSX-NOT: #define __loongarch_asx
++// MNO-LSX-NOT: #define __loongarch_simd_width
+ // MNO-LSX-NOT: #define __loongarch_sx
+-- 
+2.20.1
+
